@@ -245,6 +245,43 @@ BIBLION_REDIS_NAMESPACE=team_alice biblion enrich
 
 Process-level env vars override the auto-derived value.
 
+### Named projects — switching databases without `--db`
+
+If you keep several corpora, register each as a **named project** and switch
+between them git-style instead of setting `BIBLION_DB` each time.
+
+```bash
+biblion init data/algae.db          # auto-registers project 'algae', sets it current
+biblion init data/microbiome.db     # auto-registers 'microbiome', now current
+
+biblion project list                # show all (* marks current)
+biblion qc                          # acts on the current project
+biblion use algae                   # switch current
+biblion qc                          # now acts on algae
+```
+
+Full command set:
+
+```bash
+biblion project add <name> <path>   # register an existing DB (--use to make current)
+biblion project use <name>          # set current   (shortcut: biblion use <name>)
+biblion project list                # list projects
+biblion project current             # print current name + path
+biblion project remove <name>       # unregister (does NOT delete the DB file)
+```
+
+**Which database a command uses**, highest priority first:
+
+1. `--db PATH` on the command
+2. `$BIBLION_DB`
+3. the current registered project
+
+So `--db` / `BIBLION_DB` always override the current project — handy for a
+one-off against another DB, or for the concurrent-run pattern above. The
+registry lives at `~/.config/biblion/projects.json` (override with
+`$BIBLION_CONFIG`). `biblion init` auto-registers; `--name` chooses the name,
+`--no-register` skips it.
+
 ### Getting API keys
 
 - **OpenAlex** — no signup; just put your email in `OPENALEX_MAILTO` to

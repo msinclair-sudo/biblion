@@ -174,8 +174,81 @@ def cmd_init(args) -> int:
         )
         print(f"Wrote .env scaffold to {env_path}")
 
+    # Auto-register the new DB as a named project and make it current, so
+    # subsequent commands work without --db. --name overrides the derived name
+    # (filename stem); --no-register opts out.
+    if not getattr(args, 'no_register', False):
+        from . import projects
+        try:
+            chosen = projects.auto_register_on_init(
+                db_path, name=getattr(args, 'name', None))
+            print(f"Registered project '{chosen}' and set it current "
+                  f"(use `biblion project list` to see all).")
+        except projects.ProjectError as e:
+            print(f"[warn] could not register project: {e}")
+
     print("\nNext: edit the .env to add API keys, then try `biblion qc`.")
     return 0
+
+
+def cmd_project(args) -> int:
+    """Manage the named-project registry (add / use / list / remove / current)."""
+    from . import projects
+    sub = args.project_cmd
+
+    if sub in (None, 'list'):
+        projs, current = projects.list_projects()
+        if not projs:
+            print("No projects registered. Add one with "
+                  "`biblion project add <name> <path>`.")
+            return 0
+        width = max(len(n) for n in projs)
+        print("Registered projects (* = current):")
+        for name in sorted(projs):
+            mark = '*' if name == current else ' '
+            print(f"  {mark} {name:<{width}}  {projs[name]}")
+        return 0
+
+    if sub == 'current':
+        projs, current = projects.list_projects()
+        if not current:
+            print("No current project set.")
+            return 1
+        print(f"{current}\t{projs.get(current, '(path unknown)')}")
+        return 0
+
+    if sub == 'add':
+        try:
+            path = projects.add(args.name, args.path,
+                                set_current=args.use, overwrite=args.force)
+        except projects.ProjectError as e:
+            print(f"biblion: {e}")
+            return 2
+        suffix = " (now current)" if (args.use or
+                  projects.list_projects()[1] == args.name) else ""
+        print(f"Registered '{args.name}' -> {path}{suffix}")
+        return 0
+
+    if sub == 'use':
+        try:
+            path = projects.use(args.name)
+        except projects.ProjectError as e:
+            print(f"biblion: {e}")
+            return 2
+        print(f"Current project: {args.name} -> {path}")
+        return 0
+
+    if sub == 'remove':
+        try:
+            projects.remove(args.name)
+        except projects.ProjectError as e:
+            print(f"biblion: {e}")
+            return 2
+        print(f"Removed project '{args.name}' (database file left in place).")
+        return 0
+
+    print(f"biblion: unknown project subcommand {sub!r}")
+    return 2
 
 
 def cmd_enrich(args) -> int:
@@ -1786,6 +1859,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Path to create the SQLite database at')
     si.add_argument('--env-file', type=Path, default=None,
         help='Where to write the .env scaffold (default: ./.env)')
+    si.add_argument('--name', type=str, default=None,
+        help='Project name to register (default: DB filename stem)')
+    si.add_argument('--no-register', action='store_true',
+        help="Don't register the new DB as a named project")
+
+    # Named-project registry: switch between databases without --db.
+    spj = sub.add_parser('project',
+        help='Manage named projects (add / use / list / remove / current)')
+    pjsub = spj.add_subparsers(dest='project_cmd', metavar='SUBCMD')
+    pj_add = pjsub.add_parser('add', help='Register a name -> database path')
+    pj_add.add_argument('name')
+    pj_add.add_argument('path')
+    pj_add.add_argument('--use', action='store_true',
+        help='Also set this project as current')
+    pj_add.add_argument('--force', action='store_true',
+        help='Repoint an existing name to a new path')
+    pj_use = pjsub.add_parser('use', help='Set the current project')
+    pj_use.add_argument('name')
+    pjsub.add_parser('list', help='List registered projects (default)')
+    pjsub.add_parser('current', help='Print the current project name + path')
+    pj_rm = pjsub.add_parser('remove',
+        help='Unregister a project (keeps the DB file)')
+    pj_rm.add_argument('name')
+
+    # `biblion use <name>` — shortcut for `biblion project use <name>`.
+    su = sub.add_parser('use', help='Shortcut for `project use <name>`')
+    su.add_argument('name')
 
     sim = sub.add_parser('import',
         help='Ingest papers from a RIS (.ris) reference file')
@@ -1865,10 +1965,30 @@ def main(argv: list[str] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    # Registry commands manage the project list and don't need a resolved DB.
+    # `use <name>` is a shortcut for `project use <name>`.
+    if args.cmd == 'use':
+        args.project_cmd = 'use'
+        return cmd_project(args)
+    if args.cmd == 'project':
+        return cmd_project(args)
+
     # Most commands need a DB path. `init` is special — it creates one.
     if args.cmd != 'init':
         if args.db is None:
-            args.db = get_db_path()        # raises DatabaseLocationError if unset
+            # Resolution precedence: --db (already in args.db) > $BIBLION_DB >
+            # current registered project. The registry is the lowest-priority,
+            # convenience layer — an explicit --db/env always wins.
+            import os as _os
+            from . import projects as _projects
+            if _os.environ.get('BIBLION_DB'):
+                args.db = get_db_path()
+            else:
+                current = _projects.current_path()
+                if current is not None:
+                    args.db = current
+                else:
+                    args.db = get_db_path()   # raises DatabaseLocationError
 
         # Derive a per-DB Redis namespace and stash it in the env so every
         # subprocess (writer, resolver, pending_resolver, producers) sees

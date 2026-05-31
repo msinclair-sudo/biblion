@@ -256,9 +256,13 @@ class DatabaseLocationError(SystemExit):
 
     def __init__(self) -> None:
         super().__init__(
-            "biblion: no database path configured.\n"
-            "  Set the BIBLION_DB environment variable, pass --db PATH,\n"
-            "  or run `biblion init --db PATH` to create one."
+            "biblion: no database configured.\n"
+            "  Provide one of (highest priority first):\n"
+            "    --db PATH                      explicit path for this command\n"
+            "    BIBLION_DB=PATH                environment variable\n"
+            "    biblion project add <name> <path> && biblion use <name>\n"
+            "                                   register a named project\n"
+            "  Or create a new DB with `biblion init PATH`."
         )
 
 

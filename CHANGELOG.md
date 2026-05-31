@@ -6,6 +6,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
+- **Named project registry** for working with multiple databases. Register DBs
+  by name and switch between them git-style: `biblion project add <name>
+  <path>`, `biblion use <name>`, `biblion project list/current/remove`. DB
+  resolution precedence is `--db` > `$BIBLION_DB` > current registered project,
+  so explicit choices always win and concurrent runs on different DBs stay
+  isolated. `biblion init` auto-registers the new DB and sets it current
+  (`--name` / `--no-register` to control). Registry lives at
+  `~/.config/biblion/projects.json` (override via `$BIBLION_CONFIG`).
 - **Per-field provenance + class-based field resolution** (conflict-resolution
   steps 1+2). New tables `field_observations` (one row per paper/field/source),
   `field_class` (declarative field -> resolution class), `source_trust`
