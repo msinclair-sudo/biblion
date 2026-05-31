@@ -1,0 +1,66 @@
+# Secrets
+.env
+.env.*
+
+# Local dev notes for AI coding agents (not for distribution)
+CLAUDE.md
+
+# Local Claude Code settings / scratch (machine-specific)
+.claude/
+
+# Internal design/discussion docs (not part of the shipped docs)
+docs/conflict_resolution_discussion.md
+
+# Stray temp artifact from an unexpanded shell var
+$TMPDB
+
+# Local scratch / test databases kept outside the package
+testdb/
+test-log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Private RIS reference library (not for distribution)
+ris test set/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log

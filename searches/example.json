@@ -1,0 +1,15 @@
+{
+  "description": "Factorial example search set for testing biblion end-to-end. Theme: microalgae / algal biotechnology. This is a QUANTITATIVE approach, not hand-picked queries: each query is one big boolean string whose AND-groups each hold many OR alternatives (facets x synonyms). In `--mode expand` the search_s2_factorial module takes the Cartesian product of those OR-groups, so one query becomes many distinct Semantic Scholar searches -- every AND/OR combination of the terms. Sub-query counts below assume --mode expand. Run: `biblion search searches/example.json --mode expand --sub-limit 25`. Bump --sub-limit or add facet terms to grow the grid; the query id becomes the `source` tag on every paper it finds.",
+  "queries": [
+    {
+      "id": "lipid_factorial",
+      "title": "Microalgae lipids/biofuel -- organism x target x process (4x3x2 = 24 searches)",
+      "query": "(microalgae OR Chlorella OR Nannochloropsis OR Scenedesmus) AND (lipid OR biodiesel OR biomass) AND (productivity OR cultivation)"
+    },
+    {
+      "id": "cultivation_factorial",
+      "title": "Cultivation systems x driver -- organism x reactor x condition (3x3x4 = 36 searches)",
+      "query": "(microalgae OR cyanobacteria OR diatom) AND (photobioreactor OR raceway OR \"open pond\") AND (nitrogen OR phosphorus OR CO2 OR light)"
+    }
+  ]
+}

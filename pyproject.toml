@@ -1,0 +1,79 @@
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name            = "biblion"
+description     = "Build and maintain a citation graph from OpenAlex, Semantic Scholar, and NCBI"
+readme          = "README.md"
+license         = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors         = [{ name = "Michael Sinclair", email = "jsinclairmichael@gmail.com" }]
+keywords        = ["citations", "bibliometrics", "openalex", "semantic-scholar", "graph"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "redis>=5.0",
+    "requests",
+    "rich>=13.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "build",
+]
+
+[project.scripts]
+biblion = "biblion.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/msinclair-sudo/biblion"
+Issues   = "https://github.com/msinclair-sudo/biblion/issues"
+
+[tool.hatch.version]
+path = "biblion/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["biblion"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "biblion/",
+    "tests/",
+    "searches/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "pyproject.toml",
+]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = ["--strict-markers", "-ra", "--showlocals"]
+
+markers = [
+    "unit:        Fast, no external processes (DB + Redis only, ~ms each)",
+    "integration: Spawns real worker subprocesses; needs Redis + temp DB",
+    "perf:        Asserts query plans / batch-lookup throughput",
+    "slow:        Test takes >5s; skip with -m 'not slow'",
+]
+
+filterwarnings = [
+    "error",
+    "ignore:.*urllib3.*:DeprecationWarning",
+    "ignore::DeprecationWarning:sqlite3",
+]
