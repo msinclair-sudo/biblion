@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Optional
 
-from ..clients.openalex import OpenAlexClient, normalise_doi, reconstruct_abstract
+from ..clients.openalex import (
+    OpenAlexClient, normalise_doi, reconstruct_abstract, parse_biblio,
+)
 from ..cache.records import PaperRecord, CitationRecord
 from ..framework import Module, ModuleResult, ValidationResult
 
@@ -24,7 +26,8 @@ _DEFAULT_THRESHOLD = 0.85
 _TOP_K = 3
 _SELECT = (
     'id,doi,type,title,publication_year,authorships,'
-    'primary_location,cited_by_count,abstract_inverted_index,referenced_works'
+    'primary_location,cited_by_count,abstract_inverted_index,referenced_works,'
+    'biblio,language,ids,publication_date,is_retracted'
 )
 
 
@@ -55,6 +58,7 @@ def _parse_to_record(work: dict, source: str) -> PaperRecord:
         abstract     = reconstruct_abstract(work.get('abstract_inverted_index')),
         pub_type     = (work.get('type') or '').lower() or None,
         cit_count    = work.get('cited_by_count'),
+        **parse_biblio(work),
     )
 
 

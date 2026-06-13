@@ -1,0 +1,103 @@
+{
+  "domain": "armyworm",
+  "corpus": "data/fallworm/nodes.jsonl",
+  "n_docs": 1405,
+  "abbreviation_map": {
+    "faw": "fall armyworm",
+    "ipm": "integrated pest management",
+    "irm": "insecticide resistance management",
+    "rnai": "rna interference",
+    "dsrna": "double stranded rna",
+    "crispr": "clustered regularly interspaced short palindromic repeats",
+    "cas9": "crispr associated protein 9",
+    "lc50": "median lethal concentration",
+    "lc90": "ninety percent lethal concentration",
+    "lc99": "ninety nine percent lethal concentration",
+    "ld50": "median lethal dose",
+    "lt50": "median lethal time",
+    "ec50": "median effective concentration",
+    "gst": "glutathione s-transferase",
+    "care": "carboxylesterase",
+    "mfo": "mixed function oxidase",
+    "ache": "acetylcholinesterase",
+    "ros": "reactive oxygen species",
+    "p450": "cytochrome p450",
+    "cyp": "cytochrome p450",
+    "ugt": "udp glucuronosyltransferase",
+    "abc": "atp binding cassette transporter",
+    "pbo": "piperonyl butoxide",
+    "coi": "cytochrome oxidase subunit i",
+    "kegg": "kyoto encyclopedia of genes and genomes",
+    "npv": "nucleopolyhedrovirus",
+    "sfmnpv": "spodoptera frugiperda multiple nucleopolyhedrovirus",
+    "spfrnpv": "spodoptera frugiperda nucleopolyhedrovirus",
+    "epf": "entomopathogenic fungi",
+    "epn": "entomopathogenic nematodes",
+    "duox": "dual oxidase",
+    "instar": "larval instar",
+    "instars": "larval instars",
+    "vatpase": "vacuolar atpase",
+    "cry": "crystal toxin",
+    "vip": "vegetative insecticidal protein"
+  },
+  "context_disambig": {
+    "bt": [
+      [["bacillus", "thuringiensis", "toxin", "cry", "vip", "maize", "corn", "crop", "transgenic", "resistance", "endotoxin"], "bacillus thuringiensis"]
+    ],
+    "gm": [
+      [["crop", "crops", "maize", "corn", "transgenic", "genetically", "modified", "bt", "trait"], "genetically modified"]
+    ],
+    "rr": [
+      [["resistant", "resistance", "strain", "susceptible", "rs", "ss", "heterozygous", "fold", "vip3aa", "cry"], "homozygous resistant"]
+    ],
+    "rs": [
+      [["resistant", "susceptible", "heterozygous", "rr", "ss", "genotype", "strain"], "heterozygous resistant susceptible"]
+    ],
+    "ss": [
+      [["susceptible", "resistant", "rr", "rs", "strain", "population", "genotype"], "homozygous susceptible"]
+    ],
+    "ai": [
+      [["active", "ingredient", "insecticide", "formulation", "dose", "rate"], "active ingredient"]
+    ]
+  },
+  "soil_conflicts": [
+    {"token": "as", "soil_meaning": "arsenic", "armyworm_df": 858, "armyworm_risk": "almost always the English word 'as'; arsenic essentially never occurs. Catastrophic misfire. MUST be removed/disabled for this domain."},
+    {"token": "ca", "soil_meaning": "calcium", "armyworm_df": 10, "armyworm_risk": "used as 'ca.'/'ca' meaning circa/approximately, never calcium. Misfire."},
+    {"token": "na", "soil_meaning": "not applicable / sodium", "armyworm_df": 18, "armyworm_risk": "'NA medium' (nutrient agar) and Portuguese 'na'; not sodium nor 'not applicable'. Misfire."},
+    {"token": "nd", "soil_meaning": "not detected", "armyworm_df": 6, "armyworm_risk": "'ND-1' mitochondrial NADH-dehydrogenase gene; not 'not detected'. Misfire."},
+    {"token": "cd", "soil_meaning": "cadmium", "armyworm_df": 7, "armyworm_risk": "genuinely cadmium in a few hyperaccumulator/SynCom papers, but off-topic for armyworm biology; low risk but irrelevant. Drop."},
+    {"token": "ag", "soil_meaning": "silver / agricultural", "armyworm_df": 2, "armyworm_risk": "'AG 1051' hybrid name and 'AA/AG' genotype; the soil CONTEXT_DISAMBIG could still misfire on the 'crop/field/management' branch. Drop for this domain."},
+    {"token": "cr", "soil_meaning": "chromium / crop residue", "armyworm_df": 2, "armyworm_risk": "'-Ib-cr' resistance gene suffix and 'PI-Cr' population code; neither chromium nor crop residue. Drop."},
+    {"token": "bc", "soil_meaning": "biochar / bacterial community", "armyworm_df": 1, "armyworm_risk": "'ANCOM-BC' (bias correction) only; not biochar. Drop."},
+    {"token": "ar", "soil_meaning": "arid / aromatic", "armyworm_df": 2, "armyworm_risk": "'SfNPV-Ar' baculovirus strain code; not arid/aromatic. Drop."},
+    {"token": "pi", "soil_meaning": "inorganic phosphate", "armyworm_df": 5, "armyworm_risk": "'trypsin PI' (proteinase inhibitor) and 'primary insomnia'; not inorganic phosphate. Drop."},
+    {"token": "ja", "soil_meaning": "jasmonic acid", "armyworm_df": 7, "armyworm_risk": "ALSO jasmonic acid here (plant-defense signalling). Safe overlap; can keep but it is plant-side, not core entomology."},
+    {"token": "ck", "soil_meaning": "cytokinin", "armyworm_df": 3, "armyworm_risk": "'CK' = control check group, not cytokinin. Misfire. Drop."},
+    {"token": "c", "soil_meaning": "carbon (context)", "armyworm_df": 112, "armyworm_risk": "genus abbreviations ('C. ruficrus') and English; carbon context unlikely but soil CONTEXT_DISAMBIG for 'c' should not be carried over."},
+    {"token": "n", "soil_meaning": "nitrogen (context)", "armyworm_df": 80, "armyworm_risk": "sample size 'n', 'non-', Portuguese 'no/na'; not nitrogen. Drop the soil 'n' context rule."},
+    {"token": "nt", "soil_meaning": "no-tillage / nitrogen treatment", "armyworm_df": 3, "armyworm_risk": "rare and tillage/N-treatment senses absent; drop."},
+    {"token": "ha", "soil_meaning": "hectare", "armyworm_df": 30, "armyworm_risk": "genuinely hectare here ('USD/ha', 'ha of corn'). Safe overlap; keep is acceptable."},
+    {"token": "co2", "soil_meaning": "carbon dioxide", "armyworm_df": 2, "armyworm_risk": "genuinely carbon dioxide (elevated-CO2 papers). Safe overlap; keep is acceptable but low value."}
+  ],
+  "rejected_ambiguous": [
+    {"token": "se", "reason": "Portuguese reflexive 'se' / selenium / Spodoptera exigua — too polysemous to expand."},
+    {"token": "its", "reason": "English 'its' AND ITS rRNA region (df 439); never expand."},
+    {"token": "sc", "reason": "'18.5 SC' (suspension concentrate formulation) vs 'sea cucumber' vs strain codes — unsafe."},
+    {"token": "sg", "reason": "'5 SG' (soluble granule) vs 'sleeve gastrectomy' — unsafe."},
+    {"token": "wp", "reason": "'WP' wettable powder vs 'winter pea' — unsafe."},
+    {"token": "go", "reason": "Gene Ontology vs English 'go' — borderline; left out to be safe."},
+    {"token": "ec", "reason": "'EC' emulsifiable concentrate vs EC50 vs European Commission — unsafe."}
+  ],
+  "integration": {
+    "approach": "per-domain-maps",
+    "summary": "Add named domain dictionaries to text_normalization.py and thread a `domain` argument (default 'soil', preserving current behaviour) through normalize_text -> embed._embed/run_embed -> CLI `embedding --domain`.",
+    "changes": [
+      "biblion/text_normalization.py: rename the existing module-level dicts to SOIL_ABBREVIATION_MAP / SOIL_CONTEXT_DISAMBIG; add ARMYWORM_ABBREVIATION_MAP / ARMYWORM_CONTEXT_DISAMBIG from this brief; build a DOMAIN_MAPS = {'soil': (SOIL_*), 'armyworm': (ARMYWORM_*)} registry. Keep module-level ABBREVIATION_MAP/CONTEXT_DISAMBIG = the soil ones as backward-compatible aliases.",
+      "biblion/text_normalization.py: change expand_abbreviation_in_context(word, context_terms, abbrev_map=ABBREVIATION_MAP, context_disambig=CONTEXT_DISAMBIG) to take the two maps as params (defaulting to the soil aliases). normalize_text(text, ..., domain='soil') resolves DOMAIN_MAPS[domain] and passes them down; raise a clear error on unknown domain.",
+      "biblion/embed.py: add `domain: str = 'soil'` to _embed(...) and run_embed(...); pass it into the two normalize_text(...) calls (line ~90); include it in the manifest stamp as 'embedding_domain'. Update the module docstring note about soil tuning.",
+      "biblion/__main__.py: in cmd_embedding pass domain=args.domain into run_embed; add `sem.add_argument('--domain', default='soil', choices=['soil','armyworm'], help='Abbreviation dictionary domain (default soil)')`. --no-normalize still wins (skips expansion entirely).",
+      "tests: no existing test imports text_normalization (grep-confirmed), so soil defaults keep all current tests green. Optionally add tests/unit/test_text_normalization.py asserting domain='armyworm' expands 'faw'->'fall armyworm' and that 'as' is NOT touched, and domain='soil' still expands 'cd'->'cadmium'."
+    ],
+    "why_not_merged_map": "A single merged map is unsafe: identical tokens carry opposite meanings across domains. 'as' is arsenic in soil but the English word 'as' (858 docs) in armyworm; 'nd' is 'not detected' vs the ND-1 gene; 'na' is sodium/NA vs nutrient agar; 'ck' is cytokinin vs control check. Merging would either silently corrupt one corpus or require so many context rules that the maps become unmaintainable. Disjoint per-domain dicts selected explicitly are the only safe option."
+  }
+}

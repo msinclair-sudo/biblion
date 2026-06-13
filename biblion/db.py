@@ -10,7 +10,9 @@ citation_counts, integer surrogate PK), and adds:
   field_conflicts    — post-resolution conflict audit log
   module_runs        — orchestrator run-state (defined in framework/state.py)
 """
+import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 import sqlite3
@@ -40,6 +42,23 @@ CREATE TABLE IF NOT EXISTS papers (
     s2_fields_of_study    TEXT,        -- JSON [{category, source}] from S2
     pubmed_id             TEXT,
     pubmed_central_id     TEXT,
+    citekey               TEXT,        -- pandoc/BibTeX citation key (@key); first-write-wins
+    -- Extended bibliographic fields (BibLaTeX superset). Promoted from the
+    -- field_observations EAV substrate so they're queryable and round-trip on
+    -- export. See _PAPERS_LATE_COLUMNS for the migration on pre-existing DBs.
+    editors     TEXT,                  -- JSON array of editor display names (mirrors authors)
+    volume      TEXT,                  -- TEXT: volumes like "12A", "II"
+    issue       TEXT,                  -- bib 'number'; TEXT: "S1", "3-4"
+    first_page  TEXT,                  -- pages decomposed; raw range kept in field_observations
+    last_page   TEXT,
+    publisher   TEXT,
+    booktitle   TEXT,                  -- container title for chapters/proceedings (distinct from venue)
+    series      TEXT,
+    edition     TEXT,
+    language    TEXT,                  -- ISO 639-1 when from OpenAlex
+    month       TEXT,                  -- TEXT: bib months may be "jan" or "1"
+    editorial_status TEXT,             -- NULL=none; 'retracted'|'withdrawn'|'concern'|'corrected' (most-severe across sources)
+    editorial_status_at TEXT,          -- ISO timestamp biblion first detected the current status
     is_seed     INTEGER NOT NULL DEFAULT 0,
     is_stub     INTEGER NOT NULL DEFAULT 0,    -- 1 = only identifier(s) known, not yet enriched
     is_rejected INTEGER NOT NULL DEFAULT 0,    -- 1 = patent/proceedings/etc
@@ -53,6 +72,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_oa    ON papers(oa_id) WHERE oa_id 
 CREATE        INDEX IF NOT EXISTS idx_papers_year  ON papers(year)  WHERE year  IS NOT NULL;
 CREATE        INDEX IF NOT EXISTS idx_papers_seed  ON papers(is_seed) WHERE is_seed = 1;
 CREATE        INDEX IF NOT EXISTS idx_papers_stub  ON papers(is_stub) WHERE is_stub = 1;
+-- NB: the idx_papers_citekey index is created in init_db() AFTER the
+-- late-column migration adds papers.citekey — it can't live here because
+-- executescript() runs before the migration, and on a pre-existing DB the
+-- column wouldn't exist yet (CREATE TABLE IF NOT EXISTS is a no-op there).
 
 -- Candidate-query indexes for the claims framework. Without these the
 -- writer's claim_candidates() does a full-table scan inside its write
@@ -86,6 +109,29 @@ CREATE INDEX IF NOT EXISTS idx_papers_hop_eligible
 CREATE INDEX IF NOT EXISTS idx_papers_has_oa_id
     ON papers(is_seed DESC, discovery_count DESC, id)
     WHERE oa_id IS NOT NULL AND is_rejected = 0;
+-- enrich_biblio_crossref: DOI'd papers still missing publisher-deposited
+-- detail (volume/first_page/publisher). NB: this partial index references the
+-- extended columns, which exist from the start on a fresh DB but are added by
+-- _migrate_papers_columns on a pre-existing one. SQLite tolerates a partial
+-- index over a not-yet-added column only AT CREATE time if the column exists;
+-- this index is therefore (re)created in init_db() AFTER the migration, not
+-- inside _SCHEMA — see the idx_papers_citekey precedent.
+
+-- ---------------------------------------------------------------------------
+-- Scheme-keyed secondary identifiers (issn, isbn, arxiv, mag, dblp, ...).
+-- The primary lookup keys (doi/s2_id/oa_id) stay as papers columns; this table
+-- holds the open, often multi-valued set (a book can carry several ISBNs; a
+-- serial print + electronic ISSN; S2 externalIds expose arxiv/mag/dblp/acl).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS identifiers (
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    scheme   TEXT NOT NULL,            -- 'issn'|'isbn'|'arxiv'|'mag'|'dblp'|...
+    value    TEXT NOT NULL,
+    source   TEXT,
+    PRIMARY KEY (paper_id, scheme, value)
+);
+CREATE INDEX IF NOT EXISTS idx_identifiers_scheme_value
+    ON identifiers(scheme, value);
 
 -- ---------------------------------------------------------------------------
 -- Citation graph edges.
@@ -229,7 +275,9 @@ CREATE INDEX IF NOT EXISTS idx_module_runs_status
 # OpenAlex's abstract even after Semantic Scholar already filled its other
 # fields. Non-field-partitioned services (DOI resolution, stubs, hop) use the
 # '_all' sentinel field and behave as one row per (paper, service).
-ENRICHMENT_FIELDS = ('abstract', 'authors', 'venue', 'year', 'pub_type', 'title')
+ENRICHMENT_FIELDS = ('abstract', 'authors', 'venue', 'year', 'pub_type', 'title',
+                     # Crossref biblio detail (enrich_biblio_crossref).
+                     'volume', 'first_page', 'publisher')
 ENRICHMENT_FIELD_ALL = '_all'
 
 _CLAIMS_SCHEMA = """
@@ -259,9 +307,9 @@ class DatabaseLocationError(SystemExit):
             "biblion: no database configured.\n"
             "  Provide one of (highest priority first):\n"
             "    --db PATH                      explicit path for this command\n"
-            "    BIBLION_DB=PATH                environment variable\n"
             "    biblion project add <name> <path> && biblion use <name>\n"
-            "                                   register a named project\n"
+            "                                   register a named project (preferred)\n"
+            "    BIBLION_DB=PATH                environment variable (fallback)\n"
             "  Or create a new DB with `biblion init PATH`."
         )
 
@@ -340,6 +388,23 @@ _FIELD_CLASS_SEED = (
     ('publication_date',  'authoritative'),
     ('is_open_access',    'authoritative'),
     ('influential_cit_count', 'observational'),
+    # Extended bibliographic fields. Biblio metadata is single-valued per
+    # version-of-record, so authoritative (Crossref-wins via VoR-then-trust).
+    ('volume',            'authoritative'),
+    ('issue',             'authoritative'),
+    ('first_page',        'authoritative'),
+    ('last_page',         'authoritative'),
+    ('publisher',         'authoritative'),
+    ('booktitle',         'authoritative'),
+    ('series',            'authoritative'),
+    ('edition',           'authoritative'),
+    ('language',          'authoritative'),
+    ('month',             'authoritative'),
+    # editors get the same order-tolerant author-list treatment as authors.
+    ('editors',           'representational'),
+    # editorial_status resolves by SEVERITY (most-severe wins, sticky-true),
+    # handled by a special case in resolve(); class here is nominal.
+    ('editorial_status',  'authoritative'),
 )
 
 # Lower rank = more trusted. crossref is seeded now though no producer emits
@@ -391,6 +456,21 @@ def init_db(conn: sqlite3.Connection) -> None:
     """Create all tables and indexes for the main v3 DB. Idempotent."""
     conn.executescript(_SCHEMA)
     _migrate_papers_columns(conn)
+    # citekey index must follow the migration: on a pre-existing DB the column
+    # is added by _migrate_papers_columns, not by the (no-op) CREATE TABLE.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_papers_citekey "
+        "ON papers(citekey) WHERE citekey IS NOT NULL"
+    )
+    # Also post-migration: this partial index references the extended biblio
+    # columns, which only exist after _migrate_papers_columns on a pre-existing
+    # DB. Backs enrich_biblio_crossref's candidate query.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_papers_needs_biblio
+            ON papers(is_seed DESC, discovery_count DESC, id)
+            WHERE doi IS NOT NULL AND is_rejected = 0
+              AND (volume IS NULL OR first_page IS NULL OR publisher IS NULL)
+    """)
     _seed_resolution_tables(conn)
     conn.commit()
 
@@ -404,6 +484,21 @@ _PAPERS_LATE_COLUMNS = [
     ('s2_fields_of_study',    'TEXT'),
     ('pubmed_id',             'TEXT'),
     ('pubmed_central_id',     'TEXT'),
+    ('citekey',               'TEXT'),
+    # Extended bibliographic fields (BibLaTeX superset).
+    ('editors',               'TEXT'),
+    ('volume',                'TEXT'),
+    ('issue',                 'TEXT'),
+    ('first_page',            'TEXT'),
+    ('last_page',             'TEXT'),
+    ('publisher',             'TEXT'),
+    ('booktitle',             'TEXT'),
+    ('series',                'TEXT'),
+    ('edition',               'TEXT'),
+    ('language',              'TEXT'),
+    ('month',                 'TEXT'),
+    ('editorial_status',      'TEXT'),
+    ('editorial_status_at',   'TEXT'),
 ]
 
 
@@ -413,6 +508,121 @@ def _migrate_papers_columns(conn: sqlite3.Connection) -> None:
     for col, sql_type in _PAPERS_LATE_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE papers ADD COLUMN {col} {sql_type}")
+
+
+# Backfill map: promoted papers column <- bib field name(s) as deposited in
+# field_observations by prior import_bib runs (record_bib_fields). booktitle
+# and series are NOT here: older imports folded them into `venue` and never
+# recorded a separate observation, so they're only backfillable for entries
+# whose import wrote them (forward imports populate the columns directly).
+_BACKFILL_SCALAR = {
+    'volume':    ('volume',),
+    'issue':     ('number', 'issue'),
+    'publisher': ('publisher',),
+    'edition':   ('edition',),
+    'language':  ('language', 'langid'),
+    'series':    ('series',),
+    'booktitle': ('booktitle',),
+    'month':     ('month',),
+}
+
+
+def _split_pages(raw: str) -> tuple[Optional[str], Optional[str]]:
+    """Split a page-range string into (first, last). _clean_value already
+    folded '--' to an en-dash; accept any dash variant. A single page (or an
+    unsplittable token like 'e0123456') returns (token, None)."""
+    s = (raw or '').strip()
+    if not s:
+        return None, None
+    parts = re.split(r'\s*[–—-]+\s*', s, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[0].strip(), parts[1].strip()
+    return s, None
+
+
+def _backfill_promoted_columns(conn: sqlite3.Connection) -> dict:
+    """One-time, idempotent backfill of the promoted bibliographic columns and
+    the identifiers table from field_observations, where prior .bib imports
+    deposited these fields before they had first-class columns. Every write is
+    guarded (WHERE col IS NULL / INSERT OR IGNORE) so re-running is a no-op.
+    Returns per-target row counts for reporting."""
+    counts: dict[str, int] = {}
+
+    # 1. Scalar columns copied straight from the first matching observation.
+    for col, bib_fields in _BACKFILL_SCALAR.items():
+        for bf in bib_fields:
+            cur = conn.execute(f"""
+                UPDATE papers SET {col} = (
+                    SELECT fo.raw_value FROM field_observations fo
+                    WHERE fo.paper_id = papers.id AND fo.field = ?
+                      AND fo.raw_value IS NOT NULL AND fo.raw_value <> ''
+                    LIMIT 1)
+                WHERE {col} IS NULL AND EXISTS (
+                    SELECT 1 FROM field_observations fo
+                    WHERE fo.paper_id = papers.id AND fo.field = ?
+                      AND fo.raw_value IS NOT NULL AND fo.raw_value <> '')
+            """, (bf, bf))
+            counts[col] = counts.get(col, 0) + cur.rowcount
+
+    # 2. pages -> first_page/last_page (split needs Python).
+    rows = conn.execute("""
+        SELECT p.id AS id, fo.raw_value AS pages FROM papers p
+        JOIN field_observations fo
+          ON fo.paper_id = p.id AND fo.field = 'pages'
+        WHERE p.first_page IS NULL
+          AND fo.raw_value IS NOT NULL AND fo.raw_value <> ''
+    """).fetchall()
+    pg = 0
+    for r in rows:
+        first, last = _split_pages(r['pages'])
+        if first is not None:
+            conn.execute(
+                "UPDATE papers SET first_page = ?, last_page = ? "
+                "WHERE id = ? AND first_page IS NULL",
+                (first, last, r['id']))
+            pg += 1
+    counts['pages'] = pg
+
+    # 3. editor -> editors JSON (split the BibTeX ' and '-delimited list).
+    rows = conn.execute("""
+        SELECT p.id AS id, fo.raw_value AS editor FROM papers p
+        JOIN field_observations fo
+          ON fo.paper_id = p.id AND fo.field = 'editor'
+        WHERE p.editors IS NULL
+          AND fo.raw_value IS NOT NULL AND fo.raw_value <> ''
+    """).fetchall()
+    ed = 0
+    for r in rows:
+        names = [n.strip() for n in re.split(r'\s+and\s+', r['editor'])
+                 if n.strip()]
+        if names:
+            conn.execute(
+                "UPDATE papers SET editors = ? WHERE id = ? AND editors IS NULL",
+                (json.dumps(names), r['id']))
+            ed += 1
+    counts['editors'] = ed
+
+    # 4. month from publication_date where still NULL (ISO 'YYYY-MM-...').
+    cur = conn.execute("""
+        UPDATE papers SET month = substr(publication_date, 6, 2)
+        WHERE month IS NULL AND publication_date IS NOT NULL
+          AND length(publication_date) >= 7
+    """)
+    counts['month'] = counts.get('month', 0) + cur.rowcount
+
+    # 5. Secondary identifiers into the normalized table.
+    for scheme, bib_field in (('isbn', 'isbn'), ('issn', 'issn')):
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO identifiers (paper_id, scheme, value, source)
+            SELECT fo.paper_id, ?, fo.raw_value, fo.source
+            FROM field_observations fo
+            WHERE fo.field = ?
+              AND fo.raw_value IS NOT NULL AND fo.raw_value <> ''
+        """, (scheme, bib_field))
+        counts['id_' + scheme] = cur.rowcount
+
+    conn.commit()
+    return counts
 
 
 def _migrate_claims_schema(conn: sqlite3.Connection) -> None:

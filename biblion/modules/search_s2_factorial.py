@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Optional
 
 from ..cache.records import PaperRecord
-from ..clients.semanticscholar import SemanticScholarClient, _normalise_doi
+from ..clients.semanticscholar import (
+    SemanticScholarClient, _normalise_doi, parse_external_ids,
+)
 from ..framework import Module, ModuleResult, ValidationResult
 
 
@@ -157,6 +159,9 @@ def _paper_record_from_search_hit(hit: dict, query_id, query_title: str,
     doi   = _normalise_doi(ext.get('DOI') or '')
     if not (s2_id or doi):
         return None
+    # Same externalIds parse as enrich_metadata_s2: capture arxiv/mag/dblp/acl
+    # (+ pubmed) at search time instead of waiting for a later enrichment pass.
+    extra_ids, pmid, pmcid = parse_external_ids(ext)
     raw_authors = [a.get('name') for a in (hit.get('authors') or [])
                    if a.get('name')]
     authors_json = json.dumps(raw_authors) if raw_authors else None
@@ -183,8 +188,9 @@ def _paper_record_from_search_hit(hit: dict, query_id, query_title: str,
         cit_count    = hit.get('citationCount'),
         influential_cit_count = hit.get('influentialCitationCount'),
         is_open_access = bool(is_oa) if is_oa is not None else None,
-        pubmed_id    = ext.get('PubMed') or None,
-        pubmed_central_id = ext.get('PubMedCentral') or None,
+        pubmed_id    = pmid,
+        pubmed_central_id = pmcid,
+        extra_identifiers = extra_ids,
         raw          = raw_payload,
     )
 

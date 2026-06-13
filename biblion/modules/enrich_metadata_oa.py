@@ -13,7 +13,9 @@ This is the fast path. 50 papers per call; at OA's 5 RPS that's roughly
 import json
 from typing import Optional
 
-from ..clients.openalex import OpenAlexClient, normalise_doi, reconstruct_abstract
+from ..clients.openalex import (
+    OpenAlexClient, normalise_doi, reconstruct_abstract, parse_biblio,
+)
 from ..cache.records import PaperRecord, CitationRecord
 from ..framework import Module, ModuleResult, ValidationResult
 
@@ -21,7 +23,8 @@ from ..framework import Module, ModuleResult, ValidationResult
 _BATCH_SIZE = 50
 _SELECT = (
     'id,doi,type,title,publication_year,authorships,'
-    'primary_location,cited_by_count,abstract_inverted_index,referenced_works'
+    'primary_location,cited_by_count,abstract_inverted_index,referenced_works,'
+    'biblio,language,ids,publication_date,is_retracted'
 )
 
 # Metadata fields this service can fill, tracked per-field by the claim flow.
@@ -65,6 +68,9 @@ def _parse_to_record(work: dict, source: str) -> PaperRecord:
         abstract     = reconstruct_abstract(work.get('abstract_inverted_index')),
         pub_type     = (work.get('type') or '').lower() or None,
         cit_count    = work.get('cited_by_count'),
+        # Extended bibliographic fields (volume/issue/pages/publisher/
+        # language/date/secondary ids). Same OA call, expanded SELECT.
+        **parse_biblio(work),
     )
 
 

@@ -99,7 +99,8 @@ class TestRegistryConsistency:
         one place but not another, claims won't share budget.)"""
         services = {spec['service'] for spec in CANDIDATE_QUERIES.values()}
         # Known services as of writing
-        known = {'oa', 's2_live', 'ncbi', 'ncbi_pmid', 's2_hop', 'oa_incoming'}
+        known = {'oa', 's2_live', 'ncbi', 'ncbi_pmid', 's2_hop', 'oa_incoming',
+                 'crossref'}
         unknown = services - known
         if unknown:
             pytest.fail(

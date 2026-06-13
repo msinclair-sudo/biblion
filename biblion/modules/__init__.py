@@ -9,6 +9,7 @@ from .resolve_dois_via_pmid  import ResolveDoisViaPmid
 from .enrich_metadata_oa     import EnrichMetadataOa
 from .enrich_metadata_s2     import EnrichMetadataS2
 from .enrich_metadata_ncbi   import EnrichMetadataNcbi
+from .enrich_biblio_crossref import EnrichBiblioCrossref
 from .enrich_stubs_oa        import EnrichStubsOa
 from .bulk_paper_ids         import BulkPaperIds
 from .bulk_abstracts         import BulkAbstracts
@@ -17,6 +18,8 @@ from .expand_papers_s2       import ExpandPapersS2
 from .expand_incoming_oa     import ExpandIncomingOa
 from .search_s2_factorial    import SearchS2Factorial
 from .import_ris              import ImportRis
+from .import_bib              import ImportBib
+from .materialize_ghost_stubs import MaterializeGhostStubs
 
 # Default registration order (placeholders first, then real producers).
 ALL_MODULES = [
@@ -30,6 +33,7 @@ ALL_MODULES = [
     EnrichMetadataOa,
     EnrichMetadataS2,
     EnrichMetadataNcbi,
+    EnrichBiblioCrossref,
     EnrichStubsOa,
     BulkPaperIds,
     BulkAbstracts,
@@ -38,13 +42,17 @@ ALL_MODULES = [
     ExpandIncomingOa,
     SearchS2Factorial,
     ImportRis,
+    ImportBib,
+    MaterializeGhostStubs,
 ]
 
 __all__ = [
     'AcquireSeeds', 'ExpandSeeds', 'MergeIdentities',
     'ResolveDoisOa', 'ResolveDoisS2', 'ResolveDoisViaS2Id', 'ResolveDoisViaPmid',
-    'EnrichMetadataOa', 'EnrichMetadataS2', 'EnrichMetadataNcbi', 'EnrichStubsOa',
+    'EnrichMetadataOa', 'EnrichMetadataS2', 'EnrichMetadataNcbi',
+    'EnrichBiblioCrossref', 'EnrichStubsOa',
     'BulkPaperIds', 'BulkAbstracts', 'BulkPapers',
     'ExpandPapersS2', 'ExpandIncomingOa', 'SearchS2Factorial', 'ImportRis',
+    'ImportBib', 'MaterializeGhostStubs',
     'ALL_MODULES',
 ]

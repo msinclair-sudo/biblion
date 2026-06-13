@@ -32,6 +32,7 @@ from typing import Iterable, Optional
 from . import state
 from .context import Context
 from .module import Module, ModuleResult, ValidationResult
+from ..clients.ratelimit import DailyLimitReached
 from ..runtime import ShutdownFlag
 from ..cache import CacheClient
 
@@ -279,6 +280,19 @@ class Orchestrator:
 
             try:
                 result: ModuleResult = m.run(ctx)
+            except DailyLimitReached as e:
+                # An API engine hit its rates.config daily cap mid-run. Stop
+                # this module gracefully (noop, not failed) and move on; the
+                # counter resets at UTC midnight. BaseException, so producers'
+                # per-batch `except Exception` let it reach here.
+                run_conn = self._db_connect()
+                state.finish(
+                    run_conn, ctx.run_id, status='noop',
+                    message=f"{e.engine} daily API limit reached — stopped for the day")
+                run_conn.close()
+                print(f"  → noop: {e.engine} daily API limit reached — "
+                      f"stopping {m.name!r} for the day")
+                continue
             except Exception:
                 err = traceback.format_exc()
                 run_conn = self._db_connect()

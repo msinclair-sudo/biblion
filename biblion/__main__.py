@@ -90,6 +90,7 @@ ENRICH_PRODUCERS = (
     'enrich_metadata_oa',
     'enrich_metadata_s2',
     'enrich_metadata_ncbi',
+    'enrich_biblio_crossref',
     'expand_incoming_oa',
     'resolve_dois_oa',
     'resolve_dois_s2',
@@ -408,6 +409,8 @@ def cmd_run(args) -> int:
         # Both OA and S2 producer modules read these keys
         config['resolve_dois_limit']    = args.limit
         config['enrich_metadata_limit'] = args.limit
+    if getattr(args, 'min_degree', None) is not None:
+        config['ghost_min_degree'] = args.min_degree
 
     cache = CacheClient(url=args.redis_url) if args.redis_url else None
     o = Orchestrator(db_path=args.db, cache=cache, config=config,
@@ -503,6 +506,8 @@ def _qc_snapshot(db_path) -> dict:
             (SELECT COUNT(*) FROM papers WHERE is_seed     = 1)        AS seeds,
             (SELECT COUNT(*) FROM papers WHERE is_stub     = 1)        AS stubs,
             (SELECT COUNT(*) FROM papers WHERE is_rejected = 1)        AS rejected,
+            (SELECT COUNT(*) FROM papers WHERE editorial_status = 'retracted') AS retracted,
+            (SELECT COUNT(*) FROM papers WHERE editorial_status IS NOT NULL)   AS flagged,
             (SELECT COUNT(*) FROM citations)                           AS edges,
             (SELECT COUNT(*) FROM citation_counts)                     AS cit_count_rows,
             (SELECT COUNT(*) FROM pending_citations)                   AS pending_edges,
@@ -631,6 +636,8 @@ def _render_qc(snap: dict, db_path, header_extra: str = '') -> list[str]:
     line('seeds',         core['seeds'])
     line('stubs',         core['stubs'])
     line('rejected',      core['rejected'])
+    line('retracted',     core['retracted'])
+    line('flagged (any notice)', core['flagged'])
 
     out.append("\n  Graph")
     out.append(f"  {'edges':18s} {core['edges']:>14,}")
@@ -758,6 +765,102 @@ def cmd_backfill_observations(args) -> int:
             print(f"    {fld:20s} {n:>6,}{note}")
     if not args.apply:
         print("\n  Re-run with --apply to write observations and update papers.")
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    """Apply schema migrations and backfill the promoted bibliographic columns.
+
+    `init_db` adds any missing columns / the identifiers table idempotently
+    (cheap when up to date). Then `_backfill_promoted_columns` copies fields
+    that prior .bib imports left in field_observations (publisher, volume,
+    pages, editor, isbn, ...) into the new first-class columns. Every write is
+    guarded, so re-running is a no-op. No API calls, no Redis."""
+    from .db import _backfill_promoted_columns
+
+    conn = get_connection(args.db)
+    try:
+        init_db(conn)                       # idempotent column/table migration
+        counts = _backfill_promoted_columns(conn)
+    finally:
+        conn.close()
+
+    print("[biblion migrate] schema up to date; backfill complete")
+    labels = {
+        'volume': 'volume', 'issue': 'issue', 'publisher': 'publisher',
+        'edition': 'edition', 'language': 'language', 'series': 'series',
+        'booktitle': 'booktitle', 'pages': 'pages -> first/last',
+        'editors': 'editors (from editor)', 'month': 'month',
+        'id_isbn': 'identifiers: isbn', 'id_issn': 'identifiers: issn',
+    }
+    total = sum(counts.values())
+    for key, label in labels.items():
+        n = counts.get(key, 0)
+        if n:
+            print(f"  {label:<26} {n:>8,}")
+    if total == 0:
+        print("  (nothing to backfill — already migrated or no .bib imports)")
+    return 0
+
+
+def cmd_flag_retractions(args) -> int:
+    """Sweep DOI'd papers against OpenAlex and flag editorial status
+    (retracted), stamping editorial_status_at. One-shot; bypasses the
+    claim flow so the existing back catalogue gets flagged. No Redis needed."""
+    from .modules.flag_retractions import sweep_retractions
+
+    stats = sweep_retractions(args.db, limit=args.limit, verbose=args.verbose)
+    print("\n[biblion flag-retractions] summary:")
+    print(f"  checked           {stats['checked']:>8,}")
+    print(f"  flagged (total)   {stats['flagged']:>8,}")
+    print(f"  newly flagged     {stats['newly_flagged']:>8,}")
+    return 0
+
+
+def cmd_export(args) -> int:
+    """Serialise papers out to BibTeX (.bib) or RIS (.ris). Read-only; needs an
+    explicit selector so a 2M-row graph is never dumped by accident."""
+    from .modules import export as export_mod
+
+    # Resolve format: explicit --format wins, else infer from the extension.
+    out = Path(args.out).expanduser()
+    fmt = args.format
+    if fmt is None:
+        fmt = 'ris' if out.suffix.lower() == '.ris' else 'bib'
+
+    # Build the WHERE clause from exactly one selector.
+    selectors = [bool(args.seeds), bool(args.all), args.year is not None,
+                 bool(args.ids)]
+    if sum(selectors) != 1:
+        print("[biblion export] choose exactly one selector: "
+              "--seeds | --all | --year YEAR | --ids ID,ID,...")
+        return 2
+
+    if args.seeds:
+        where, params = "is_seed = 1", ()
+    elif args.all:
+        where, params = "1 = 1", ()
+    elif args.year is not None:
+        where, params = "year = ?", (args.year,)
+    else:
+        id_list = [s.strip() for s in args.ids.split(',') if s.strip()]
+        if not id_list:
+            print("[biblion export] --ids was empty")
+            return 2
+        ph = ','.join('?' * len(id_list))
+        where, params = f"id IN ({ph})", tuple(id_list)
+
+    conn = get_connection(args.db)
+    try:
+        init_db(conn)        # ensure the extended columns exist before reading
+        # Redacted (retracted/withdrawn) papers are dropped by default;
+        # --include-redacted keeps them.
+        n = export_mod.export(conn, out, fmt, where, params,
+                              include_redacted=args.include_redacted)
+    finally:
+        conn.close()
+
+    print(f"[biblion export] wrote {n} entries to {out} ({fmt})")
     return 0
 
 
@@ -1101,22 +1204,34 @@ def cmd_start(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_import(args) -> int:
-    """Ingest a RIS reference file. Auto-spawns merge daemons, pushes
-    records into the cache, drains, and marks the imported papers as seeds."""
+    """Ingest a RIS (.ris) or BibTeX (.bib) reference file. Auto-spawns merge
+    daemons, pushes records into the cache, drains, and marks the imported
+    papers as seeds. Both formats share the same backend; the file extension
+    selects the native parser."""
     from .framework.context import Context
     from .runtime import ShutdownFlag
-    from .modules.import_ris import ImportRis, mark_seeds
 
-    ris_file = Path(args.ris_file).expanduser().resolve()
-    if not ris_file.exists():
-        print(f"[biblion import] file not found: {ris_file}")
+    src = Path(args.src).expanduser().resolve()
+    if not src.exists():
+        print(f"[biblion import] file not found: {src}")
         return 1
 
-    config = {
-        'ris_file':   str(ris_file),
-        'no_resolve': bool(args.no_resolve),
-        'verbose':    bool(args.verbose),
-    }
+    suffix = src.suffix.lower()
+    if suffix == '.ris':
+        from .modules.import_ris import ImportRis, mark_seeds
+        module = ImportRis()
+        config = {'ris_file': str(src)}
+    elif suffix in ('.bib', '.bibtex'):
+        from .modules.import_bib import ImportBib, mark_seeds, record_bib_fields
+        module = ImportBib()
+        config = {'bib_file': str(src)}
+    else:
+        print(f"[biblion import] unsupported file type: {suffix!r}. "
+              f"Supported: .ris, .bib")
+        return 1
+
+    config['no_resolve'] = bool(args.no_resolve)
+    config['verbose']    = bool(args.verbose)
 
     with _ensure_merge_daemons(args):
         cache = CacheClient(url=args.redis_url)
@@ -1128,7 +1243,6 @@ def cmd_import(args) -> int:
             cache    = cache,
             config   = config,
         )
-        module = ImportRis()
         v = module.validate(ctx)
         if not v.ok:
             print(f"[biblion import] validation failed: {v.message}")
@@ -1139,15 +1253,25 @@ def cmd_import(args) -> int:
             print(f"[biblion import] failed: {result.message}")
             return 1
 
-        pushed_ids = result.stats.pop('_seed_ids', {})
+        pushed_ids   = result.stats.pop('_seed_ids', {})
+        bib_entries  = result.stats.pop('_bib_entries', None)
+        bib_source   = result.stats.pop('_source', None)
 
     # Cache has drained. Now flag the imported rows as seeds.
     touched = mark_seeds(args.db, pushed_ids)
+
+    # For .bib: re-home every (unmapped) bib field as its own named
+    # observation row so nothing the file carried is dropped.
+    obs_written = None
+    if bib_entries is not None:
+        obs_written = record_bib_fields(args.db, bib_entries, bib_source)
 
     print("\n[biblion import] summary:")
     for k, v in result.stats.items():
         print(f"  {k:<22} {v}")
     print(f"  marked is_seed=1       {touched}")
+    if obs_written is not None:
+        print(f"  bib field rows         {obs_written}")
     return 0
 
 
@@ -1780,6 +1904,37 @@ def cmd_daemon(args) -> int:
     return 0
 
 
+def cmd_snapshot(args) -> int:
+    """Snapshot the DB into a read-only network-toy bundle (+ node set).
+
+    Read-only on the live DB (online-backup copy); writes alongside it by
+    default so a project at data/<name>/<name>.db gets data/<name>/
+    <name>_snapshot.db. No Redis.
+    """
+    from . import snapshot as snapshot_mod
+    try:
+        snapshot_mod.run_snapshot(Path(args.db), dataset=args.dataset,
+                                  out_dir=args.out)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[biblion snapshot] {e}")
+        return 2
+    return 0
+
+
+def cmd_embedding(args) -> int:
+    """Embed the snapshot node set with SPECTER2 (needs the 'embed' extra)."""
+    from . import embed as embed_mod
+    try:
+        embed_mod.run_embed(Path(args.db), dataset=args.dataset, out_dir=args.out,
+                            batch=args.batch, max_length=args.max_length,
+                            device=args.device, normalize=not args.no_normalize,
+                            domain=args.domain)
+    except FileNotFoundError as e:
+        print(f"[biblion embedding] {e}")
+        return 2
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI plumbing
 # ---------------------------------------------------------------------------
@@ -1818,6 +1973,8 @@ def _add_advanced_subcommands(sub) -> None:
     sr.add_argument('--limit', type=int, default=None)
     sr.add_argument('--loop', action='store_true')
     sr.add_argument('--verbose', action='store_true')
+    sr.add_argument('--min-degree', type=int, default=None,
+        help='materialize_ghost_stubs: min in-corpus degree to keep a ghost (default 2)')
 
     ss = sub.add_parser('start',
         help='Spawn merge daemons, run producer, drain, stop — one shot')
@@ -1841,6 +1998,30 @@ def _add_advanced_subcommands(sub) -> None:
     sb.add_argument('--force', action='store_true')
     sb.add_argument('--verbose', action='store_true')
     sb.add_argument('--log-dir', type=Path, default=None)
+
+    # ---- network-toy bundle (snapshot -> embedding) ---------------------
+    ssn = sub.add_parser('snapshot',
+        help='Build the network-toy read snapshot + node set from the DB')
+    ssn.add_argument('--dataset', default=None,
+        help='Logical dataset name (default: DB filename stem)')
+    ssn.add_argument('--out', type=Path, default=None,
+        help='Output dir (default: alongside the DB)')
+
+    sem = sub.add_parser('embedding',
+        help='Embed the snapshot node set with SPECTER2 -> embeddings.npy '
+             "(needs the optional 'embed' extra)")
+    sem.add_argument('--dataset', default=None,
+        help='Logical dataset name (default: DB filename stem)')
+    sem.add_argument('--out', type=Path, default=None,
+        help='Output dir (default: alongside the DB, where snapshot wrote)')
+    sem.add_argument('--batch', type=int, default=32)
+    sem.add_argument('--max-length', type=int, default=512)
+    sem.add_argument('--device', default=None, help='cuda / cpu (default: auto)')
+    sem.add_argument('--no-normalize', action='store_true',
+        help='Skip abbreviation expansion entirely (use for other domains)')
+    from .text_normalization import DOMAIN_MAPS
+    sem.add_argument('--domain', default='soil', choices=sorted(DOMAIN_MAPS),
+        help='Abbreviation dictionary domain (default: soil)')
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1888,9 +2069,9 @@ def _build_parser() -> argparse.ArgumentParser:
     su.add_argument('name')
 
     sim = sub.add_parser('import',
-        help='Ingest papers from a RIS (.ris) reference file')
-    sim.add_argument('ris_file', type=str,
-        help='Path to a .ris file (e.g. exported from Zotero / EndNote)')
+        help='Ingest papers from a RIS (.ris) or BibTeX (.bib) reference file')
+    sim.add_argument('src', type=str,
+        help='Path to a .ris or .bib file (e.g. exported from Zotero / EndNote)')
     sim.add_argument('--no-resolve', action='store_true',
         help="Don't try OpenAlex title-search for records without identifiers")
     sim.add_argument('--verbose', action='store_true',
@@ -1931,6 +2112,33 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser('qc', help='Coverage / conflict-log summary')
 
+    sub.add_parser('migrate',
+        help='Apply schema migrations and backfill promoted bibliographic '
+             'columns from field_observations (idempotent; no API/Redis)')
+
+    sfr = sub.add_parser('flag-retractions',
+        help='Sweep DOI papers against OpenAlex and flag editorial_status '
+             '(retracted), timestamped. One-shot; no Redis required.')
+    sfr.add_argument('--limit', type=int, default=None,
+        help='Only check the first N DOI papers (default: all)')
+    sfr.add_argument('--verbose', action='store_true')
+
+    sex = sub.add_parser('export',
+        help='Serialise papers to a .bib or .ris file (read-only)')
+    sex.add_argument('out', type=str, help='Destination .bib / .ris path')
+    sex.add_argument('--format', choices=['bib', 'ris'], default=None,
+        help='Output format (default: inferred from the file extension)')
+    sex.add_argument('--seeds', action='store_true',
+        help='Export only seed papers (is_seed=1)')
+    sex.add_argument('--all', action='store_true',
+        help='Export every paper in the DB')
+    sex.add_argument('--year', type=int, default=None,
+        help='Export papers from a single publication year')
+    sex.add_argument('--ids', type=str, default=None,
+        help='Comma-separated papers.id list to export')
+    sex.add_argument('--include-redacted', action='store_true',
+        help='Include retracted/withdrawn papers (excluded by default)')
+
     sbk = sub.add_parser('backup',
         help='Snapshot the DB (+ claims sidecar) to a file (safe while running)')
     sbk.add_argument('--backup', required=True, type=Path,
@@ -1958,6 +2166,8 @@ _ADVANCED_DISPATCH = {
     'daemon': 'cmd_daemon',
     'bulk':   'cmd_bulk',
     'backfill-observations': 'cmd_backfill_observations',
+    'snapshot':  'cmd_snapshot',
+    'embedding': 'cmd_embedding',
 }
 
 
@@ -1976,26 +2186,40 @@ def main(argv: list[str] = None) -> int:
     # Most commands need a DB path. `init` is special — it creates one.
     if args.cmd != 'init':
         if args.db is None:
-            # Resolution precedence: --db (already in args.db) > $BIBLION_DB >
-            # current registered project. The registry is the lowest-priority,
-            # convenience layer — an explicit --db/env always wins.
-            import os as _os
+            # Resolution precedence: --db (already in args.db) > current
+            # registered project > $BIBLION_DB. The project you `use` is
+            # authoritative: a leftover BIBLION_DB can no longer silently
+            # shadow it (a stale/inaccessible env value used to crash the
+            # command — e.g. mkdir of a logs dir under a dead path). When no
+            # project is current, BIBLION_DB is the fallback (or
+            # DatabaseLocationError if it too is unset).
             from . import projects as _projects
-            if _os.environ.get('BIBLION_DB'):
-                args.db = get_db_path()
+            current = _projects.current_path()
+            if current is not None:
+                args.db = current
             else:
-                current = _projects.current_path()
-                if current is not None:
-                    args.db = current
-                else:
-                    args.db = get_db_path()   # raises DatabaseLocationError
+                args.db = get_db_path()   # $BIBLION_DB or DatabaseLocationError
+
+        # Propagate the resolved DB back into the environment so EVERY path
+        # helper derives from the same database: get_logs_dir(),
+        # get_claims_db_path(), and any get_db_path() call downstream. Without
+        # this, a stale BIBLION_DB leaks into the logs/claims paths even though
+        # args.db points elsewhere — that mismatch was the real bug behind the
+        # "Permission denied .../logs" crash.
+        import os
+        os.environ['BIBLION_DB'] = str(args.db)
+
+        # Stash the Redis URL so the shared rate limiter (and any client
+        # constructed deep inside a producer, which never sees args) can reach
+        # the same Redis this command uses.
+        if getattr(args, 'redis_url', None):
+            os.environ.setdefault('BIBLION_REDIS_URL', args.redis_url)
 
         # Derive a per-DB Redis namespace and stash it in the env so every
         # subprocess (writer, resolver, pending_resolver, producers) sees
         # the same prefix and shares state with this command. Other
         # biblion instances on different DBs get different namespaces and
         # so don't see each other's queues, even on a shared Redis db=0.
-        import os
         from .cache import namespace_for_db
         os.environ.setdefault('BIBLION_REDIS_NAMESPACE',
                                namespace_for_db(args.db))
@@ -2003,8 +2227,9 @@ def main(argv: list[str] = None) -> int:
     # Commands that touch the producer cache fail fast with a clear message if
     # Redis is down. `init` and `qc` never touch Redis; the read-only advanced
     # commands `list` / `plan` don't either.
-    _NO_REDIS = {'init', 'qc', 'backup'}
-    _NO_REDIS_ADVANCED = {'list', 'plan', 'backfill-observations'}
+    _NO_REDIS = {'init', 'qc', 'backup', 'migrate', 'export', 'flag-retractions'}
+    _NO_REDIS_ADVANCED = {'list', 'plan', 'backfill-observations',
+                          'snapshot', 'embedding'}
     needs_redis = args.cmd not in _NO_REDIS and not (
         args.cmd == 'advanced' and args.advanced_cmd in _NO_REDIS_ADVANCED)
     if needs_redis:
@@ -2018,6 +2243,9 @@ def main(argv: list[str] = None) -> int:
         'enrich': cmd_enrich,
         'qc':     cmd_qc,
         'backup': cmd_backup,
+        'migrate': cmd_migrate,
+        'flag-retractions': cmd_flag_retractions,
+        'export': cmd_export,
     }
     if args.cmd == 'advanced':
         fn_name = _ADVANCED_DISPATCH[args.advanced_cmd]

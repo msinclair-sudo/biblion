@@ -32,6 +32,15 @@ dev = [
     "pytest",
     "build",
 ]
+# SPECTER2 embedding for `biblion advanced embedding` (network-toy bundle).
+# Heavy / GPU-oriented and imported lazily, so kept out of the core install.
+embed = [
+    "numpy",
+    "torch",
+    "transformers",
+    "adapters",
+    "tqdm",
+]
 
 [project.scripts]
 biblion = "biblion.__main__:main"
@@ -45,10 +54,14 @@ path = "biblion/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["biblion"]
+# Ship the shipped-default rate-limit config as package data (a CWD copy
+# overrides it at runtime — see biblion/config.py:_load_rates).
+force-include = { "biblion/rates.config" = "biblion/rates.config" }
 
 [tool.hatch.build.targets.sdist]
 include = [
     "biblion/",
+    "biblion/rates.config",
     "tests/",
     "searches/",
     "README.md",

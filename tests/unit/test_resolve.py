@@ -220,3 +220,41 @@ class TestResolveAuthors:
         got = _authors(r)
         assert len(got) == 3
         assert 'Smith, John' in got and 'Lee, Kim' in got
+
+
+# ---------------------------------------------------------------------------
+# editors — same order-tolerant author-list machinery as authors, dispatched
+# via resolve(field='editors').
+# ---------------------------------------------------------------------------
+
+class TestResolveEditors:
+    def test_editors_canonicalize_like_authors(self):
+        # canonicalize routes 'editors' through the author-list canon (JSON).
+        key = canonicalize('editors', json.dumps(['Ng, Pat', 'Roe, Sam']))
+        assert json.loads(key) == ['Ng, Pat', 'Roe, Sam']
+
+    def test_resolve_editors_merges_initial_to_full(self):
+        r = resolve('editors', [
+            ob(json.dumps(['Ng, P.']), 's2'),
+            ob(json.dumps(['Ng, Pat']), 'openalex'),
+        ])
+        assert json.loads(r.value) == ['Ng, Pat']
+
+    def test_resolve_editors_keeps_full_list(self):
+        # Two editors in one observation, a partial second source: both survive,
+        # initials upgraded to full names (same author-list rules as authors).
+        r = resolve('editors', [
+            ob(json.dumps(['Ng, Pat', 'Roe, Sam']), 'openalex'),
+            ob(json.dumps(['Ng, P.']), 's2'),
+        ])
+        got = json.loads(r.value)
+        assert 'Ng, Pat' in got and 'Roe, Sam' in got and len(got) == 2
+
+    def test_editors_conflict_field_name(self):
+        # An order-ambiguous editor list reports the conflict under 'editors'.
+        r = resolve('editors', [
+            ob(json.dumps(['Pat Ng', 'Sam Roe']), 'openalex'),
+            ob(json.dumps(['Roe Sam', 'Ng Pat']), 's2'),
+        ])
+        if r.conflict is not None:
+            assert r.conflict.field == 'editors'

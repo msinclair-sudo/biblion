@@ -27,7 +27,9 @@ from typing import Optional
 
 from ..cache import CacheClient, PaperRecord, CitationRecord
 from ..db    import get_connection, init_db, get_db_path, _source_bucket
-from .resolve import Observation, resolve, canonicalize, _canon_pub_type
+from .resolve import (
+    Observation, resolve, canonicalize, _canon_pub_type, _canon_editorial,
+)
 
 
 DEFAULT_BATCH_SIZE = 1000
@@ -121,15 +123,23 @@ _RESOLVED_FIELDS = (
     'title', 'year', 'authors', 'venue', 'pub_type',
     'publication_date', 'is_open_access',
     'pubmed_id', 'pubmed_central_id',
+    # Extended bibliographic fields. 'editors' gets author-list treatment in
+    # resolve(); the rest are authoritative scalars (Crossref-wins).
+    'editors', 'volume', 'issue', 'first_page', 'last_page',
+    'publisher', 'booktitle', 'series', 'edition', 'language', 'month',
+    'editorial_status',
 )
 # Plain COALESCE/first-write-wins fields (not class-resolved, not observed).
-_COALESCE_FIELDS = ('abstract', 's2_fields_of_study', 'influential_cit_count')
+_COALESCE_FIELDS = ('abstract', 's2_fields_of_study', 'influential_cit_count',
+                    'citekey')
 
 
 def _rec_value(rec: PaperRecord, col: str):
     """Look up the cache-record value for a target column."""
     if col == 'authors':
         return rec.authors_json
+    if col == 'editors':
+        return rec.editors_json
     return getattr(rec, col, None)
 
 
@@ -184,15 +194,23 @@ def _insert_new(conn: sqlite3.Connection, rec: PaperRecord, ts: str) -> int:
         INSERT INTO papers
             (doi, s2_id, oa_id, title, year, venue, authors, abstract, pub_type,
              publication_date, is_open_access, influential_cit_count,
-             s2_fields_of_study, pubmed_id, pubmed_central_id,
-             is_stub, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             s2_fields_of_study, pubmed_id, pubmed_central_id, citekey,
+             editors, volume, issue, first_page, last_page, publisher,
+             booktitle, series, edition, language, month, editorial_status,
+             editorial_status_at, is_stub, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         rec.doi, rec.s2_id, rec.oa_id,
         rec.title, rec.year, rec.venue, rec.authors_json, rec.abstract,
         _canon_pub_type(rec.pub_type),
         rec.publication_date, is_oa, rec.influential_cit_count,
-        rec.s2_fields_of_study, rec.pubmed_id, rec.pubmed_central_id,
+        rec.s2_fields_of_study, rec.pubmed_id, rec.pubmed_central_id, rec.citekey,
+        rec.editors_json, rec.volume, rec.issue, rec.first_page, rec.last_page,
+        rec.publisher, rec.booktitle, rec.series, rec.edition, rec.language,
+        rec.month, _canon_editorial(rec.editorial_status),
+        # timestamp the status the moment we first record a non-null one
+        (ts if _canon_editorial(rec.editorial_status) else None),
         is_stub, ts, ts,
     ))
     new_id = cur.lastrowid
@@ -201,6 +219,7 @@ def _insert_new(conn: sqlite3.Connection, rec: PaperRecord, ts: str) -> int:
     for field in _RESOLVED_FIELDS:
         _record_observation(conn, new_id, field, rec, ts)
     _write_citation_counts(conn, new_id, rec, ts)
+    _write_identifiers(conn, new_id, rec)
     return new_id
 
 
@@ -219,7 +238,8 @@ def _apply_single_hit(conn: sqlite3.Connection, paper_id: int,
     """
     existing = conn.execute(
         "SELECT doi, s2_id, oa_id, abstract, "
-        "       s2_fields_of_study, influential_cit_count "
+        "       s2_fields_of_study, influential_cit_count, citekey, "
+        "       editorial_status "
         "FROM papers WHERE id = ?", (paper_id,)
     ).fetchone()
     if existing is None:
@@ -252,6 +272,13 @@ def _apply_single_hit(conn: sqlite3.Connection, paper_id: int,
                           res.conflict.loser_source, ts)
             conflicts += 1
 
+    # Stamp editorial_status_at when the resolved status FIRST becomes non-null
+    # or changes (e.g. a severity upgrade). Unchanged status preserves the
+    # original detection time.
+    if updates.get('editorial_status') and \
+            updates['editorial_status'] != existing['editorial_status']:
+        updates['editorial_status_at'] = ts
+
     # 2. Plain COALESCE fields — fill NULLs; abstract prefers the longer value
     #    (replaces the old _OVERWRITE_POLICIES 'prefer_longer' for s2 bulk).
     for col in _COALESCE_FIELDS:
@@ -276,7 +303,32 @@ def _apply_single_hit(conn: sqlite3.Connection, paper_id: int,
         conn.execute(sql, params)
 
     _write_citation_counts(conn, paper_id, rec, ts)
+    _write_identifiers(conn, paper_id, rec)
     return conflicts
+
+
+def _write_identifiers(conn: sqlite3.Connection, paper_id: int,
+                       rec: PaperRecord) -> None:
+    """Route a record's scheme-keyed secondary identifiers into the
+    identifiers table. extra_identifiers is {scheme: [values]} (a bare string
+    is accepted too). INSERT OR IGNORE on (paper_id, scheme, value), so the
+    same (paper, scheme, value) from a second source is a silent no-op."""
+    extra = getattr(rec, 'extra_identifiers', None)
+    if not extra:
+        return
+    for scheme, values in extra.items():
+        if not scheme or not values:
+            continue
+        if isinstance(values, str):
+            values = [values]
+        for v in values:
+            if v is None or v == '':
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO identifiers "
+                "(paper_id, scheme, value, source) VALUES (?, ?, ?, ?)",
+                (paper_id, str(scheme), str(v), rec.source),
+            )
 
 
 def _write_citation_counts(conn: sqlite3.Connection, paper_id: int,

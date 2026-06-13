@@ -31,6 +31,8 @@ from typing import Iterable, Iterator, Optional
 
 import requests
 
+from . import ratelimit
+
 
 S2_BASE_URL          = 'https://api.semanticscholar.org/graph/v1'
 S2_API_KEY_ENV       = 'semantic_scholar_key'
@@ -90,6 +92,29 @@ def _normalise_doi(doi: Optional[str]) -> Optional[str]:
             d = d[len(prefix):]
             break
     return d or None
+
+
+# S2 externalIds scheme name -> identifiers.scheme. PubMed/PubMedCentral get
+# their own papers columns and are handled separately; the rest land in the
+# identifiers table (only DOI used to be read). Shared by both the metadata
+# enrichment producer and the search producer so they capture the same set.
+_S2_EXTID_SCHEMES = {
+    'ArXiv': 'arxiv', 'MAG': 'mag', 'DBLP': 'dblp', 'ACL': 'acl',
+    'CorpusId': 's2_corpus',
+}
+
+
+def parse_external_ids(ext: dict) -> tuple[dict, Optional[str], Optional[str]]:
+    """Split an S2 `externalIds` dict into
+    (extra_identifiers, pubmed_id, pubmed_central_id)."""
+    extra: dict = {}
+    for s2_key, scheme in _S2_EXTID_SCHEMES.items():
+        v = (ext or {}).get(s2_key)
+        if v:
+            extra[scheme] = [str(v)]
+    pmid = (ext or {}).get('PubMed')
+    pmcid = (ext or {}).get('PubMedCentral')
+    return extra, (str(pmid) if pmid else None), (str(pmcid) if pmcid else None)
 
 
 class SemanticScholarClient:
@@ -346,9 +371,13 @@ class SemanticScholarClient:
             if self.breaker_open:
                 return None
 
-            gap = self._interval - (time.time() - self._last)
-            if gap > 0:
-                time.sleep(gap)
+            # Global cross-process rate gate (rates.config, engine 's2'); the
+            # local interval is only the fallback when Redis is unavailable.
+            # DailyLimitReached propagates to the producer to stop for the day.
+            if not ratelimit.throttle('s2'):
+                gap = self._interval - (time.time() - self._last)
+                if gap > 0:
+                    time.sleep(gap)
 
             deadline = time.time() + total_budget
             resp = None

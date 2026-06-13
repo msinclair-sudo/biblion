@@ -19,11 +19,13 @@ Usage
     parsed = client.parse_work(work)
 """
 import json
+import re
 import time
 from typing import Optional
 
 import requests
 
+from . import ratelimit
 from ..config import (
     OPENALEX_API_KEY, OPENALEX_MAILTO, OPENALEX_BASE_URL, OPENALEX_RATE_LIMIT_RPS,
 )
@@ -47,10 +49,13 @@ _PUB_TYPE_MAP = {
     'preprint':        'preprint',
 }
 
-# Default selects for the most common endpoints.
+# Default selects for the most common endpoints. SELECT_FULL now also pulls
+# the extended bibliographic fields (biblio numbers, language, secondary ids,
+# date); these come back inside the already-requested primary_location.source.
 SELECT_FULL = (
     'id,doi,type,title,publication_year,authorships,'
-    'primary_location,cited_by_count,abstract_inverted_index'
+    'primary_location,cited_by_count,abstract_inverted_index,'
+    'biblio,language,ids,publication_date,is_retracted'
 )
 SELECT_SLIM     = 'id,doi,type,title,publication_year'
 SELECT_REFS     = 'id,doi,referenced_works'
@@ -388,9 +393,12 @@ class OpenAlexClient:
             # a previous attempt's 429 just tripped it).
             if self.breaker_open:
                 return None
-            gap = self._interval - (time.time() - self._last)
-            if gap > 0:
-                time.sleep(gap)
+            # Global cross-process rate gate (rates.config, engine 'openalex');
+            # the local interval is the fallback when Redis is unavailable.
+            if not ratelimit.throttle('openalex'):
+                gap = self._interval - (time.time() - self._last)
+                if gap > 0:
+                    time.sleep(gap)
 
             deadline = time.time() + total_budget
             resp = None
@@ -629,7 +637,7 @@ class OpenAlexClient:
 
         oa_id_raw = (work.get('id') or '').replace('https://openalex.org/', '') or None
 
-        return {
+        parsed = {
             'oa_id':    oa_id_raw,
             'oa_type':  oa_type,
             'pub_type': pub_type,
@@ -642,3 +650,51 @@ class OpenAlexClient:
             'abstract': reconstruct_abstract(work.get('abstract_inverted_index')),
             'cit_count': work.get('cited_by_count'),
         }
+        parsed.update(parse_biblio(work))
+        return parsed
+
+
+def _id_tail(url: Optional[str]) -> Optional[str]:
+    """OpenAlex `ids.pmid`/`ids.pmcid` are URLs; return the trailing id."""
+    if not url:
+        return None
+    m = re.search(r'([A-Za-z0-9]+)/?$', str(url).strip())
+    return m.group(1) if m else None
+
+
+def parse_biblio(work: dict) -> dict:
+    """Extended bibliographic fields from an OpenAlex work: biblio numbers,
+    publisher, language, publication date/month, and secondary identifiers.
+    Returns kwargs ready to splat onto a PaperRecord (keys match its attrs)."""
+    biblio = work.get('biblio') or {}
+    source = (work.get('primary_location') or {}).get('source') or {}
+    ids = work.get('ids') or {}
+    pub_date = work.get('publication_date')
+
+    extra_ids: dict = {}
+    issns = source.get('issn') or []
+    if isinstance(issns, str):
+        issns = [issns]
+    if issns:
+        extra_ids['issn'] = list(issns)
+    mag = ids.get('mag')
+    if mag:
+        extra_ids['mag'] = [_id_tail(mag) or str(mag)]
+
+    month = pub_date[5:7] if (pub_date and len(pub_date) >= 7) else None
+
+    return {
+        'volume':            biblio.get('volume'),
+        'issue':             biblio.get('issue'),
+        'first_page':        biblio.get('first_page'),
+        'last_page':         biblio.get('last_page'),
+        'publisher':         source.get('host_organization_name'),
+        'language':          work.get('language'),
+        'publication_date':  pub_date,
+        'month':             month,
+        'pubmed_id':         _id_tail(ids.get('pmid')),
+        'pubmed_central_id': _id_tail(ids.get('pmcid')),
+        'extra_identifiers': extra_ids,
+        # OpenAlex only distinguishes retracted; map True -> 'retracted'.
+        'editorial_status':  'retracted' if work.get('is_retracted') else None,
+    }

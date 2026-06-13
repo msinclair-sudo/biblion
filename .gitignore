@@ -11,12 +11,18 @@ CLAUDE.md
 # Internal design/discussion docs (not part of the shipped docs)
 docs/conflict_resolution_discussion.md
 
+# network-toy viewer: lives in-repo but is its own (untracked) subproject
+network_toy/
+
+# Generated network-toy snapshot/embedding artifacts (live next to the DBs
+# under data/<project>/; the *_snapshot.db files are covered by *.db below)
+data/**/paper_index.json
+data/**/nodes.jsonl
+data/**/manifest.json
+data/**/embeddings.npy
+
 # Stray temp artifact from an unexpanded shell var
 $TMPDB
-
-# Local scratch / test databases kept outside the package
-testdb/
-test-log/
 
 # Python
 __pycache__/
@@ -41,9 +47,6 @@ env/
 .coverage
 htmlcov/
 .tox/
-
-# Private RIS reference library (not for distribution)
-ris test set/
 
 # IDE
 .vscode/

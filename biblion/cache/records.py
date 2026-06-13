@@ -53,6 +53,29 @@ class PaperRecord:
     s2_fields_of_study:    Optional[str] = None    # JSON array of {'category', 'source'} dicts
     pubmed_id:             Optional[str] = None
     pubmed_central_id:     Optional[str] = None
+    citekey:               Optional[str] = None    # pandoc/BibTeX citation key (@key)
+
+    # Extended bibliographic fields (BibLaTeX superset). All optional; the
+    # merge writer resolves them through field_observations like the rest.
+    editors_json:          Optional[str] = None    # JSON list of editor names (mirrors authors_json)
+    volume:                Optional[str] = None
+    issue:                 Optional[str] = None
+    first_page:            Optional[str] = None
+    last_page:             Optional[str] = None
+    publisher:             Optional[str] = None
+    booktitle:             Optional[str] = None
+    series:                Optional[str] = None
+    edition:               Optional[str] = None
+    language:              Optional[str] = None
+    month:                 Optional[str] = None
+    # Editorial notice from the source DB: 'retracted'|'withdrawn'|'concern'|
+    # 'corrected'. None = no notice. Producers MUST leave it None (not a
+    # 'none' string) when clear, so absence never overrides a positive flag.
+    editorial_status:      Optional[str] = None
+
+    # Scheme-keyed secondary identifiers ({'issn': [...], 'isbn': [...],
+    # 'arxiv': [...], ...}); routed to the identifiers table by the writer.
+    extra_identifiers:     dict = field(default_factory=dict)
 
     # Per-source citation counts (separate table; merge writer routes these)
     cit_count:     Optional[int] = None       # accompanies oa_id when source='oa_*'

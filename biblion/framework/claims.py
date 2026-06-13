@@ -549,6 +549,25 @@ CANDIDATE_QUERIES: dict[str, dict] = {
         """,
         'order_by': "ORDER BY b.is_seed DESC, b.discovery_count DESC, b.id ASC",
     },
+    'enrich_biblio_crossref': {
+        'service': 'crossref',
+        'fields': ('volume', 'first_page', 'publisher'),
+        # Papers with a DOI still missing the publisher-deposited detail OA/S2
+        # rarely carry. Backed by idx_papers_needs_biblio (db._SCHEMA).
+        'candidate_sql': """
+            SELECT p.id AS id, p.doi AS doi,
+                   p.is_seed AS is_seed, p.discovery_count AS discovery_count,
+                   (p.volume     IS NULL) AS need_volume,
+                   (p.first_page IS NULL) AS need_first_page,
+                   (p.publisher  IS NULL) AS need_publisher
+            FROM papers p
+            WHERE p.doi IS NOT NULL
+              AND p.is_rejected = 0
+              AND (p.volume IS NULL OR p.first_page IS NULL
+                   OR p.publisher IS NULL)
+        """,
+        'order_by': "ORDER BY b.is_seed DESC, b.discovery_count DESC, b.id ASC",
+    },
     'enrich_stubs_oa': {
         'service': 'oa',
         'fields': ('_all',),

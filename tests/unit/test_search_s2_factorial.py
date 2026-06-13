@@ -119,7 +119,8 @@ class TestPaperRecordFromSearchHit:
     def test_builds_record_with_provenance_in_raw(self):
         hit = {
             'paperId': 'sha123',
-            'externalIds': {'DOI': '10.1/x', 'PubMed': '99'},
+            'externalIds': {'DOI': '10.1/x', 'PubMed': '99',
+                            'ArXiv': '2401.00001', 'MAG': '2999'},
             'title': 'Soil microbes', 'year': 2023,
             'authors': [{'name': 'Smith'}, {'name': 'Lee'}],
             'venue': 'Soil J',
@@ -141,6 +142,9 @@ class TestPaperRecordFromSearchHit:
         assert rec.influential_cit_count == 2
         assert rec.is_open_access is True
         assert rec.pubmed_id == '99'
+        # externalIds now parsed into extra_identifiers at search time (parity
+        # with enrich_metadata_s2), not dropped until a later enrichment pass.
+        assert rec.extra_identifiers == {'arxiv': ['2401.00001'], 'mag': ['2999']}
         # Authors serialised
         assert 'Smith' in rec.authors_json
         # Provenance in raw

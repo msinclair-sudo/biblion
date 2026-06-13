@@ -16,7 +16,7 @@ from typing import Optional
 
 from ..cache.records import PaperRecord, CitationRecord
 from ..clients.semanticscholar import (
-    SemanticScholarClient, _normalise_doi, S2_BATCH_SIZE,
+    SemanticScholarClient, _normalise_doi, S2_BATCH_SIZE, parse_external_ids,
 )
 from ..framework import Module, ModuleResult, ValidationResult
 
@@ -66,6 +66,7 @@ def _parse_to_record(work: dict, source: str) -> PaperRecord:
     # S2's publicationTypes is a list of strings; flatten to one canonical first value.
     pub_types = work.get('publicationTypes') or []
     pub_type  = (pub_types[0].lower() if pub_types else None)
+    extra_ids, pmid, pmcid = parse_external_ids(ext)
     return PaperRecord(
         source       = source,
         doi          = doi,
@@ -78,6 +79,9 @@ def _parse_to_record(work: dict, source: str) -> PaperRecord:
         pub_type     = pub_type,
         cit_count    = work.get('citationCount'),
         ref_count    = work.get('referenceCount'),
+        pubmed_id        = pmid,
+        pubmed_central_id = pmcid,
+        extra_identifiers = extra_ids,
     )
 
 

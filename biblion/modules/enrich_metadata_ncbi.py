@@ -12,6 +12,7 @@ fills the per-field abstract holes left after OA/S2 have run. Per-field claim
 tracking (service='ncbi') means a paper stays eligible for NCBI's abstract
 even after OA/S2 succeeded on its other fields.
 """
+import json
 from typing import Optional
 
 from ..clients.ncbi import NcbiClient
@@ -41,6 +42,8 @@ def _to_record(pmid: str, info: dict, source: str) -> PaperRecord:
     # Harvest every identifier efetch returned — pmid, pmcid, doi — not just
     # the abstract. Each ID is another handle for requesting metadata later;
     # the merge writer COALESCEs any the paper was missing.
+    authors = info.get('authors')
+    issn = info.get('issn')
     return PaperRecord(
         source            = source,
         doi               = info.get('doi'),
@@ -49,6 +52,15 @@ def _to_record(pmid: str, info: dict, source: str) -> PaperRecord:
         title             = info.get('title'),
         year              = info.get('year'),
         abstract          = info.get('abstract'),
+        # Now also harvested from the efetch XML (previously ignored).
+        venue             = info.get('venue'),
+        volume            = info.get('volume'),
+        issue             = info.get('issue'),
+        first_page        = info.get('first_page'),
+        last_page         = info.get('last_page'),
+        authors_json      = json.dumps(authors) if authors else None,
+        extra_identifiers = {'issn': [issn]} if issn else {},
+        editorial_status  = info.get('editorial_status'),
     )
 
 

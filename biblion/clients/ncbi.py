@@ -38,6 +38,8 @@ from typing import Iterable, Optional
 
 import requests
 
+from . import ratelimit
+
 
 NCBI_BASE_URL    = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils'
 NCBI_API_KEY_ENV = 'ENTREZ_api'
@@ -82,6 +84,15 @@ def _normalise_doi(doi: Optional[str]) -> Optional[str]:
     return d or None
 
 
+def _text(el) -> Optional[str]:
+    """Trimmed text of an ElementTree element, or None. Tolerates None and
+    elements with nested markup (joins itertext)."""
+    if el is None:
+        return None
+    s = ''.join(el.itertext()).strip()
+    return s or None
+
+
 def _parse_efetch_xml(xml_text: str) -> dict:
     """Parse efetch PubMed XML into {pmid: {abstract,title,year,doi,pmcid}}.
 
@@ -108,6 +119,8 @@ def _parse_efetch_xml(xml_text: str) -> dict:
             continue
         article = cit.find('Article')
         title = year = abstract = doi = None
+        venue = volume = issue = first_page = last_page = issn = None
+        authors = None
         if article is not None:
             t = article.find('ArticleTitle')
             if t is not None:
@@ -130,6 +143,42 @@ def _parse_efetch_xml(xml_text: str) -> dict:
                 sections.append(f"{label}: {text}" if label else text)
             if sections:
                 abstract = '\n'.join(sections)
+            # Journal container, volume/issue/pages, ISSN.
+            venue = _text(article.find('.//Journal/Title'))
+            volume = _text(article.find('.//Journal/JournalIssue/Volume'))
+            issue = _text(article.find('.//Journal/JournalIssue/Issue'))
+            issn = _text(article.find('.//Journal/ISSN'))
+            pgn = _text(article.find('.//Pagination/MedlinePgn'))
+            if pgn:
+                # "123-45" (end may be abbreviated — a known PubMed quirk).
+                parts = pgn.split('-', 1)
+                first_page = parts[0].strip() or None
+                last_page = parts[1].strip() if len(parts) == 2 else None
+            names = []
+            for au in article.findall('.//AuthorList/Author'):
+                last = _text(au.find('LastName'))
+                fore = _text(au.find('ForeName')) or _text(au.find('Initials'))
+                collective = _text(au.find('CollectiveName'))
+                if last:
+                    names.append(f"{last}, {fore}" if fore else last)
+                elif collective:
+                    names.append(collective)
+            authors = names or None
+        # Editorial-notice status. Use the ARTICLE-side signals only (not the
+        # notice's own pub types): a PublicationType of "Retracted Publication"
+        # and CommentsCorrections RefType="…In" links (RetractionIn /
+        # ExpressionOfConcernIn / ErratumIn / CorrectionIn). Join the raw
+        # strings; the resolver reduces them to the most-severe token.
+        notices = []
+        if article is not None:
+            for pt in article.findall('.//PublicationTypeList/PublicationType'):
+                if (pt.text or '').strip() == 'Retracted Publication':
+                    notices.append('retracted')
+        for cc in art.findall('.//CommentsCorrections'):
+            ref = (cc.get('RefType') or '')
+            if ref.endswith('In'):       # RetractionIn / ErratumIn / ...
+                notices.append(ref)
+        editorial_status = ' '.join(notices) or None
         # DOI may be in an ELocationID; DOI + PMCID are also in the
         # PubmedData ArticleIdList. Collecting both IDs gives the pipeline
         # extra handles for later requests, so harvest them here for free.
@@ -148,7 +197,11 @@ def _parse_efetch_xml(xml_text: str) -> dict:
             elif idtype == 'pmc' and pmcid is None:
                 pmcid = val if val.upper().startswith('PMC') else f'PMC{val}'
         out[pmid] = {'abstract': abstract, 'title': title,
-                     'year': year, 'doi': doi, 'pmcid': pmcid}
+                     'year': year, 'doi': doi, 'pmcid': pmcid,
+                     'venue': venue, 'volume': volume, 'issue': issue,
+                     'first_page': first_page, 'last_page': last_page,
+                     'issn': issn, 'authors': authors,
+                     'editorial_status': editorial_status}
     return out
 
 
@@ -214,9 +267,12 @@ class NcbiClient:
         """
         url = f'{NCBI_BASE_URL}/{endpoint}'
         for attempt in range(self.max_retries + 1):
-            gap = self._interval - (time.time() - self._last)
-            if gap > 0:
-                time.sleep(gap)
+            # Global cross-process rate gate (rates.config, engine 'ncbi'); the
+            # local interval is the fallback when Redis is unavailable.
+            if not ratelimit.throttle('ncbi'):
+                gap = self._interval - (time.time() - self._last)
+                if gap > 0:
+                    time.sleep(gap)
             try:
                 resp = self._session.get(url, params=params, timeout=self.timeout)
             except requests.exceptions.RequestException as e:

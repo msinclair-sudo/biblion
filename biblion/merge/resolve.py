@@ -56,6 +56,19 @@ DEFAULT_FIELD_CLASS = {
     'publication_date': 'authoritative',
     'is_open_access': 'authoritative',
     'influential_cit_count': 'observational',
+    # Extended bibliographic fields (mirror db._FIELD_CLASS_SEED).
+    'editors': 'representational',
+    'volume': 'authoritative',
+    'issue': 'authoritative',
+    'first_page': 'authoritative',
+    'last_page': 'authoritative',
+    'publisher': 'authoritative',
+    'booktitle': 'authoritative',
+    'series': 'authoritative',
+    'edition': 'authoritative',
+    'language': 'authoritative',
+    'month': 'authoritative',
+    'editorial_status': 'authoritative',   # nominal; resolved by severity below
 }
 
 DEFAULT_SOURCE_TRUST = {
@@ -110,6 +123,33 @@ def _canon_pub_type(v) -> Optional[str]:
     return s.replace('-', '').replace('_', '').replace(' ', '')
 
 
+# Editorial-notice status, most-severe first. canonicalize() maps any source
+# string (Crossref 'retraction', PubMed 'Retracted Publication' /
+# 'ExpressionOfConcernIn', OpenAlex's mapped 'retracted', ...) to one of these.
+_EDITORIAL_SEVERITY = {'retracted': 4, 'withdrawn': 3, 'concern': 2, 'corrected': 1}
+
+
+def _canon_editorial(v) -> Optional[str]:
+    """Normalise any source's editorial-notice string to a canonical token, or
+    None for 'no notice' / an unrecognised notice type. Substring-based so it
+    tolerates the various phrasings each database uses."""
+    if v is None:
+        return None
+    s = str(v).strip().lower().replace('_', ' ').replace('-', ' ')
+    if not s or s in ('none', 'null', 'false', '0'):
+        return None
+    if 'retract' in s:
+        return 'retracted'
+    if 'withdraw' in s:
+        return 'withdrawn'
+    if 'concern' in s:                       # 'expression of concern'
+        return 'concern'
+    if any(k in s for k in ('correct', 'erratum', 'errata',
+                            'corrigend', 'addendum')):
+        return 'corrected'
+    return None
+
+
 def _canon_ws(v) -> Optional[str]:
     """Trim, collapse whitespace, casefold — the COMPARISON key for
     title/venue, so 'PROCESS BIOCHEMISTRY' and 'Process Biochemistry' (case +
@@ -135,7 +175,9 @@ def canonicalize(field: str, value):
         return None
     if field == 'pub_type':
         return _canon_pub_type(value)
-    if field == 'authors':
+    if field == 'editorial_status':
+        return _canon_editorial(value)
+    if field in ('authors', 'editors'):
         return _canon_authors_single(value)
     if field in ('title', 'venue'):
         # NOTE: venue identity is ultimately ISSN-keyed (later step); this is
@@ -299,8 +341,9 @@ def _author_tokens(names: list) -> frozenset:
     return frozenset(out)
 
 
-def resolve_authors(observations: Iterable[Observation]) -> Resolution:
-    """Resolve an authors field from per-source observations.
+def resolve_authors(observations: Iterable[Observation],
+                    field: str = 'authors') -> Resolution:
+    """Resolve an authors (or editors) field from per-source observations.
 
     1. Parse each observation into a list of _Author.
     2. Drop any list sharing ZERO tokens with the longest list (upstream
@@ -352,8 +395,28 @@ def resolve_authors(observations: Iterable[Observation]) -> Resolution:
     conflict = None
     if ambiguous:
         value = json.dumps([a.raw for a in base_names], separators=(',', ':'))
-        conflict = Conflict('authors', value, None, 'order_ambiguous')
+        conflict = Conflict(field, value, None, 'order_ambiguous')
     return Resolution(value, conflict)
+
+
+# ---------------------------------------------------------------------------
+# editorial_status — severity-max, sticky-true
+# ---------------------------------------------------------------------------
+
+def _resolve_editorial_status(observations) -> Resolution:
+    """Pick the MOST-SEVERE editorial notice across sources (sticky-true): if
+    any source flags retracted, the paper is retracted regardless of trust
+    rank. Not a trust-arbitrated authoritative field — a Crossref 'corrected'
+    must not outrank a PubMed 'retracted'. Only positive flags are ever
+    observed (producers emit None when clear), so absence never demotes a flag.
+    No conflict is logged: divergence is resolved by severity, by design."""
+    best, best_sev = None, 0
+    for o in observations:
+        token = _canon_editorial(o.value if o.value is not None else o.raw)
+        sev = _EDITORIAL_SEVERITY.get(token, 0)
+        if sev > best_sev:
+            best, best_sev = token, sev
+    return Resolution(best, None)
 
 
 # ---------------------------------------------------------------------------
@@ -392,8 +455,11 @@ def resolve(field: str,
             f"observational values are kept multi-valued, not collapsed."
         )
 
-    if field == 'authors':
-        return resolve_authors(obs)
+    if field in ('authors', 'editors'):
+        return resolve_authors(obs, field=field)
+
+    if field == 'editorial_status':
+        return _resolve_editorial_status(obs)
 
     if klass == 'representational':
         return _resolve_representational(field, obs, source_trust)

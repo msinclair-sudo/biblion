@@ -140,6 +140,16 @@ class TestIdentifierLookupIndexes:
             f"papers.{column} lookup does not use an index!\n{plan}"
         )
 
+    def test_identifiers_scheme_value_lookup(self, db_conn):
+        """Finding a paper by a secondary identifier (issn/isbn/arxiv/...)
+        must hit idx_identifiers_scheme_value, not scan the table."""
+        uses_index, plan = _planner_uses_index(
+            db_conn,
+            "SELECT paper_id FROM identifiers WHERE scheme = ? AND value = ?",
+            ('issn', '1234-5678'),
+        )
+        assert uses_index, plan
+
     def test_citations_primary_key_lookup(self, db_conn):
         """citations(citing_id, cited_id) is the PK; writer INSERT OR IGNORE
         depends on it being indexed."""

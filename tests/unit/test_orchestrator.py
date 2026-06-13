@@ -10,6 +10,7 @@ from biblion.framework import (
     Module, ModuleResult,
     Orchestrator, ContractError,
 )
+from biblion.clients.ratelimit import DailyLimitReached
 
 
 pytestmark = pytest.mark.unit
@@ -60,6 +61,21 @@ class TestDagConstruction:
         o.plan()
         with pytest.raises(ContractError):
             o.run('nope')
+
+    def test_daily_limit_is_caught_as_noop_not_raised(self, tmp_db_path):
+        """A producer raising DailyLimitReached (a BaseException, so it slips
+        past per-batch `except Exception`) must be caught by the Orchestrator
+        and recorded noop — never propagated as a crash."""
+        class Capped(Module):
+            name = 'capped'; description = 'hits its daily API cap'
+            produces = {'t.capped'}
+            def run(self, ctx):
+                raise DailyLimitReached('s2')
+        o = Orchestrator(db_path=tmp_db_path)
+        o.register(Capped())
+        o.plan()
+        # Should NOT raise — graceful stop.
+        o.run('capped', skip_prereqs=True)
 
     def test_cycle_detected(self, tmp_db_path):
         class X(Module):

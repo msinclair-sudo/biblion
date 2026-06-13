@@ -11,7 +11,6 @@ The pipeline is built around a single-writer SQLite model and a Redis cache,
 so producers can run in parallel without contending for the database lock.
 
 > **Status:** beta. The pipeline has been running continuously against a
-> 2M-paper / 23M-citation corpus.
 
 ---
 
@@ -41,6 +40,9 @@ pip install -e .
 ## A 60-second tour
 
 ```bash
+# 0. Open help
+biblion -h
+
 # 1. Create a database and a .env scaffold
 biblion init ~/biblion.db
 
@@ -49,6 +51,7 @@ biblion search searches/example.json
 
 # 2b. … or import an existing reference list (Zotero, EndNote, Mendeley)
 biblion import library.ris
+biblion export library.bib
 
 # 3. Enrich with metadata (Ctrl-C to stop)
 biblion enrich
@@ -58,10 +61,11 @@ biblion hop
 
 # 5. Snapshot the corpus
 biblion qc
-```
 
-That's the whole primary surface. Lower-level commands live under
+#Lower-level commands live under
 `biblion advanced`.
+
+```
 
 ---
 

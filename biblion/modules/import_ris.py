@@ -56,7 +56,7 @@ _TY_MAP = {
 _SCALAR_TAGS = {
     'TY', 'TI', 'T1', 'PY', 'Y1', 'T2', 'JF', 'JO', 'J2', 'JA',
     'VL', 'IS', 'SP', 'EP', 'DO', 'PB', 'CY', 'SN', 'M3', 'LA',
-    'AB', 'N2',
+    'AB', 'N2', 'ET', 'T3', 'DA',
 }
 
 # Tags that may repeat; collected as lists.
@@ -191,9 +191,37 @@ def _extract_pub_type(rec: RisRecord) -> Optional[str]:
     return _TY_MAP.get(ty, ty.lower())
 
 
+def _extract_editors(rec: RisRecord) -> Optional[str]:
+    """RIS A2 is the secondary/editor author tag."""
+    names = [n.strip() for n in rec.all('A2') if n.strip()]
+    return json.dumps(names) if names else None
+
+
+def _extract_month(rec: RisRecord) -> Optional[str]:
+    """RIS DA is 'YYYY/MM/DD' (parts optional). Pull the month component."""
+    da = rec.get('DA')
+    if not da:
+        return None
+    parts = da.split('/')
+    if len(parts) >= 2 and parts[1].strip():
+        return parts[1].strip()
+    return None
+
+
+def _extract_identifiers(rec: RisRecord, pub_type: Optional[str]) -> dict:
+    """RIS overloads SN for both ISSN (serials) and ISBN (books). Route by
+    publication type."""
+    sn = rec.get('SN')
+    if not sn:
+        return {}
+    scheme = 'isbn' if pub_type in ('book', 'book-chapter') else 'issn'
+    return {scheme: [sn]}
+
+
 def ris_record_to_paper(rec: RisRecord, source: str) -> Optional[PaperRecord]:
     """Build a PaperRecord. Returns None if no identifier could be derived."""
     doi = _extract_doi(rec)
+    pub_type = _extract_pub_type(rec)
     pr = PaperRecord(
         source           = source,
         doi              = doi,
@@ -202,7 +230,18 @@ def ris_record_to_paper(rec: RisRecord, source: str) -> Optional[PaperRecord]:
         venue            = _extract_venue(rec),
         authors_json     = _extract_authors(rec),
         abstract         = _extract_abstract(rec),
-        pub_type         = _extract_pub_type(rec),
+        pub_type         = pub_type,
+        editors_json     = _extract_editors(rec),
+        volume           = rec.get('VL'),
+        issue            = rec.get('IS'),
+        first_page       = rec.get('SP'),
+        last_page        = rec.get('EP'),
+        publisher        = rec.get('PB'),
+        series           = rec.get('T3'),
+        edition          = rec.get('ET'),
+        language         = rec.get('LA'),
+        month            = _extract_month(rec),
+        extra_identifiers = _extract_identifiers(rec, pub_type),
         raw              = json.dumps({'tags': rec.tags, 'lists': rec.lists},
                                        separators=(',', ':')),
     )

@@ -267,3 +267,149 @@ class TestClaimFlowFromWriter:
         grant = cache.pop_claim_grant('resolve_dois_via_pmid')
         assert grant is not None
         assert any(r['id'] == pid for r in grant.rows)
+
+
+# ---------------------------------------------------------------------------
+# Extended bibliographic fields + identifiers table
+# ---------------------------------------------------------------------------
+
+class TestExtendedFields:
+    def test_new_paper_persists_biblio_columns(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(
+            source='bib:t', doi='10.1/a', title='X',
+            volume='12', issue='3', first_page='100', last_page='120',
+            publisher='Springer', booktitle='BT', series='S', edition='2',
+            language='en', month='07',
+            editors_json='["Ng, Pat"]',
+        ))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT volume, issue, first_page, last_page, publisher, "
+            "booktitle, series, edition, language, month, editors "
+            "FROM papers WHERE doi = '10.1/a'").fetchone()
+        assert row['volume'] == '12'
+        assert row['first_page'] == '100' and row['last_page'] == '120'
+        assert row['publisher'] == 'Springer'
+        assert row['booktitle'] == 'BT' and row['series'] == 'S'
+        assert row['edition'] == '2' and row['language'] == 'en'
+        assert row['month'] == '07'
+        import json as _json
+        assert _json.loads(row['editors']) == ['Ng, Pat']
+
+    def test_extra_identifiers_routed_to_table(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(
+            source='s2_batch', doi='10.1/b', title='Y',
+            extra_identifiers={'arxiv': ['2401.00001'], 'issn': ['1234-5678']},
+        ))
+        w.run_cycle()
+        rows = dict(db_conn.execute(
+            "SELECT scheme, value FROM identifiers "
+            "WHERE paper_id = (SELECT id FROM papers WHERE doi='10.1/b')"
+        ).fetchall())
+        assert rows == {'arxiv': '2401.00001', 'issn': '1234-5678'}
+
+    def test_identifiers_insert_or_ignore_dedupes(
+        self, tmp_db_path, claims_db_path, cache, count_rows,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        for _ in range(2):
+            cache.push_paper(PaperRecord(
+                source='s2_batch', doi='10.1/c', title='Z',
+                extra_identifiers={'issn': ['1111-2222']}))
+            w.run_cycle()
+        assert count_rows('identifiers') == 1
+
+
+class TestEditorialStatus:
+    def test_retraction_persists_and_is_sticky(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        # Crossref flags it retracted.
+        cache.push_paper(PaperRecord(source='crossref_works', doi='10.1/r',
+                                     editorial_status='retracted'))
+        w.run_cycle()
+        # A later OpenAlex observation with NO notice must NOT clear it
+        # (producers emit None when clear -> no observation -> sticky-true).
+        cache.push_paper(PaperRecord(source='oa_works_doi', doi='10.1/r',
+                                     title='Paper', editorial_status=None))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT editorial_status FROM papers WHERE doi='10.1/r'").fetchone()
+        assert row['editorial_status'] == 'retracted'
+
+    def test_most_severe_across_sources_wins(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(source='crossref_works', doi='10.2/x',
+                                     editorial_status='correction'))
+        w.run_cycle()
+        cache.push_paper(PaperRecord(source='ncbi_efetch', doi='10.2/x',
+                                     editorial_status='Retracted Publication'))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT editorial_status FROM papers WHERE doi='10.2/x'").fetchone()
+        assert row['editorial_status'] == 'retracted'
+
+    def test_clean_paper_has_null_status(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(source='oa_works_doi', doi='10.3/ok',
+                                     title='Fine'))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT editorial_status FROM papers WHERE doi='10.3/ok'").fetchone()
+        assert row['editorial_status'] is None
+
+
+class TestEditorialStatusTimestamp:
+    def test_timestamp_set_on_first_flag(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(source='crossref_works', doi='10.1/t',
+                                     editorial_status='retracted'))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT editorial_status, editorial_status_at FROM papers "
+            "WHERE doi='10.1/t'").fetchone()
+        assert row['editorial_status'] == 'retracted'
+        assert row['editorial_status_at'] is not None
+
+    def test_timestamp_preserved_when_status_unchanged(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(source='crossref_works', doi='10.2/t',
+                                     editorial_status='retracted'))
+        w.run_cycle()
+        first = db_conn.execute(
+            "SELECT editorial_status_at FROM papers WHERE doi='10.2/t'"
+        ).fetchone()['editorial_status_at']
+        # Same status again from another source -> timestamp must not move.
+        cache.push_paper(PaperRecord(source='ncbi_efetch', doi='10.2/t',
+                                     editorial_status='Retracted Publication'))
+        w.run_cycle()
+        again = db_conn.execute(
+            "SELECT editorial_status_at FROM papers WHERE doi='10.2/t'"
+        ).fetchone()['editorial_status_at']
+        assert again == first
+
+    def test_clean_paper_has_null_timestamp(
+        self, tmp_db_path, claims_db_path, cache, db_conn,
+    ):
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_paper(PaperRecord(source='oa_works_doi', doi='10.3/t',
+                                     title='Fine'))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT editorial_status_at FROM papers WHERE doi='10.3/t'").fetchone()
+        assert row['editorial_status_at'] is None
