@@ -2006,7 +2006,7 @@ def cmd_embedding(args) -> int:
     try:
         embed_mod.run_embed(Path(args.db), dataset=args.dataset, out_dir=out_dir,
                             batch=args.batch, max_length=args.max_length,
-                            device=args.device, normalize=not args.no_normalize,
+                            device=args.device, normalize=args.normalize,
                             domain=args.domain)
     except FileNotFoundError as e:
         print(f"[biblion embedding] {e}")
@@ -2105,11 +2105,14 @@ def _add_advanced_subcommands(sub) -> None:
     sem.add_argument('--device', default=None, help='cuda / cpu (default: auto)')
     sem.add_argument('--subset', default=None,
         help='Embed a named subset (subsets/<name>/) instead of the full project')
-    sem.add_argument('--no-normalize', action='store_true',
-        help='Skip abbreviation expansion entirely (use for other domains)')
+    sem.add_argument('--normalize', action='store_true',
+        help='Opt IN to domain abbreviation expansion (OFF by default). Risky: '
+             'the dictionaries always-fire on overloaded tokens (e.g. soil '
+             'as->arsenic) and misfire across fields — use only on a single, '
+             'vetted domain, never for a cross-domain master.')
     from .text_normalization import DOMAIN_MAPS
     sem.add_argument('--domain', default='soil', choices=sorted(DOMAIN_MAPS),
-        help='Abbreviation dictionary domain (default: soil)')
+        help='Dictionary domain used ONLY when --normalize is set (default: soil)')
 
     # ---- named subsets (nested: subset make | list | remove) ------------
     ssub = sub.add_parser('subset',

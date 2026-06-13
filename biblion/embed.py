@@ -8,10 +8,12 @@ float32 `embeddings.npy` that the toy reads via datasource/sqlite.js.
 Contract: row i of embeddings.npy == row i of nodes.jsonl == paper_index["i"].
 Verified before writing.
 
-Text fed to the model is `title [SEP] abstract`. Domain abbreviation expansion
-(text_normalization) is applied by default; `domain` selects the dictionary
-(default 'soil', also 'armyworm'). Pass normalize=False for a field with no
-dictionary.
+Text fed to the model is `title [SEP] abstract`, raw by default. Domain
+abbreviation expansion (text_normalization) is **off by default** and opt-in
+(`normalize=True` + a `domain`): the per-domain dictionaries contain always-fire
+entries for short, overloaded tokens (e.g. soil `as`->arsenic) that misfire on
+the English word "as" and across other fields, so raw text is the safe default
+and the only recipe that stays unionable into a cross-domain master.
 
 torch / transformers / adapters are heavy and GPU-oriented, so they are an
 OPTIONAL dependency (`pip install 'biblion[embed]'`) imported lazily inside
@@ -48,7 +50,7 @@ def load_nodes(jsonl_path: Path):
     return nodes
 
 
-def _embed(nodes, batch_size, max_length, device=None, normalize=True, domain="soil"):
+def _embed(nodes, batch_size, max_length, device=None, normalize=False, domain="soil"):
     try:
         import torch
         from transformers import AutoTokenizer
@@ -111,7 +113,7 @@ def _embed(nodes, batch_size, max_length, device=None, normalize=True, domain="s
 def run_embed(db_path: Path, dataset: str | None = None, out_dir: Path | None = None,
               in_path: Path | None = None, out_path: Path | None = None,
               batch=BATCH_SIZE, max_length=MAX_LENGTH, device=None,
-              normalize=True, domain="soil") -> Path:
+              normalize=False, domain="soil") -> Path:
     """Embed the node set written by run_snapshot. Defaults mirror snapshot:
     out_dir = the DB's parent, reading nodes.jsonl and writing embeddings.npy
     there. Returns the path to the written .npy."""
