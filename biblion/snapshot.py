@@ -43,11 +43,29 @@ NODE_SET_WHERE = (
     "AND title IS NOT NULL AND abstract IS NOT NULL"
 )
 
+# Structural mode (--include-structural, spec §3): drop the is_stub=0 AND
+# abstract-NOT-NULL requirement so externally-cited "ghost" endpoints become
+# nodes too. A node is `structural` (no SPECTER2 row) when it is a stub or
+# lacks an abstract -- exactly the rows the default filter excludes. We emit
+# embedded nodes (those that pass NODE_SET_WHERE) first and structural nodes
+# last so embeddings.npy stays a contiguous m*d block (rows >= m are ghosts).
+STRUCTURAL_SET_WHERE = "is_rejected = 0 AND title IS NOT NULL"
+STRUCTURAL_FLAG_EXPR = "(is_stub = 1 OR abstract IS NULL)"
+
 NODE_SET_QUERY = f"""
 SELECT id, title, abstract, year, authors, venue
 FROM papers
 WHERE {NODE_SET_WHERE}
 ORDER BY id
+"""
+
+# Embedded-first, structural-last ordering. The CASE key keeps the two blocks
+# contiguous; id is the canonical tiebreak within each block.
+STRUCTURAL_SET_QUERY = f"""
+SELECT id, title, abstract, year, authors, venue, {STRUCTURAL_FLAG_EXPR} AS structural
+FROM papers
+WHERE {STRUCTURAL_SET_WHERE}
+ORDER BY {STRUCTURAL_FLAG_EXPR}, id
 """
 
 NODE_IDS_QUERY = f"SELECT id FROM papers WHERE {NODE_SET_WHERE} ORDER BY id"
@@ -75,10 +93,10 @@ def _snapshot_db(src: Path, dst: Path) -> None:
         d.execute("PRAGMA journal_mode=DELETE")
 
 
-def _edge_survival(conn: sqlite3.Connection) -> dict:
+def _edge_survival(conn: sqlite3.Connection, where: str = NODE_SET_WHERE) -> dict:
     """How many citation edges have BOTH endpoints in the node set."""
     conn.execute("DROP TABLE IF EXISTS _nset")
-    conn.execute(f"CREATE TEMP TABLE _nset AS SELECT id FROM papers WHERE {NODE_SET_WHERE}")
+    conn.execute(f"CREATE TEMP TABLE _nset AS SELECT id FROM papers WHERE {where}")
     total = conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
     surviving = conn.execute(
         "SELECT COUNT(*) FROM citations "
@@ -89,13 +107,20 @@ def _edge_survival(conn: sqlite3.Connection) -> dict:
 
 
 def run_snapshot(db_path: Path, dataset: str | None = None,
-                 out_dir: Path | None = None) -> dict:
+                 out_dir: Path | None = None,
+                 include_structural: bool = False) -> dict:
     """Build the snapshot bundle from a live biblion DB.
 
     db_path : the live DB to snapshot.
     dataset : logical name (default: DB filename stem); recorded in the manifest.
     out_dir : where the bundle is written (default: the DB's parent dir, i.e.
               right next to it).
+    include_structural : spec §3. When True the node set is widened to
+              `is_rejected=0 AND title IS NOT NULL` (stubs / abstract-less rows
+              included). Embedded nodes are emitted first (rows 0..m-1) and
+              structural nodes last (m..n-1) so embeddings.npy stays a
+              contiguous m*d block; every node row carries a `structural` flag.
+              When False, behaviour is byte-for-byte identical to before.
 
     Returns the manifest dict. Raises ValueError if the node set is empty.
     """
@@ -116,43 +141,62 @@ def run_snapshot(db_path: Path, dataset: str | None = None,
     _snapshot_db(src, snapshot)
 
     # Everything below queries the SNAPSHOT, not the live DB.
+    node_where = STRUCTURAL_SET_WHERE if include_structural else NODE_SET_WHERE
+    node_query = STRUCTURAL_SET_QUERY if include_structural else NODE_SET_QUERY
+    node_order = ("ORDER BY (is_stub=1 OR abstract IS NULL), id"
+                  if include_structural else "ORDER BY id")
+
     conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(NODE_SET_QUERY).fetchall()
+        rows = conn.execute(node_query).fetchall()
         n = len(rows)
         if n == 0:
             raise ValueError("node set is empty -- check the filter / db")
 
+        n_structural = 0
         paper_index = {}
         with open(jsonl_path, "w", encoding="utf-8") as jf:
             for i, r in enumerate(rows):
                 paper_index[str(i)] = r["id"]
-                jf.write(json.dumps({
+                node = {
                     "row": i,
                     "id": r["id"],
                     "title": r["title"] or "",
                     "abstract": r["abstract"] or "",
                     "year": r["year"],
-                }, ensure_ascii=False) + "\n")
+                }
+                if include_structural:
+                    structural = bool(r["structural"])
+                    n_structural += structural
+                    node["structural"] = structural
+                jf.write(json.dumps(node, ensure_ascii=False) + "\n")
         with open(index_path, "w", encoding="utf-8") as f:
-            json.dump(paper_index, f)
+            # In structural mode the index carries the per-row flag so the embed
+            # step / toy can tell which rows have no embedding (rows >= m).
+            if include_structural:
+                json.dump({k: {"id": v, "structural": bool(rows[int(k)]["structural"])}
+                           for k, v in paper_index.items()}, f)
+            else:
+                json.dump(paper_index, f)
 
-        edges = _edge_survival(conn)
+        edges = _edge_survival(conn, node_where)
         years = conn.execute(
             f"SELECT COUNT(*) n, SUM(year IS NULL) ynull, MIN(year) mn, MAX(year) mx "
-            f"FROM papers WHERE {NODE_SET_WHERE}"
+            f"FROM papers WHERE {node_where}"
         ).fetchone()
     finally:
         conn.close()
+
+    n_embedded = n - n_structural
 
     manifest = {
         "dataset": dataset,
         "source_db": src.name,
         "snapshot_db": snapshot.name,
         "n_nodes": n,
-        "node_set_where": NODE_SET_WHERE,
-        "node_order": "ORDER BY id",
+        "node_set_where": node_where,
+        "node_order": node_order,
         "edges_total": edges["edges_total"],
         "edges_surviving": edges["edges_surviving"],
         "edge_survival_pct": round(100 * edges["edges_surviving"] / edges["edges_total"], 1)
@@ -164,12 +208,117 @@ def run_snapshot(db_path: Path, dataset: str | None = None,
         "embedding_adapter": None,
         "embedding_dim": None,
     }
+    if include_structural:
+        manifest["include_structural"] = True
+        manifest["n_structural"] = n_structural
+        manifest["n_embedded"] = n_embedded
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     surv = manifest["edge_survival_pct"]
     print(f"[snapshot] nodes={n}  edges {edges['edges_surviving']}/{edges['edges_total']} "
           f"({surv}% survive node filter)  years {years['mn']}..{years['mx']}")
+    if include_structural:
+        print(f"[snapshot] structural mode: {n_embedded} embedded + "
+              f"{n_structural} structural (ghost) nodes")
     print(f"[snapshot] wrote:\n  {snapshot}\n  {index_path}\n  {jsonl_path}\n  {manifest_path}")
     print(f"[snapshot] next: biblion advanced embedding --dataset {dataset}")
     return manifest
+
+
+# ---------------------------------------------------------------------------
+# Named subsets — a slim, embeddable-only slice of a project, sharing the
+# project's snapshot DB. Layout: <project_dir>/subsets/<name>/{paper_index.json,
+# nodes.jsonl, manifest.json, embeddings.npy (after `embedding --subset`)}.
+# The toy reads the shared <project>_snapshot.db for metadata + edges and the
+# subset's paper_index/embeddings for the node set + vectors.
+# ---------------------------------------------------------------------------
+
+def build_subset(snapshot_db: Path, name: str, where: str, params: tuple,
+                 project_dir: Path, dataset: str, label: str | None = None) -> dict:
+    """Carve a named subset from a project's snapshot DB.
+
+    snapshot_db : the project's `<project>_snapshot.db` (must already exist).
+    name        : subset name (becomes subsets/<name>/).
+    where, params : the selector, ANDed with the embeddable node-set filter.
+    project_dir : where subsets/ lives (the snapshot DB's parent).
+    Returns the subset manifest. Raises if the snapshot is missing / subset empty.
+    """
+    snap = Path(snapshot_db)
+    if not snap.exists():
+        raise FileNotFoundError(
+            f"project snapshot not found: {snap} (run `biblion advanced snapshot` first)")
+
+    out = Path(project_dir) / "subsets" / name
+    out.mkdir(parents=True, exist_ok=True)
+    index_path = out / "paper_index.json"
+    jsonl_path = out / "nodes.jsonl"
+    manifest_path = out / "manifest.json"
+
+    query = (f"SELECT id, title, abstract, year FROM papers "
+             f"WHERE {NODE_SET_WHERE} AND ({where}) ORDER BY id")
+    conn = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+    n = len(rows)
+    if n == 0:
+        raise ValueError(f"subset {name!r} is empty -- check the selector")
+
+    paper_index = {}
+    with open(jsonl_path, "w", encoding="utf-8") as jf:
+        for i, r in enumerate(rows):
+            paper_index[str(i)] = r["id"]
+            jf.write(json.dumps({
+                "row": i, "id": r["id"],
+                "title": r["title"] or "", "abstract": r["abstract"] or "",
+                "year": r["year"],
+            }, ensure_ascii=False) + "\n")
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(paper_index, f)
+
+    manifest = {
+        "subset": name,
+        "label": label or name,
+        "dataset": dataset,
+        "snapshot_db": snap.name,          # shared project DB, sibling of subsets/
+        "n_nodes": n,
+        "selector": where,
+        "selector_params": list(params),
+        # the embed step fills these in:
+        "embedding_model": None,
+        "embedding_adapter": None,
+        "embedding_dim": None,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    write_subset_index(project_dir)
+    print(f"[subset] {name}: {n} nodes  ->  {out}")
+    print(f"[subset] next: biblion advanced embedding --subset {name}")
+    return manifest
+
+
+def write_subset_index(project_dir: Path) -> None:
+    """Rebuild <project_dir>/subsets/index.json from each subset's manifest.
+    The toy fetches this to list the subsets available for a project."""
+    subsets_dir = Path(project_dir) / "subsets"
+    if not subsets_dir.is_dir():
+        return
+    entries = []
+    for man in sorted(subsets_dir.glob("*/manifest.json")):
+        try:
+            m = json.loads(man.read_text())
+        except (OSError, ValueError):
+            continue
+        entries.append({
+            "name": m.get("subset", man.parent.name),
+            "label": m.get("label", man.parent.name),
+            "n_nodes": m.get("n_nodes"),
+            "selector": m.get("selector"),
+            "embedded": (man.parent / "embeddings.npy").exists(),
+        })
+    with open(subsets_dir / "index.json", "w", encoding="utf-8") as f:
+        json.dump({"subsets": entries}, f, indent=2)

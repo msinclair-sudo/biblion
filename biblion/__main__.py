@@ -20,6 +20,7 @@ Common options
     --redis-url URL       Redis URL for the cache (default redis://localhost:6379/0)
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -829,26 +830,11 @@ def cmd_export(args) -> int:
         fmt = 'ris' if out.suffix.lower() == '.ris' else 'bib'
 
     # Build the WHERE clause from exactly one selector.
-    selectors = [bool(args.seeds), bool(args.all), args.year is not None,
-                 bool(args.ids)]
-    if sum(selectors) != 1:
-        print("[biblion export] choose exactly one selector: "
-              "--seeds | --all | --year YEAR | --ids ID,ID,...")
+    try:
+        where, params = build_selector(args)
+    except _SelectorError as e:
+        print(f"[biblion export] {e}")
         return 2
-
-    if args.seeds:
-        where, params = "is_seed = 1", ()
-    elif args.all:
-        where, params = "1 = 1", ()
-    elif args.year is not None:
-        where, params = "year = ?", (args.year,)
-    else:
-        id_list = [s.strip() for s in args.ids.split(',') if s.strip()]
-        if not id_list:
-            print("[biblion export] --ids was empty")
-            return 2
-        ph = ','.join('?' * len(id_list))
-        where, params = f"id IN ({ph})", tuple(id_list)
 
     conn = get_connection(args.db)
     try:
@@ -1904,6 +1890,92 @@ def cmd_daemon(args) -> int:
     return 0
 
 
+class _SelectorError(Exception):
+    """Bad selector arguments for build_selector()."""
+
+
+def build_selector(args) -> tuple:
+    """Return (where, params) from exactly one of --seeds / --all / --year /
+    --ids / --where. Shared by `export` and `subset make` so the two can't
+    drift. Raises _SelectorError on misuse. (--where is free-form SQL — the
+    caller's trust boundary; only used by surfaces that expose it.)"""
+    seeds = bool(getattr(args, 'seeds', False))
+    take_all = bool(getattr(args, 'all', False))
+    year = getattr(args, 'year', None)
+    ids = getattr(args, 'ids', None)
+    where = getattr(args, 'where', None)
+    if sum([seeds, take_all, year is not None, bool(ids), bool(where)]) != 1:
+        raise _SelectorError("choose exactly one selector: --seeds | --all | "
+                             "--year YEAR | --ids ID,ID,... | --where SQL")
+    if seeds:
+        return "is_seed = 1", ()
+    if take_all:
+        return "1 = 1", ()
+    if year is not None:
+        return "year = ?", (year,)
+    if ids:
+        id_list = [s.strip() for s in ids.split(',') if s.strip()]
+        if not id_list:
+            raise _SelectorError("--ids was empty")
+        ph = ','.join('?' * len(id_list))
+        return f"id IN ({ph})", tuple(id_list)
+    return where, ()
+
+
+def cmd_subset(args) -> int:
+    """Manage named node subsets of a project (make / list / remove). A subset
+    is a slim, embeddable-only slice that shares the project's snapshot DB. No
+    Redis."""
+    from . import snapshot as snapshot_mod
+    db = Path(args.db)
+    project_dir = db.parent
+    dataset = db.stem
+    snapshot_db = project_dir / f"{db.stem}_snapshot.db"
+    sub = args.subset_cmd
+
+    if sub == 'make':
+        try:
+            where, params = build_selector(args)
+        except _SelectorError as e:
+            print(f"[biblion subset] {e}")
+            return 2
+        try:
+            snapshot_mod.build_subset(snapshot_db, args.name, where, tuple(params),
+                                      project_dir, dataset, label=args.label)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"[biblion subset] {e}")
+            return 2
+        return 0
+
+    if sub == 'remove':
+        target = project_dir / "subsets" / args.name
+        if not target.is_dir():
+            print(f"[biblion subset] no such subset: {args.name}")
+            return 2
+        if not args.force:
+            print(f"[biblion subset] pass --force to remove {target}")
+            return 2
+        import shutil
+        shutil.rmtree(target)
+        snapshot_mod.write_subset_index(project_dir)
+        print(f"[biblion subset] removed {args.name}")
+        return 0
+
+    # default / 'list'
+    idx = project_dir / "subsets" / "index.json"
+    subs = json.loads(idx.read_text()).get("subsets", []) if idx.exists() else []
+    if not subs:
+        print(f"No subsets for project '{dataset}'. Make one with "
+              f"`biblion advanced subset make <name> --where ...`.")
+        return 0
+    width = max(len(s['name']) for s in subs)
+    print(f"Subsets for '{dataset}' (* = embedded):")
+    for s in subs:
+        mark = '*' if s.get('embedded') else ' '
+        print(f"  {mark} {s['name']:<{width}}  n={s.get('n_nodes')}  {s.get('selector', '')}")
+    return 0
+
+
 def cmd_snapshot(args) -> int:
     """Snapshot the DB into a read-only network-toy bundle (+ node set).
 
@@ -1914,7 +1986,8 @@ def cmd_snapshot(args) -> int:
     from . import snapshot as snapshot_mod
     try:
         snapshot_mod.run_snapshot(Path(args.db), dataset=args.dataset,
-                                  out_dir=args.out)
+                                  out_dir=args.out,
+                                  include_structural=args.include_structural)
     except (FileNotFoundError, ValueError) as e:
         print(f"[biblion snapshot] {e}")
         return 2
@@ -1922,16 +1995,25 @@ def cmd_snapshot(args) -> int:
 
 
 def cmd_embedding(args) -> int:
-    """Embed the snapshot node set with SPECTER2 (needs the 'embed' extra)."""
+    """Embed the snapshot node set with SPECTER2 (needs the 'embed' extra).
+    With --subset <name>, embeds subsets/<name>/nodes.jsonl instead of the full
+    project bundle and refreshes the subsets index."""
     from . import embed as embed_mod
+    subset = getattr(args, 'subset', None)
+    out_dir = args.out
+    if subset:
+        out_dir = Path(args.db).parent / "subsets" / subset
     try:
-        embed_mod.run_embed(Path(args.db), dataset=args.dataset, out_dir=args.out,
+        embed_mod.run_embed(Path(args.db), dataset=args.dataset, out_dir=out_dir,
                             batch=args.batch, max_length=args.max_length,
                             device=args.device, normalize=not args.no_normalize,
                             domain=args.domain)
     except FileNotFoundError as e:
         print(f"[biblion embedding] {e}")
         return 2
+    if subset:
+        from . import snapshot as snapshot_mod
+        snapshot_mod.write_subset_index(Path(args.db).parent)
     return 0
 
 
@@ -2006,6 +2088,10 @@ def _add_advanced_subcommands(sub) -> None:
         help='Logical dataset name (default: DB filename stem)')
     ssn.add_argument('--out', type=Path, default=None,
         help='Output dir (default: alongside the DB)')
+    ssn.add_argument('--include-structural', action='store_true',
+        help='Widen the node set to is_rejected=0 AND title NOT NULL (include '
+             'stubs / abstract-less ghost endpoints). Embedded nodes are emitted '
+             'first, structural nodes last; each node carries a `structural` flag.')
 
     sem = sub.add_parser('embedding',
         help='Embed the snapshot node set with SPECTER2 -> embeddings.npy '
@@ -2017,11 +2103,32 @@ def _add_advanced_subcommands(sub) -> None:
     sem.add_argument('--batch', type=int, default=32)
     sem.add_argument('--max-length', type=int, default=512)
     sem.add_argument('--device', default=None, help='cuda / cpu (default: auto)')
+    sem.add_argument('--subset', default=None,
+        help='Embed a named subset (subsets/<name>/) instead of the full project')
     sem.add_argument('--no-normalize', action='store_true',
         help='Skip abbreviation expansion entirely (use for other domains)')
     from .text_normalization import DOMAIN_MAPS
     sem.add_argument('--domain', default='soil', choices=sorted(DOMAIN_MAPS),
         help='Abbreviation dictionary domain (default: soil)')
+
+    # ---- named subsets (nested: subset make | list | remove) ------------
+    ssub = sub.add_parser('subset',
+        help='Manage named node subsets of a project (slim; share the snapshot DB)')
+    ssubsub = ssub.add_subparsers(dest='subset_cmd', metavar='SUBCMD')
+    ss_make = ssubsub.add_parser('make',
+        help='Carve a named subset by a selector (then `embedding --subset <name>`)')
+    ss_make.add_argument('name')
+    ss_make.add_argument('--label', default=None, help='Human label (default: name)')
+    ss_make.add_argument('--where', default=None,
+        help='Free-form SQL WHERE clause, e.g. "year >= 2020 AND is_seed = 1"')
+    ss_make.add_argument('--seeds', action='store_true', help='Seed papers (is_seed=1)')
+    ss_make.add_argument('--all', action='store_true', help='Every embeddable paper')
+    ss_make.add_argument('--year', type=int, default=None, help='A single publication year')
+    ss_make.add_argument('--ids', type=str, default=None, help='Comma-separated papers.id list')
+    ssubsub.add_parser('list', help='List subsets for the current project (default)')
+    ss_rm = ssubsub.add_parser('remove', help='Delete a subset bundle')
+    ss_rm.add_argument('name')
+    ss_rm.add_argument('--force', action='store_true', help='Confirm deletion')
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -2168,6 +2275,7 @@ _ADVANCED_DISPATCH = {
     'backfill-observations': 'cmd_backfill_observations',
     'snapshot':  'cmd_snapshot',
     'embedding': 'cmd_embedding',
+    'subset':    'cmd_subset',
 }
 
 
@@ -2229,7 +2337,7 @@ def main(argv: list[str] = None) -> int:
     # commands `list` / `plan` don't either.
     _NO_REDIS = {'init', 'qc', 'backup', 'migrate', 'export', 'flag-retractions'}
     _NO_REDIS_ADVANCED = {'list', 'plan', 'backfill-observations',
-                          'snapshot', 'embedding'}
+                          'snapshot', 'embedding', 'subset'}
     needs_redis = args.cmd not in _NO_REDIS and not (
         args.cmd == 'advanced' and args.advanced_cmd in _NO_REDIS_ADVANCED)
     if needs_redis:
