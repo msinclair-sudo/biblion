@@ -31,6 +31,11 @@ dynamic = ["version"]
 dev = [
     "pytest",
     "build",
+    # network-toy tests are Playwright-driven pytest. Pinned: an unpinned
+    # upgrade bumps the required browser build and strands the cached one
+    # ("Executable doesn't exist…"). After install, run once:
+    #     playwright install chromium
+    "playwright==1.60.0",
 ]
 # SPECTER2 embedding for `biblion advanced embedding` (network-toy bundle).
 # Heavy / GPU-oriented and imported lazily, so kept out of the core install.
@@ -66,7 +71,6 @@ include = [
     "searches/",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md",
     "pyproject.toml",
 ]
 
