@@ -6,6 +6,7 @@ dependencies:
   - numpy             # reading / writing .npy embedding artifacts (literture-network/)
   - pip
   - pytest              # test runner (tests/ are Playwright-driven pytest)
+  - pytest-xdist        # `-n auto` parallel browser tier (pytest.ini addopts)
   - pip:
       # Pinned: an unpinned upgrade bumps the REQUIRED browser build and
       # strands the cached one ("Executable doesn't exist…"). After creating
