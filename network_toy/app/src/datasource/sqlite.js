@@ -41,37 +41,58 @@ const NODE_SET_WHERE =
 const STRUCTURAL_WHERE =
   "is_rejected = 0 AND title IS NOT NULL AND (is_stub = 1 OR abstract IS NULL)";
 
-const DATASETS = {
-  // id → {label, sqlitePath, embeddingsPath, indexPath}. Paths are absolute
-  // fetch URLs (static server rooted at network_toy/, whose data/ symlinks to
-  // the repo-root data/). One entry per biblion project; the DB MUST be the
-  // snapshot copy (…_snapshot.db), not the live <name>.db. Add a project by
-  // copying a block and running `biblion advanced snapshot` for it.
-  biblion: {
-    label: "biblion test corpus",
-    sqlitePath: "/data/biblion/biblion_snapshot.db",
-    embeddingsPath: "/data/biblion/embeddings.npy",
-    indexPath: "/data/biblion/paper_index.json",
-  },
-  fallworm: {
-    label: "fallworm",
-    sqlitePath: "/data/fallworm/fallworm_snapshot.db",
-    embeddingsPath: "/data/fallworm/embeddings.npy",
-    indexPath: "/data/fallworm/paper_index.json",
-  },
-  microalgae: {
-    label: "microalgae",
-    sqlitePath: "/data/microalgae/microalgae_snapshot.db",
-    embeddingsPath: "/data/microalgae/embeddings.npy",
-    indexPath: "/data/microalgae/paper_index.json",
-  },
-  PhD_proposal: {
-    label: "PhD proposal",
-    sqlitePath: "/data/PhD_proposal/PhD_proposal_snapshot.db",
-    embeddingsPath: "/data/PhD_proposal/embeddings.npy",
-    indexPath: "/data/PhD_proposal/paper_index.json",
-  },
-};
+// id → {label, sqlitePath, embeddingsPath, indexPath}. No longer hardcoded:
+// the list is fetched from serve.py /api/datasets (which scans data/*/ for
+// loadable datasets), then this map is populated by datasetEntry()/loadDatasets().
+// Paths are derived from the id and resolved by the static server (rooted at
+// network_toy/, whose data/ symlinks to the repo-root data/). The DB is always
+// the snapshot copy (…_snapshot.db), never the live <name>.db.
+const DATASETS = {};
+
+// Build the per-dataset fetch URLs from its id. Centralised so the picker and
+// produceSqlite agree on layout. (Previously the literal paths in DATASETS;
+// kept identical — /data/<id>/<id>_snapshot.db etc.)
+function datasetEntry(id, label) {
+  return {
+    label: label || id,
+    sqlitePath: `/data/${id}/${id}_snapshot.db`,
+    embeddingsPath: `/data/${id}/embeddings.npy`,
+    indexPath: `/data/${id}/paper_index.json`,
+  };
+}
+
+// Fetch the loadable datasets from serve.py and (re)populate DATASETS +
+// SQLITE_OPTIONS. Returns the dataset list. Best-effort: a server without the
+// API (plain http.server) yields an empty list and the picker shows nothing.
+let _datasetsPromise = null;
+export function loadDatasets() {
+  if (_datasetsPromise) return _datasetsPromise;
+  _datasetsPromise = (async () => {
+    let list = [];
+    try {
+      const r = await fetch("/api/datasets");
+      if (r.ok) list = await r.json();
+    } catch { /* no API (static-only server) → empty */ }
+    for (const d of list) {
+      if (!DATASETS[d.id]) {
+        DATASETS[d.id] = datasetEntry(d.id, d.label);
+        SQLITE_OPTIONS.push({ value: d.id, label: DATASETS[d.id].label });
+      }
+    }
+    return list;
+  })();
+  return _datasetsPromise;
+}
+
+// Ensure DATASETS holds at least the requested id before produceSqlite reads
+// it. Pulls the live list if it's not loaded yet, then falls back to deriving
+// the entry from the id alone (so a save's stored dataset still loads even if
+// the API is briefly unavailable).
+async function ensureDataset(id) {
+  if (!DATASETS[id]) await loadDatasets();
+  if (!DATASETS[id]) DATASETS[id] = datasetEntry(id);
+  return DATASETS[id];
+}
 
 // Guard: only ever open a snapshot DB. A live project DB (…/<name>.db) in the
 // same data dir is mid-write and would corrupt the read / break alignment.
@@ -85,26 +106,23 @@ function assertSnapshotPath(sqlitePath) {
   }
 }
 
-export const DATASET_IDS = Object.keys(DATASETS);
-export const DATASET_LABELS = Object.fromEntries(
-  Object.entries(DATASETS).map(([id, ds]) => [id, ds.label])
-);
+// No fixed default dataset — the data/-driven picker (ui/modals/data-source-
+// modal.js) always passes an explicit {dataset} chosen from /api/datasets.
+// Empty default keeps produceSqlite honest: it must be told which dataset.
+export const defaultSqliteParams = () => ({ dataset: null });
 
-export const defaultSqliteParams = () => ({ dataset: "biblion" });
+// Flat option list for the data-source picker: every dataset, plus each
+// discovered subset addressed as "<project>::<subset>". Starts empty and is
+// populated by loadDatasets() (from /api/datasets) then discoverSubsets().
+// Mutated IN PLACE so the modal — which reads this array fresh each open —
+// reflects whatever was discovered.
+export const SQLITE_OPTIONS = [];
 
-// Flat option list for the data-source picker: every project, plus each
-// discovered subset addressed as "<project>::<subset>". Seeded with the
-// projects; subset entries are appended by discoverSubsets() (fired at module
-// load). Mutated IN PLACE so the modal — which reads this array fresh each time
-// it opens — reflects whatever subsets existed at page load.
-export const SQLITE_OPTIONS = DATASET_IDS.map(
-  (id) => ({ value: id, label: DATASETS[id].label })
-);
-
-// Best-effort: fetch each project's subsets/index.json and append its embedded
-// subsets to SQLITE_OPTIONS. A project with no subsets/ (404) is skipped.
+// Best-effort: fetch each dataset's subsets/index.json and append its embedded
+// subsets to SQLITE_OPTIONS. A dataset with no subsets/ (404) is skipped.
 export async function discoverSubsets() {
-  await Promise.all(DATASET_IDS.map(async (id) => {
+  await loadDatasets();   // need the dataset ids before we can probe subsets
+  await Promise.all(Object.keys(DATASETS).map(async (id) => {
     let idx;
     try {
       const r = await fetch(`/data/${id}/subsets/index.json`);
@@ -121,20 +139,9 @@ export async function discoverSubsets() {
   return SQLITE_OPTIONS;
 }
 
-// Fire discovery at load so subsets are usually present by the time the
-// data-source modal is opened. Fire-and-forget; failures are non-fatal.
+// Fire discovery at load so datasets + subsets are usually present by the time
+// the data-source modal is opened. Fire-and-forget; failures are non-fatal.
 discoverSubsets();
-
-export const sqliteModalSchema = {
-  fields: [
-    {
-      key: "dataset",
-      label: "Dataset",
-      type: "select",
-      options: DATASET_IDS.map((id) => ({ value: id, label: DATASETS[id].label })),
-    },
-  ],
-};
 
 // sql.js engine — initialised once, shared across produce() calls.
 let _sqlPromise = null;
@@ -157,11 +164,12 @@ export async function produceSqlite(params = {}) {
   // A subset is addressed as "<project>::<subset>"; a bare id is the full
   // project. A subset reuses the project's shared snapshot DB and supplies its
   // own paper_index + embeddings under subsets/<name>/.
-  const datasetId = params.dataset || "biblion";
+  const datasetId = params.dataset;
+  if (!datasetId) throw new Error(`[datasource:sqlite] no dataset selected (pick one from the picker)`);
   const sep = datasetId.indexOf("::");
   const projectId = sep === -1 ? datasetId : datasetId.slice(0, sep);
   const subsetName = sep === -1 ? null : datasetId.slice(sep + 2);
-  const base = DATASETS[projectId];
+  const base = await ensureDataset(projectId);
   if (!base) throw new Error(`[datasource:sqlite] unknown dataset "${projectId}"`);
   const ds = subsetName ? {
     label:          `${base.label} / ${subsetName}`,

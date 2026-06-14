@@ -24,10 +24,17 @@ The app is a static web page that uses ES modules, so it must be
 served over HTTP (not opened as `file://`).
 
 ```bash
-# from the project root
-python -m http.server 8000
+# from network_toy/
+python serve.py
 # open http://localhost:8000/app/
 ```
+
+`serve.py` (Python stdlib, no deps) serves the static app **and** a
+dataset API: `GET /api/datasets` lists the loadable datasets under
+`data/`, and project saves are written back to
+`data/<dataset>/saves/<name>.zip` (in-place Save). Plain
+`python -m http.server 8000` (rooted at `network_toy/`) still serves the
+app, but the dataset picker and Save/Open need `serve.py`.
 
 No build step. All dependencies (`three`, `3d-force-graph`,
 `force-graph`, `umap-js`, `fflate`) load from CDNs (unpkg + esm.sh)
@@ -35,20 +42,27 @@ via an import map.
 
 ## What you do with it
 
-The current shell is at `http://localhost:8000/app/`. The original
-v3 demo shell is preserved at `http://localhost:8000/app/legacy.html`.
+The current shell is at `http://localhost:8000/app/`.
 
-The app **starts empty** — there's no data until you add it. Begin at
-the workflow chart's **+ Add data source** (left rail) and build out
-from there; see *Workflow chart* below.
+The app **starts empty** — there's no data until you pick a dataset.
+Begin at the workflow chart's **+ Add data source** (left rail), or
+**File ▸ Open dataset…**, then build out from there; see *Workflow
+chart* below.
 
 ### Topbar: **File ▾**
 
-Save / Save as… / Load… write or read a `.zip` archive of the
-**entire project state** — every dim-reduction output, every
-cluster level, every bridge analysis, every Optimise sweep
-result. Loading a saved project skips the engine cascade, so you
-pick up exactly where you left off without re-running anything.
+**Open dataset…** opens the dataset picker (the datasets present under
+`data/`, served by `serve.py /api/datasets`). Selecting one shows its
+saved projects to resume plus **Create new** for a fresh ingest.
+
+**Save / Save as… / Open…** write or read a `.zip` archive of the
+**entire project state** — every dim-reduction output, every cluster
+level, every bridge analysis, every Optimise sweep result — nested under
+the active dataset at `data/<dataset>/saves/`. **Save** overwrites the
+current save in place; **Save as…** makes a new one; **Open…** lists the
+current dataset's saves. **Import .zip…** still loads a loose `.zip` from
+disk. Loading a saved project skips the engine cascade, so you pick up
+exactly where you left off without re-running anything.
 
 ### Workflow chart (left rail)
 
@@ -56,10 +70,9 @@ The **primary surface**: a branching tree of analysis cards you grow
 yourself. It starts **empty** — the toy no longer auto-runs a pipeline
 on boot. You build it up one step at a time:
 
-1. Click **+ Add data source** → pick toy or real → Apply. A single
-   **data card** appears (spinning blue while it loads, then a green
-   dot). For real data the viewer stays empty until you add a viz
-   reduction.
+1. Click **+ Add data source** → pick a dataset → **Create new**. A
+   single **data card** appears (spinning blue while it loads, then a
+   green dot). The viewer stays empty until you add a viz reduction.
 2. Each card has a **+** at its base → an "Add step" menu of the valid
    next steps (e.g. from data → dim-reduction; from dim-reduction →
    clustering / dim-sweep; from clustering → bootstrap / compare / dim
@@ -87,12 +100,11 @@ mirrors the per-card "+" menu for the selected card.
 
 The card types and what each configures:
 
-- **Data** — pick between the toy Gaussian-mixture generator and
-  the real SPECTER2 paper subset (random 1000-paper or BFS-carved
-  5000-paper). Real data brings its own publication years
-  (`t ∈ [0, 1]` normalised over the subset's year range) and a
-  citation edge list cached at ingest for the fusion stage to
-  consume.
+- **Data** — pick one of the datasets under `data/` (a biblion corpus:
+  papers + citations + SPECTER2 embeddings, built by `biblion advanced
+  snapshot` + `embedding`). Each dataset brings its own publication years
+  (`t ∈ [0, 1]` normalised over its year range) and a citation edge list
+  cached at ingest for the fusion stage to consume.
 - **Dim reduce** — **five**-stage dim-reduction layer.
   1. **Noise** reduction (PCA-100).
   2. **Fusion** (optional) — citation-aware re-embedding via
@@ -123,25 +135,20 @@ Status indicator on each card: green dot (done) / amber dashed border
 
 ### Data sources
 
-**Toy generator** — synthetic 3-d Gaussian-mixture cloud. Knobs:
-seed, node count, number of groups, group spread.
+The picker (File ▸ Open dataset…, or the chart's + Add data source)
+lists the datasets present under `data/`, served live by
+`serve.py /api/datasets`. A dataset is a **biblion corpus** — a
+`*_snapshot.db` (papers + citations), an `embeddings.npy` (SPECTER2
+768-d vectors), a `paper_index.json` (row → paper id), and a
+`manifest.json` (identity / stats), built by `biblion advanced snapshot`
++ `biblion advanced embedding`. Sliced **subsets** under
+`subsets/<name>/` appear as selectable children of their parent dataset.
 
-**Real (SPECTER2 dev subset)** — loads a slice of the full
-SPECTER2 768-d embedding. Two carved subsets available:
-
-- `dev_subset_1000` — random 1000-paper sample (seed 42). Useful
-  as a minimal smoke fixture; citation topology is shattered
-  (~3 within-subset edges).
-- `dev_subset_bfs_5000` — BFS-carved 5000-paper subset (default).
-  Preserves topology (~12 k within-subset edges, 100% node
-  coverage). This is what fusion + UMAP-on-graph are tested on.
-
-Both come with `paper_years.json` for `t ∈ [0, 1]` normalisation
-(newest → 1, oldest → 0) and `citation_edges.json` for the
-fusion stage. Toy and real are mutually exclusive — switching
-modes drops the other side's state. Real mode leaves the viewers
-empty by default — pick a 3-d (or 2-d) viz reduction in the
-dim-reduction modal to render.
+Each dataset carries publication years for `t ∈ [0, 1]` normalisation
+(newest → 1, oldest → 0) and a citation edge list cached at ingest for
+the fusion stage. Only one source is loaded at a time — switching
+datasets drops the previous state. The viewer stays empty until you pick
+a 3-d (or 2-d) viz reduction in the dim-reduction modal.
 
 ### Dim-reduction (Layer 1.5)
 
@@ -525,9 +532,9 @@ Doc highlights:
 ## File layout
 
 ```text
+serve.py                          stdlib dev server: static app + /api/datasets
 app/                              static page + ES modules
   index.html                      importmap + boot
-  legacy.html                     v3-stage-X archive shell
   styles/main.css
   src/
     rng.js                        shared seeded PRNG (mulberry32 + Box-Muller)
@@ -535,8 +542,8 @@ app/                              static page + ES modules
     datasource/                   Layer 1 — pluggable data source
       registry.js
       contract.js
-      toy.js                      wraps generation.js
-      real.js                     fetches SPECTER2 dev_subset .npy
+      sqlite.js                   biblion corpus via sql.js (datasets from /api/datasets)
+      npy.js                      minimal .npy reader
     dimred/                       Layer 1.5 — pluggable dim-reduction
       registry.js
       contract.js
@@ -586,6 +593,7 @@ app/                              static page + ES modules
       manifest.js                 SCHEMA_VERSION
       serialise.js
       deserialise.js
+      projects-api.js             dataset-scoped fetch wrappers (/api/datasets/<id>/saves)
     workers/                      DAG-orchestrated module workers
       worker-runner.js            generic runInWorker(workerUrl, payload, {signal, transferList})
       dag.js                      runDAG — topo-sort + parallel-batch + AbortSignal
@@ -631,25 +639,15 @@ app/                              static page + ES modules
         data-source-modal.js
         panel-picker.js           panel types + saved validation runs (§6.19)
         layer-descriptors.js
-    main.js                       legacy boot + UI glue (drives legacy.html)
-literture-network/                real-data pipeline (Python)
-  artifacts/
-    expanded_embeddings.npy       full SPECTER2 (810 k × 768)
-    dev_subset/                   1000-paper random subset
-      expanded_embeddings.npy     subset embedding (n × 768, float32)
-      expanded_embeddings_paper_index.json   row → paper_id
-      paper_years.json            row → publication year (drives node.t)
-      citation_edges.json         induced citation-edge subgraph (carved separately)
-      subset_meta.json            provenance (seed, indices_into_source, …)
-    dev_subset_bfs/               5000-paper BFS-carved subset (default real-mode fixture)
-      (same shape as dev_subset; ~12 k edges, 100% node coverage, years 1954–2026)
-  citgraphv2/output/
-    edges.csv                     raw directed citation network
-    nodes.csv                     paper metadata (includes `year` column)
-  scripts/
-    make_dev_subset.py            carve random embedding subset (+ paper_years.json)
-    make_dev_subset_bfs.py        carve BFS connectivity-aware subset (+ paper_years.json)
-    make_subset_citation_edges.py carve induced citation-edge subgraph for a subset
+    main.js                       boot + UI glue
+data -> ../data                   symlink to the repo-root data/ (gitignored)
+  <dataset>/                      one biblion corpus per dir (served at /data/<id>/)
+    <dataset>_snapshot.db         snapshot the toy attaches (read-only)
+    embeddings.npy                SPECTER2 vectors (n × 768, float32)
+    paper_index.json              row → paper_id
+    manifest.json                 dataset identity / stats (drives /api/datasets)
+    subsets/<name>/               sliced derived datasets (selectable children)
+    saves/<name>.zip              workflow saves for THIS dataset (written by serve.py)
 validation/                       research scripts that produce shipped evidence (tracked)
   README.md                       convention + script index (distinct from scratch/)
   dim_sweep_validation.py         §6.9 — is UMAP-50 enough compression?

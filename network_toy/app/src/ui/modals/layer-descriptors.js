@@ -319,9 +319,9 @@ function dataDescriptor() {
       clearWorkflow();
 
       const cfg = (getState().dataSource.configs && getState().dataSource.configs[sourceId]) || {};
-      const label = sourceId === "real"
-        ? `Real · ${cfg.subset || "real"}`
-        : "Toy data";
+      // Card label = the chosen dataset id (data/-driven picker). Falls back to
+      // the source id for any source that doesn't carry a `dataset` param.
+      const label = cfg.dataset ? `Data · ${cfg.dataset}` : sourceId;
       const stepId = createStep({
         type:     "data",
         label,
