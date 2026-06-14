@@ -21,7 +21,8 @@ import { listAlgorithms as listClusteringAlgos,
          getAlgorithm   as getClusteringAlgo }     from "../../clustering-registry.js";
 import { listAlgorithms as listLayoutAlgos,
          getAlgorithm   as getLayoutAlgo }         from "../../citation-layout/registry.js";
-import { getState, update, setDataSourceMode, setDataSourceConfig } from "../state.js";
+import { getState, update, setDataSourceMode, setDataSourceConfig,
+         addTab, setActiveTab }                     from "../state.js";
 import { createStep, listSteps, clearWorkflow, getStep,
          getStepAncestors, getSelectedStep, selectStep,
          findClusterLevels, rearmStep }           from "../workflow.js";
@@ -180,18 +181,34 @@ function findSelectedAncestorOfType(targetType) {
   return null;
 }
 
-// For analysis cards that hang off a clustering ladder (labelling, scoring,
-// export, future siblings), the auto-spawned crossClusterCitations card
-// should become their effective parent so its citation-flow data is
-// projected into state on selection (children read it via projection).
-// Returns the crossCluster's id when one exists under `clusteringId`, else
-// returns `clusteringId` itself (the legacy attach point). Pass-through when
-// clusteringId is null.
-function preferCrossClusterChild(clusteringId) {
-  if (!clusteringId) return clusteringId;
-  const xcc = listSteps({ type: "crossClusterCitations" })
-    .find(c => c.parentId === clusteringId);
-  return xcc ? xcc.id : clusteringId;
+// Cross-cluster citations (J16): no card, no tree node. After the layer
+// ladder commits we run the analysis directly off the picker's clustering
+// ancestor, stash the flow matrix on state.crossClusterCitations, and
+// auto-open the singleton cross-cluster panel (secondary slot) that reads it.
+// The runner throws when there are no citation edges; callers gate on that.
+function runCrossClusterPanel(parentStepId) {
+  buildCrossClusterJob({ parentStepId })({})
+    .then((res) => {
+      update({ crossClusterCitations: (res && res.crossClusterCitations) || null });
+      openCrossClusterPanel();
+    })
+    .catch((e) => {
+      if (e && e.name === "AbortError") return;
+      console.error("[multi-level-picker] cross-cluster analysis failed:", e);
+    });
+}
+
+// Open the cross-cluster panel once, in the secondary slot. Idempotent: if a
+// tab of that singleton type is already open there, just activate it instead
+// of stacking a duplicate (mirrors panel-system autoOpenPanelForStep).
+function openCrossClusterPanel() {
+  const slot = "secondary";
+  const slotState = getState().panels && getState().panels[slot];
+  if (slotState && Array.isArray(slotState.tabs)) {
+    const existing = slotState.tabs.find(t => t.type === "cross-cluster");
+    if (existing) { setActiveTab(slot, existing.id); return; }
+  }
+  addTab(slot, "cross-cluster", {});
 }
 
 // Create a tree step + enqueue a step-bound job that runs `engineFn`.
@@ -754,9 +771,6 @@ export function rerunStep(stepId) {
   if (step.type === "export") {
     return exportDescriptor().applyChange();
   }
-  if (step.type === "crossClusterCitations") {
-    return crossClusterDescriptor().applyChange();
-  }
   if (step.type === "nodeDisplacement") {
     return nodeDisplacementDescriptor(step.id).applyChange();
   }
@@ -1109,31 +1123,21 @@ function multiLevelPickerDescriptor(editStepId = null) {
         stepId,
         fn:    buildMultiLevelPickerJob({ pickedCounts: counts, uidPrefix }),
       });
-      // Once the ladder is committed, auto-spawn the cross-cluster citations
-      // card. Mirrors how the sweep auto-spawns this picker; re-pick reuses
-      // the existing card. Bridge analysis is no longer a card type
-      // (cards.md Pass 2a) — bridges are computed inside the picker's
-      // commit job and surfaced on state.bridgeAnalysis for the panel.
+      // Once the ladder is committed, compute the cross-cluster citation flow
+      // and surface it via an auto-opened panel (J16). It used to be a card,
+      // but the run takes no config and always covered every layer, so a tree
+      // node for it was wasted — like bridge analysis (cards.md Pass 2a), the
+      // result now lives on state and a singleton panel reads it. Re-pick
+      // re-computes and refreshes the same panel.
       promise.then(() => {
         const picker = step();
         if (!picker) return;
-
-        // Cross-cluster citations — no params; needs the committed ladder.
         // Gated on citation edges existing in live state: toy data without
-        // synthetic citations has none, and the runner would fail. Real-data
-        // sources (biblion) ship edges at ingest, so the auto-spawn fires
-        // there. Users can still manually add the card on toy data once
-        // they've generated citations.
+        // synthetic citations has none, and the runner would throw. Real-data
+        // sources (biblion) ship edges at ingest, so this fires there.
         const edges = getState().rawCitationEdges;
         const hasEdges = Array.isArray(edges) && edges.length > 0;
-        if (hasEdges) {
-          const existingXcc = listSteps({ type: "crossClusterCitations" })
-            .find(b => b.parentId === picker.id);
-          if (!existingXcc) {
-            crossClusterDescriptor().applyChange()
-              .catch(e => { if (!(e && e.name === "AbortError")) console.error("[multi-level-picker] auto cross-cluster failed:", e); });
-          }
-        }
+        if (hasEdges) runCrossClusterPanel(picker.id);
       }).catch((e) => {
         if (e && e.name === "AbortError") return;
         console.error("[multi-level-picker] commit failed:", e);
@@ -1179,18 +1183,18 @@ function multiLevelPickerDescriptor(editStepId = null) {
 function labellingDescriptor(editStepId = null) {
   const editStep = () => (editStepId ? getStep(editStepId) : null);
   // Attach under the SELECTED card when it has a clustering ladder reachable;
-  // otherwise fall back to the nearest clustering-like ancestor. preferCross-
-  // ClusterChild bumps the attach point down to the auto-spawned crossCluster
-  // card when one exists, so labelling becomes a child of crossCluster and
-  // can read its citation-flow data via projection.
+  // otherwise fall back to the nearest clustering-like ancestor. Labelling
+  // anchors directly on the clustering card now — the cross-cluster citations
+  // card it used to hang off was dropped (J16); its flow data lives on
+  // state.crossClusterCitations, so no tree node mediates the read anymore.
   const resolveParent = () => {
     const es = editStep();
     if (es) return es.parentId;
     const sel = getSelectedStep();
     if (sel && findClusterLevels(sel.id).levels.length) {
-      return preferCrossClusterChild(sel.id);
+      return sel.id;
     }
-    return preferCrossClusterChild(findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES));
+    return findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES);
   };
   const desc = {
     label: "Run: Cluster labelling",
@@ -1311,16 +1315,16 @@ function exportDescriptor(editStepId = null) {
     const es = editStep();
     if (es) return es.parentId;
     // Prefer a scoring card (export by score); fall back to any clustering-
-    // like card (export a single cluster without scores). The clustering-
-    // fallback path bumps through any auto-spawned crossCluster card so the
-    // export sees its citation-flow data via projection.
+    // like card (export a single cluster without scores). Anchors directly on
+    // the clustering card now — the cross-cluster citations card it used to
+    // bump through was dropped (J16); its flow data lives on state.
     const sel = getSelectedStep();
     if (sel) {
       if (sel.type === "scoring")                     return sel.id;
-      if (findClusterLevels(sel.id).levels.length)    return preferCrossClusterChild(sel.id);
+      if (findClusterLevels(sel.id).levels.length)    return sel.id;
     }
     return findSelectedAncestorOfType("scoring")
-        || preferCrossClusterChild(findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES));
+        || findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES);
   };
   const desc = {
     label: "Prepare: Export (RIS)",
@@ -1360,18 +1364,20 @@ function exportDescriptor(editStepId = null) {
   return desc;
 }
 
-// Cross-cluster citation degree card — an "analysis layer" attaching under a
-// clustering-like card (the picker). Computes, for every layer, how much each
-// cluster cites every other (directed flow matrix + in/out degree + top
-// links). No config modal — it always runs all layers; picking it preps +
-// selects the card, and the cross-cluster panel renders the result.
+// Cross-cluster citation degree — no longer a card (J16). It took no config
+// and always ran every layer, so a tree node was wasted; the result now lives
+// on state.crossClusterCitations and a singleton panel renders it (like bridge
+// analysis). It auto-computes after the layer ladder commits; this descriptor
+// only backs the manual "Cross-cluster citations" next-step action, recomputing
+// off the nearest clustering ancestor and opening the panel. No applyChange /
+// card spawn — there is nothing to put in the tree.
 function crossClusterDescriptor(editStepId = null) {
   const editStep = () => (editStepId ? getStep(editStepId) : null);
   const resolveParent = () => {
     const es = editStep();
     return es ? es.parentId : findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES);
   };
-  const desc = {
+  return {
     label: "Run: Cross-cluster citations",
     getActive: () => {
       const parentId = resolveParent();
@@ -1380,34 +1386,13 @@ function crossClusterDescriptor(editStepId = null) {
       const hasEdges = Array.isArray(getState().rawCitationEdges) && getState().rawCitationEdges.length > 0;
       return { hasClustering: true, nLevels: levels.length, hasEdges, parentId };
     },
-    applyChange: async () => {
+    openModal: () => {
       const parentId = resolveParent();
       if (!parentId) {
-        throw new Error("[cross-cluster-descriptor] no clustering ancestor to analyse");
+        console.warn("[cross-cluster-descriptor] no clustering ancestor to analyse");
+        return;
       }
-      const label = "Cross-cluster citations";
-      const stepId = beginStep({
-        editStepId,
-        type:   "crossClusterCitations",
-        label,
-        params: {},
-        parentId,
-      });
-      selectStep(stepId);
-      const { promise } = enqueueJob({
-        type:  "crossClusterCitations",
-        label,
-        stepId,
-        fn:    buildCrossClusterJob({ parentStepId: parentId }),
-      });
-      promise.catch((e) => {
-        if (e && e.name === "AbortError") return;
-        console.error("[cross-cluster-descriptor] job failed:", e);
-      });
-      return promise;
+      runCrossClusterPanel(parentId);
     },
-    openModal: () => desc.applyChange()
-      .catch(e => console.error("[cross-cluster-descriptor] applyChange failed:", e)),
   };
-  return desc;
 }
