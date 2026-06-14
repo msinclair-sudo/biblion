@@ -315,8 +315,8 @@ metric. Each call also bumps `engineRevision` so panels re-render.
 
 Tree-aware SVG renderer of `state.workflow` — the typed branching
 DAG that lives in `ui/workflow.js`. It's the primary analysis
-surface; the live card palette + ordering rules live in `cards.md`
-at the project root.
+surface; the live card palette + ordering rules live in code
+(`ui/next-steps-rules.js` + `modals/layer-descriptors.js`).
 
 ### What it renders
 
@@ -373,8 +373,8 @@ modal (they're history markers). Bootstrap stability and bridge analysis
 are *not* separate cards: bootstrap runs as a sidecar to `clustering`
 (knobs in the clustering modal's Stability section), and bridge
 computes inside the multi-layer picker's commit job, surfacing on
-`state.bridgeAnalysis`. See `cards.md` at the project root for the
-live palette + ordering.
+`state.bridgeAnalysis`. See `ui/next-steps-rules.js` +
+`modals/layer-descriptors.js` for the live palette + ordering.
 
 ### Auto-migration on mount
 
@@ -680,8 +680,9 @@ When a new layer or major feature lands:
   state shape, contract, and UI surfaces.
 - Update `doc/dynamics.md` (the layer index) if it's a new pipeline
   layer.
-- Update `cards.md` if the feature adds, removes, or re-parents a
-  workflow card type.
+- Update the rule table in `ui/next-steps-rules.js` (and
+  `modals/layer-descriptors.js`) if the feature adds, removes, or
+  re-parents a workflow card type.
 
 Documentation conventions:
 - Single source of truth per concept. Cross-link rather than

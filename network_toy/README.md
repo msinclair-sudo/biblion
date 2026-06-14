@@ -110,7 +110,7 @@ The card types and what each configures:
   params + a "Stability (bootstrap)" section — bootstrap runs as a
   sidecar to clustering, not as a separate card) and **Optimise**
   (sweeps). When fusion ran, the workflow forks into pre/post-fusion
-  branches (see `cards.md`) — cluster each branch independently to get
+  branches — cluster each branch independently to get
   the "Color by pre-fusion cluster" mode.
 - **Cit. layout** — citation-driven 3D arrangement (FR, MDS, or
   UMAP-on-citation-graph). **Opt-in**: the pipeline cascade
@@ -338,8 +338,9 @@ re-open from the picker.
 
 Bootstrap stability runs as a **sidecar to clustering** — toggle it on
 in the Clustering modal's Stability section and the result lands in the
-bootstrap-stability panel automatically. See `cards.md` for the live
-card palette + ordering.
+bootstrap-stability panel automatically. See `doc/ui-architecture.md`
+for the card system; the live palette + ordering rules are the code
+(`app/src/ui/next-steps-rules.js` + `modals/layer-descriptors.js`).
 
 ### Bridge analysis (Layer 2.5)
 
@@ -507,7 +508,7 @@ Math reference for each layer is in `doc/`. Start with
 
 Doc highlights:
 
-- `cards.md` — **live card palette** (Mermaid + semantics): which cards exist, how they auto-spawn, where they attach. Single source of truth for ordering — keep in sync if you add a card type.
+- `doc/ui-architecture.md` — the card system (cards, auto-spawn, attach points). The live palette + ordering rules are the code: `app/src/ui/next-steps-rules.js` (rule table) + `modals/layer-descriptors.js`.
 - `doc/dimred.md` — Layer 1.5 sub-stages, registry contract, engine orchestration, slot-aware defaults
 - `doc/fusion.md` — Layer 1.5 fusion sub-stage: graph-diffusion algorithm, fusion-comparison slider, pre-fusion cluster colour mode, A/B comparison semantics
 - `doc/clustering.md` — Layer 2 contract + algorithms
@@ -654,7 +655,6 @@ validation/                       research scripts that produce shipped evidence
   README.md                       convention + script index (distinct from scratch/)
   dim_sweep_validation.py         §6.9 — is UMAP-50 enough compression?
   compression_redundancy_check.py §6.9 follow-up — is UMAP-after-PCA redundant?
-cards.md                          live card palette (Mermaid + ordering rules)
 doc/
   dynamics.md                     layer index
   dimred.md                       Layer 1.5 — five sub-stages + slot-aware defaults

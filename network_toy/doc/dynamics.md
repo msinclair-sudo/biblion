@@ -30,8 +30,9 @@ Section 5 lists the controls and what each one actually drives.
 - `doc/ui-architecture.md` — shell, state container, engine
   orchestrator, workflow chart (tree-aware), panel system,
   modals, typed-job queue + per-card status.
-- `cards.md` (project root) — live palette of card choices, valid
-  parent–child relationships, and auto-spawn rules.
+- `app/src/ui/next-steps-rules.js` (+ `modals/layer-descriptors.js`) —
+  the live palette of card choices, valid parent–child relationships,
+  and auto-spawn rules (these live in code, not a doc).
 - `doc/workers.md` — module workers + the DAG that runs heavy
   lanes in parallel with cancellation.
 - `doc/eval.md` — Optimise (bootstrap-Jaccard, scorers, three sweep

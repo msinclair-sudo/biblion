@@ -539,5 +539,6 @@ As of §6.18.3 (2026-05-24):
 - `doc/workers.md` §9 — why eval still runs on the main thread.
 - `doc/ui-architecture.md` §6 — Configure / Optimise tabbed
   clustering modal structure.
-- `cards.md` — live card palette; how bootstrap got folded into the
-  clustering modal as a sidecar.
+- `app/src/ui/next-steps-rules.js` + `modals/layer-descriptors.js` —
+  the live card palette; how bootstrap got folded into the clustering
+  modal as a sidecar.

@@ -197,6 +197,7 @@ citationEdges }`:
 ---
 
 *Companion: `doc/dynamics.md` (layer index), `doc/multi-level.md`
-(multi-level clustering), `cards.md` (live card palette). Current
+(multi-level clustering), `doc/ui-architecture.md` (card system).
+Current
 sources: `datasource/toy.js`, `datasource/real.js`,
 `datasource/sqlite.js`. Contract + validator: `datasource/contract.js`.*
