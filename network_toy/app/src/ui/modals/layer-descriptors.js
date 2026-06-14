@@ -432,8 +432,16 @@ function dimredDescriptor(editStepId = null) {
       // shouldn't sit behind a manual "+". It needs the resolved dimred result,
       // so it (and the POST selection) waits for the promise to land below.
       const spawnNodeDispIfMissing = (dimredCard) => {
+        // The ND card now parents on the POST fusion branch (not the dimred), so
+        // detect an existing one by whether its post-branch parent lives under
+        // this dimred fork.
+        const branchIds = new Set(
+          listSteps({ type: "fusionBranch" })
+            .filter(b => b.parentId === dimredCard.id)
+            .map(b => b.id)
+        );
         const existingND = listSteps({ type: "nodeDisplacement" })
-          .find(d => d.parentId === dimredCard.id);
+          .find(d => branchIds.has(d.parentId));
         if (existingND) return;
         nodeDisplacementDescriptor().applyChange()
           .catch(e => { if (!(e && e.name === "AbortError")) console.error("[dimred-descriptor] auto node-displacement failed:", e); });
@@ -551,26 +559,33 @@ function resolveBranchPair(fromStepId) {
   return { dimredId, preId: pre.id, postId: post.id };
 }
 
-// Node-displacement card — a cross-branch comparison. Wires the two fusion
-// branches (refIds: [pre, post]) and measures how far each node moved between
-// the pre- and post-fusion layouts (align + per-node distance). Attaches under
-// the dimred card (the fork owner) so it sees both branches.
+// Node-displacement card — a cross-branch comparison. Branches off BOTH fusion
+// branches: it measures how far each node moved between the pre- and post-fusion
+// layouts (align + per-node distance), so it has two incoming lineage edges.
+// The single-parentId tree model carries only one solid edge, so we parent the
+// card on the POST branch (the fused result, also the selected lineage) and
+// carry the PRE branch as a ref-edge — workflow-chart promotes both to primary
+// (solid) edges for nodeDisplacement (no dimred spine edge). The job reads its
+// endpoints from the explicit pre/post branch ids below, not from parentId, so
+// re-parenting onto a branch leaves the displacement computation unchanged.
 function nodeDisplacementDescriptor(editStepId = null) {
   const editStep = () => (editStepId ? getStep(editStepId) : null);
+  // Reconstruct the branch pair from an existing ND step (gear edit): parentId
+  // is the post branch, refIds[0] is the pre branch.
+  const pairFromStep = (es) =>
+    (es && es.parentId && es.refIds && es.refIds.length === 1)
+      ? { dimredId: null, preId: es.refIds[0], postId: es.parentId }
+      : null;
   const desc = {
     label: "Run: Node displacement (pre → post)",
     getActive: () => {
       const es = editStep();
-      const pair = es && es.refIds && es.refIds.length === 2
-        ? { dimredId: es.parentId, preId: es.refIds[0], postId: es.refIds[1] }
-        : resolveBranchPair();
+      const pair = pairFromStep(es) || resolveBranchPair();
       return { hasPair: !!pair, pair };
     },
     applyChange: async () => {
       const es = editStep();
-      const pair = (es && es.refIds && es.refIds.length === 2)
-        ? { dimredId: es.parentId, preId: es.refIds[0], postId: es.refIds[1] }
-        : resolveBranchPair();
+      const pair = pairFromStep(es) || resolveBranchPair();
       if (!pair) {
         throw new Error("[node-displacement] needs both pre + post fusion branches (run a graph-diffusion dim-reduction first)");
       }
@@ -579,9 +594,10 @@ function nodeDisplacementDescriptor(editStepId = null) {
         editStepId,
         type:   "nodeDisplacement",
         label,
-        params: {},
-        parentId: pair.dimredId,
-        refIds: [pair.preId, pair.postId],
+        // Parent on the post branch; the pre branch rides as a ref-edge that the
+        // chart promotes to a second solid incoming edge.
+        parentId: pair.postId,
+        refIds: [pair.preId],
       });
       selectStep(stepId);
       const { promise } = enqueueJob({
