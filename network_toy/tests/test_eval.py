@@ -10,55 +10,17 @@ These are unique invariants not covered by test_optimise.py:
     and the §6.18.3 cache wins.
 
 Most tests need real-data state for meaningful coverage and are
-marked @pytest.mark.slow. The bipartiteMatchJaccard / LHS unit
-tests are pure JS and fast.
+marked @pytest.mark.slow.
+
+The pure-JS unit cases (LHS sampler determinism/coverage,
+bipartiteMatchJaccard minMembers filter) moved to
+tests/unit/eval.test.mjs (run under `node --test`).
 
 Migrated from scratch/{lhs_unit, target_range_bootstrap,
 noise_and_min_members, cache_wins, sweep_against}_smoke.py.
 """
 
 import pytest
-
-
-def test_lhs_sampler_determinism_and_coverage(page):
-    """sampleLatinHypercube produces the requested count, every numeric
-    value is in-range, all schema fields are filled, log-scaled fields
-    span orders of magnitude, the sample is deterministic across calls
-    with the same seed, and different seeds produce different samples."""
-    out = page.evaluate(
-        '''async () => {
-            const { sampleLatinHypercube } = await import("/app/src/eval/lhs.js");
-            const reg = await import("/app/src/clustering-registry.js");
-            const hdb = reg.getAlgorithm("hdbscan");
-
-            const a = sampleLatinHypercube(hdb, 30, 42);
-            const a2 = sampleLatinHypercube(hdb, 30, 42);   // same seed
-            const b = sampleLatinHypercube(hdb, 30, 99);    // different seed
-
-            const mcs = a.map(s => s.minClusterSize);
-            const ms  = a.map(s => s.minSamples);
-            const sel = a.map(s => s.selectionMethod);
-            return {
-                count: a.length,
-                mcsMin:    Math.min(...mcs),
-                mcsMax:    Math.max(...mcs),
-                mcsRange:  Math.max(...mcs) / Math.min(...mcs),
-                msMin:     Math.min(...ms),
-                msMax:     Math.max(...ms),
-                hasBothSelectionMethods: sel.includes("eom") && sel.includes("leaf"),
-                deterministic:           JSON.stringify(a) === JSON.stringify(a2),
-                differentSeedDiffers:    JSON.stringify(a) !== JSON.stringify(b),
-            };
-        }'''
-    )
-    assert out["count"] == 30
-    assert out["mcsMin"] >= 2 and out["mcsMax"] <= 500
-    # Log scale should span at least one order of magnitude across 30 samples.
-    assert out["mcsRange"] >= 10
-    assert out["msMin"] >= 1 and out["msMax"] <= 50
-    assert out["hasBothSelectionMethods"]
-    assert out["deterministic"] is True
-    assert out["differentSeedDiffers"] is True
 
 
 @pytest.mark.slow
@@ -111,29 +73,6 @@ def test_target_range_sweep_with_bootstrap(page):
     primaries = [p for p in out["topPrimaries"] if isinstance(p, (int, float))]
     assert any(p > 0 for p in primaries), f"no positive primary scores: {out['topPrimaries']}"
     assert out["anyHasMeanJaccard"] is True
-
-
-def test_bipartite_match_min_members_filter(page):
-    """§6.18.9 B9: bipartiteMatchJaccard({minMembers}) drops ref
-    clusters smaller than the threshold from the match output entirely.
-    Without it, a 1-member ref vs any singleton candidate would score
-    Jaccard=1.0 mechanically — meaningless inflation. Pure JS unit test."""
-    out = page.evaluate(
-        '''async () => {
-            const { bipartiteMatchJaccard } = await import("/app/src/eval/jaccard.js");
-            // 10 nodes: refA={0}, refB={1,2}, refC={3..9} — sizes 1, 2, 7.
-            const ref  = new Int32Array([0, 1,1, 2,2,2,2,2,2,2]);
-            const cand = new Int32Array([0, 1,1, 2,2,2,2,2,2,2]);
-            const noFilter   = bipartiteMatchJaccard(ref, cand);
-            const withFilter = bipartiteMatchJaccard(ref, cand, null, { minMembers: 3 });
-            return {
-                noFilterKeys:   [...noFilter.keys()].sort(),
-                withFilterKeys: [...withFilter.keys()].sort(),
-            };
-        }'''
-    )
-    assert out["noFilterKeys"]   == [0, 1, 2]
-    assert out["withFilterKeys"] == [2]    # only refC (size 7) survives
 
 
 @pytest.mark.slow

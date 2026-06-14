@@ -4,8 +4,12 @@ migrated to step-bound queue jobs.
 Compact suite: one test per sub-slice, each exercising the integration
 point that the migration changed (not the underlying analysis — those
 have their own tests). Uses `page` for bootstrap + dim-sweep (real-data
-fixture with a valid dimred/clustering ancestor) and `clean_page` for the
-save/load mechanic (no data needed).
+fixture with a valid dimred/clustering ancestor).
+
+The pure save-card step-binding mechanic moved to
+tests/unit/step-job-binding.test.mjs (run under `node --test`). The
+enqueueBusy import-guard stays here — it's a filesystem grep, not a
+browser test.
 """
 
 import pytest
@@ -132,55 +136,6 @@ def test_dim_sweep_descriptor_creates_card_under_dimred(page):
     assert out["hasVerdict"] is True
     assert out["sweepDims"] == [3, 4]
     assert out["runLinkedToParent"] is True
-
-
-def test_save_card_attaches_under_root_via_enqueue_job(clean_page):
-    """Phase 2 slice 2.9.c — save flow uses enqueueJob (not enqueueBusy)
-    and creates a `save` card under the workflow root.
-
-    Tests the *mechanic* of the migration (step-binding + parent
-    placement + result shape) without firing an actual download — we
-    use enqueueJob directly with a stub fn rather than calling
-    saveProject's internals, which would need a real serialise.
-    """
-    out = clean_page.evaluate(
-        '''async () => {
-            const wf = await import("/app/src/ui/workflow.js");
-            const q  = await import("/app/src/ui/queue.js");
-
-            wf.clearWorkflow();
-            const rootId = wf.createStep({ type: "data", label: "root" });
-
-            const stepId = wf.createStep({
-                type: "save",
-                label: "Save smoke",
-                params: { filename: "smoke.zip" },
-                parentId: rootId,
-            });
-            const { promise } = q.enqueueJob({
-                type: "save", label: "Save smoke", stepId,
-                fn: async () => ({
-                    capturedAt: "x",
-                    filename:   "smoke.zip",
-                    sizeBytes:  42,
-                    savedAt:    "x",
-                }),
-            });
-            await promise;
-
-            const card = wf.getStep(stepId);
-            return {
-                status:       card.status,
-                parentIsRoot: card.parentId === rootId,
-                resultSize:   card.result && card.result.sizeBytes,
-                resultName:   card.result && card.result.filename,
-            };
-        }'''
-    )
-    assert out["status"] == "done"
-    assert out["parentIsRoot"] is True
-    assert out["resultSize"] == 42
-    assert out["resultName"] == "smoke.zip"
 
 
 def test_no_remaining_enqueue_busy_imports_in_app_modules():
