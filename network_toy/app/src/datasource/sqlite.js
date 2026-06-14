@@ -325,7 +325,13 @@ export async function produceSqlite(params = {}) {
   if (_handle && _handle.db && _handle.db !== db) {
     try { _handle.db.close(); } catch { /* ignore */ }
   }
-  _handle = { dataset: datasetId, db, idByRow: paperIdByNode, textStmt: null };
+  // rowById (papers.id → node index) is the reverse of paperIdByNode; the SQL
+  // search panel needs it to map active-dataset hits back to graph nodes.
+  // Stash it on the handle (rowById is otherwise local to this function).
+  _handle = {
+    dataset: datasetId, db, idByRow: paperIdByNode, nodeByPaperId: rowById,
+    textStmt: null, attached: new Map(),
+  };
 
   return {
     method: "sqlite",
@@ -423,4 +429,102 @@ export function getNodeRecord(nodeId) {
 // produceSqlite().
 export function hasSqliteText() {
   return _handle != null;
+}
+
+// ── SQL library search support (J09) ────────────────────────────────────
+// The active dataset's snapshot DB already lives in the page (_handle.db). The
+// search panel runs read-only SELECTs against it directly, plus any number of
+// other snapshot DBs ATTACHed by alias. Everything below is the cross-DB plumbing
+// the panel needs; the SELECT-only guard and query building live in sql-search.js.
+
+// papers.id → graph node index (the reverse of the per-node paperId map), or
+// null when no corpus is loaded / the paper isn't a graph node. Active-dataset
+// hits use this to highlight in the viewer and to fill cart `nodeId`; hits from
+// ATTACHed non-active DBs have no node and return null (list-only).
+export function getNodeByPaperId(paperId) {
+  if (!_handle || !_handle.nodeByPaperId) return null;
+  const idx = _handle.nodeByPaperId.get(paperId);
+  return idx === undefined ? null : idx;
+}
+
+// The active dataset id (the one whose snapshot is the live _handle.db), or null.
+export function getActiveDatasetId() {
+  return _handle ? _handle.dataset : null;
+}
+
+// Alias under which a dataset id is ATTACHed in SQL. SQLite schema names must be
+// bare identifiers, so non-word chars (incl. the subset "::" separator) collapse
+// to "_". The active dataset is the unaliased `main` schema; callers that want a
+// symmetric alias for it can use this too.
+export function searchAlias(datasetId) {
+  return String(datasetId).replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+// Whether the sql.js build exposes an Emscripten FS (needed for ATTACH against a
+// file path). Determined off the live handle's SQL module. Currently the search
+// path requires FS; if a build lacks it, attachSnapshot throws and the panel
+// reports the failure rather than silently degrading.
+export async function searchFsAvailable() {
+  const SQL = await getSQL();
+  return !!(SQL && SQL.FS && typeof SQL.FS.writeFile === "function");
+}
+
+// ATTACH another dataset's *_snapshot.db onto the live handle under its alias so
+// the panel can run cross-DB SELECTs. Read-only: we only ever ATTACH a snapshot
+// copy and never issue DML/DDL against it (the SELECT-only guard enforces the
+// rest). Cached per alias — re-attaching is a no-op. Returns the alias.
+export async function attachSnapshot(datasetId) {
+  if (!_handle) throw new Error("[datasource:sqlite] no corpus loaded — cannot ATTACH");
+  const alias = searchAlias(datasetId);
+  if (_handle.attached.has(alias)) return alias;
+  const SQL = await getSQL();
+  if (!(SQL.FS && typeof SQL.FS.writeFile === "function")) {
+    throw new Error("[datasource:sqlite] sql.js build has no FS — cross-DB ATTACH unavailable");
+  }
+  const sep = datasetId.indexOf("::");
+  const projectId = sep === -1 ? datasetId : datasetId.slice(0, sep);
+  const base = await ensureDataset(projectId);
+  assertSnapshotPath(base.sqlitePath);   // never attach a live project DB
+  const r = await fetch(base.sqlitePath);
+  if (!r.ok) throw new Error(`[datasource:sqlite] ${base.sqlitePath}: HTTP ${r.status}`);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  const fsPath = `/${alias}.db`;
+  SQL.FS.writeFile(fsPath, bytes);
+  _handle.db.run(`ATTACH '${fsPath}' AS ${alias}`);
+  _handle.attached.set(alias, fsPath);
+  return alias;
+}
+
+// DETACH a previously-attached snapshot and drop its FS bytes. No-op if it isn't
+// attached. Driven by the scope selector on toggle-off.
+export async function detachSnapshot(datasetId) {
+  return detachSnapshotByAlias(searchAlias(datasetId));
+}
+
+// DETACH by the bare alias (the scope reconciler holds aliases, not ids).
+export async function detachSnapshotByAlias(alias) {
+  if (!_handle) return;
+  const fsPath = _handle.attached.get(alias);
+  if (!fsPath) return;
+  try { _handle.db.run(`DETACH ${alias}`); } catch { /* already gone */ }
+  const SQL = await getSQL();
+  try { SQL.FS.unlink(fsPath); } catch { /* best-effort */ }
+  _handle.attached.delete(alias);
+}
+
+// Currently-attached aliases (excludes the active dataset's `main` schema).
+export function attachedAliases() {
+  return _handle ? [..._handle.attached.keys()] : [];
+}
+
+// Run a read-only SELECT against the live handle (+ any ATTACHed snapshots).
+// Returns { columns, values } in sql.js exec shape, or { columns: [], values: [] }
+// for an empty result. The caller (sql-search.js) is responsible for the
+// SELECT-only guard and the LIMIT cap; this is the thin execution seam so the
+// panel never touches the module-private handle directly.
+export function runSearchQuery(sql) {
+  if (!_handle) throw new Error("[datasource:sqlite] no corpus loaded — cannot query");
+  const res = _handle.db.exec(sql);
+  if (!res.length) return { columns: [], values: [] };
+  return { columns: res[0].columns, values: res[0].values };
 }

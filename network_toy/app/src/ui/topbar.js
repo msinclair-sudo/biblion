@@ -74,6 +74,7 @@ export function mountTopbar() {
   spacer.className = "topbar-spacer";
   root.appendChild(spacer);
 
+  root.appendChild(renderSearch());
   root.appendChild(renderCart());
 
   // Click-outside handler closes any open menu.
@@ -168,6 +169,27 @@ function openCartPanel() {
   }
   // Default to the full-width bottom slot — the cart table is wide.
   addTab("bottom", "cart", {});
+}
+
+// Global search button (top-right): opens the SQL library-search panel (J09).
+function renderSearch() {
+  const btn = document.createElement("button");
+  btn.className = "topbar-search";
+  btn.title = "Open SQL library search";
+  btn.textContent = "Search";
+  btn.addEventListener("click", openSearchPanel);
+  return btn;
+}
+
+// Open the (singleton) search panel, or focus it if it's already open somewhere.
+function openSearchPanel() {
+  const s = getState();
+  for (const slot of Object.keys(s.panels)) {
+    const existing = s.panels[slot].tabs.find(t => t.type === "search-results");
+    if (existing) { setActiveTab(slot, existing.id); return; }
+  }
+  // Bottom slot — the editor + results table want the full width.
+  addTab("bottom", "search-results", {});
 }
 
 function stub(id) {

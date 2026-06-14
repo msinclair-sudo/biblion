@@ -225,10 +225,20 @@ export function nodeMatchesSelection(node, state, sel) {
   return null;
 }
 
-// Final node colour = base ± selection dim. The single function
-// each viewer calls per node per frame.
+// Final node colour = base ± selection dim ± search-match dim. The single
+// function each viewer calls per node per frame.
+//
+// Search highlight (J09) takes precedence over selection dimming: when the SQL
+// search panel has a non-empty match set, matched nodes keep their base colour
+// and every other node dims, regardless of the current selection. The match set
+// is STANDALONE state.searchMatches for now — J25 (Wave 4) folds it into a
+// general highlight channel, at which point this branch reads that instead.
 export function nodeColourFor(node, state, mode) {
   const base = baseColourFor(node, state, mode);
+  const matches = state.searchMatches;
+  if (matches && matches.size > 0) {
+    return matches.has(node.id) ? base : DIMMED_COLOUR;
+  }
   const matched = nodeMatchesSelection(node, state, state.selection);
   if (matched === null) return base;
   return matched ? base : DIMMED_COLOUR;

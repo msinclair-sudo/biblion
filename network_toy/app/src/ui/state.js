@@ -199,6 +199,14 @@ const state = {
     },
   },
   selection: { type: null, id: null },
+  // ── search highlight (J09) ───────────────────────────────────
+  // Set of ACTIVE-dataset nodeIds matched by the SQL library-search panel.
+  // When non-empty, the "search" colour branch lights these and dims the rest.
+  // Hits from ATTACHed non-active DBs have no node in the viz (list-only), so
+  // they never appear here. STANDALONE for now: J25 (Wave 4) folds this into a
+  // general node-highlight channel — search highlighting will then plug into
+  // that instead of this dedicated Set.
+  searchMatches: new Set(),
   // ── cart ─────────────────────────────────────────────────────
   // Papers collected (from clusters / selections) for export to a biblion
   // subset. Each item: { paperId, nodeId, source } (source = provenance, e.g.
@@ -545,6 +553,24 @@ export function setLayerParams(layer, params) {
 
 export function setSelection(selection) {
   update({ selection: selection || { type: null, id: null } });
+}
+
+// ── Search highlight (J09) ──────────────────────────────────────────
+// Light up a set of active-dataset nodeIds from the SQL search panel. We bump
+// engineRevision so the viewers (which repaint on selection / engineRevision
+// change) pick up the new "search" colour branch — there's no dedicated
+// search-repaint hook in the viewers, and a colour-only bump is cheap at
+// toy/dev-subset sizes. STANDALONE for now; J25 folds this into the general
+// highlight channel.
+export function setSearchMatches(nodeIds) {
+  update({ searchMatches: new Set((nodeIds || []).filter((n) => Number.isInteger(n))) });
+  bumpEngineRevision();
+}
+
+export function clearSearchMatches() {
+  if (state.searchMatches && state.searchMatches.size === 0) return;
+  update({ searchMatches: new Set() });
+  bumpEngineRevision();
 }
 
 export function setProjectName(name) {
