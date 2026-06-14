@@ -13,9 +13,10 @@
 // their own scoring card); scores live ON the scoring card
 // (result.scores[levelUid][clusterId]) and travel with its branch.
 
-import { getState, subscribe, setTabConfig } from "../state.js";
+import { getState, subscribe, setTabConfig, addToCart } from "../state.js";
 import { getStep, getSelectedStep, getStepDescendants, getStepAncestors,
          findClusterLevels, setCardScore } from "../workflow.js";
+import { getIdByRow } from "../../datasource/sqlite.js";
 import { computeBridgeAnalysis } from "../bridge-analysis.js";
 import { listLabelMethods, STRAT_PER_BAND } from "../../labelling/cluster-labels.js";
 
@@ -33,6 +34,17 @@ const METHOD_LABEL = Object.fromEntries(listLabelMethods().map(m => [m.id, m.lab
 // shown by default instead of stacking every method per cluster.
 const COMBINED = "__combined__";
 
+// Board-wide sort for the cluster blocks WITHIN each column. "default" keeps the
+// existing eligibility/bridge ordering; the others re-order by the manual 1–5
+// score (result.scores[levelUid][clusterId]). "unscored" floats the not-yet-
+// scored blocks to the top so they're easy to find and clear.
+const SORT_OPTIONS = [
+  { id: "default",  label: "Default" },
+  { id: "scoreDesc", label: "Score desc" },
+  { id: "scoreAsc",  label: "Score asc" },
+  { id: "unscored",  label: "Un-scored first" },
+];
+
 export function mount(container, _state, config = {}, tabContext = null) {
   const fixedStepId = (config && config.stepId) || null;
   // Per-layer parent-score threshold (panel-local; survives re-renders).
@@ -40,12 +52,21 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // Which labelling method to display (persisted on the tab). Defaults to the
   // combined pick; the header dropdown lets the user switch to any one method.
   let labelMethod = (config && config.labelMethod) || COMBINED;
+  // Board-wide cluster-block sort (persisted on the tab). Defaults to the
+  // existing eligibility/bridge order.
+  let sortMode = (config && config.sortMode) || "default";
   // Per-cluster "show all band terms" expansion (panel-local; keyed levelUid:clusterId).
   const expanded = new Set();
 
   function persistMethod(id) {
     labelMethod = id;
     if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { labelMethod: id });
+    render();
+  }
+
+  function persistSort(id) {
+    sortMode = id;
+    if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { sortMode: id });
     render();
   }
 
@@ -147,7 +168,50 @@ export function mount(container, _state, config = {}, tabContext = null) {
     for (const m of methods) opt(m.id, m.label);
     sel.addEventListener("change", () => persistMethod(sel.value));
     head.appendChild(sel);
+
+    // Board-wide sort control: re-orders cluster blocks within every column.
+    const sortLab = document.createElement("label");
+    sortLab.className = "scoring-method-label";
+    sortLab.textContent = "sort by:";
+    head.appendChild(sortLab);
+    const sortSel = document.createElement("select");
+    sortSel.className = "scoring-method-select";
+    for (const o of SORT_OPTIONS) {
+      const el = document.createElement("option");
+      el.value = o.id; el.textContent = o.label;
+      if (o.id === sortMode) el.selected = true;
+      sortSel.appendChild(el);
+    }
+    sortSel.addEventListener("change", () => persistSort(sortSel.value));
+    head.appendChild(sortSel);
     return head;
+  }
+
+  // Order a list of {cl, metric, eligible} blocks by the active sort mode.
+  // "default" preserves the incoming (eligibility/bridge) order. The score-based
+  // modes read the manual 1–5 from levelScores; un-scored clusters are treated
+  // as the lowest for desc (so they sink) and surfaced first for "unscored".
+  function sortBlocks(arr, levelScores) {
+    if (sortMode === "default") return arr;
+    const scoreOf = (it) => {
+      const v = levelScores[it.cl.id];
+      return Number.isFinite(v) ? v : null;
+    };
+    // Stable sort: decorate with the original index so equal keys keep order.
+    const decorated = arr.map((it, idx) => ({ it, idx, score: scoreOf(it) }));
+    decorated.sort((a, b) => {
+      if (sortMode === "unscored") {
+        const au = a.score == null ? 0 : 1;
+        const bu = b.score == null ? 0 : 1;
+        if (au !== bu) return au - bu;
+        return a.idx - b.idx;
+      }
+      const av = a.score == null ? -Infinity : a.score;
+      const bv = b.score == null ? -Infinity : b.score;
+      if (av !== bv) return sortMode === "scoreAsc" ? av - bv : bv - av;
+      return a.idx - b.idx;
+    });
+    return decorated.map(d => d.it);
   }
 
   function renderColumn(card, levels, labelsByLevel, scores, i) {
@@ -180,8 +244,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
     if (i === 0) {
       // Top layer — every cluster scoreable, no parent gate, no bridge split.
-      for (const cl of cr.clusters) {
-        body.appendChild(clusterBlock(card, levelUid, cl, labels, levelScores, null, true));
+      const blocks = cr.clusters.map(cl => ({ cl, metric: null, eligible: true }));
+      for (const it of sortBlocks(blocks, levelScores)) {
+        body.appendChild(clusterBlock(card, i, levelUid, cr, it.cl, labels, levelScores, it.metric, it.eligible));
       }
       return col;
     }
@@ -217,8 +282,10 @@ export function mount(container, _state, config = {}, tabContext = null) {
     }
 
     const addBlocks = (arr) => {
-      for (const it of arr) {
-        body.appendChild(clusterBlock(card, levelUid, it.cl, labels, levelScores, it.metric, it.eligible));
+      // Sort within each section (core/bridge, eligible/below-threshold) so the
+      // bridge/threshold grouping is preserved while blocks reorder inside it.
+      for (const it of sortBlocks(arr, levelScores)) {
+        body.appendChild(clusterBlock(card, i, levelUid, cr, it.cl, labels, levelScores, it.metric, it.eligible));
       }
     };
     const divider = (text, muted) => {
@@ -260,9 +327,29 @@ export function mount(container, _state, config = {}, tabContext = null) {
     return wrap;
   }
 
+  // Gather a cluster's REAL (non-ghost) papers for the cart. Cluster membership
+  // is the authoritative node-index → cluster-id map (cr.nodeCluster); ghosts
+  // carry citation edges but no paper we'd put in a subset, so they're skipped.
+  // Each item matches the cart's { paperId, nodeId, source } shape.
+  function clusterCartItems(cr, layerIdx, clusterId) {
+    const nodes = (getState().genResult && getState().genResult.nodes) || [];
+    const nc = cr.nodeCluster;
+    // Provenance string mirrors the node-table's cart convention ("L2·c5").
+    const source = `L${layerIdx}·c${clusterId}`;
+    const items = [];
+    if (!nc) return items;
+    for (let nodeId = 0; nodeId < nc.length; nodeId++) {
+      if (nc[nodeId] !== clusterId) continue;
+      if (nodes[nodeId] && nodes[nodeId].isGhost) continue;
+      const paperId = getIdByRow(nodeId);
+      if (paperId != null) items.push({ paperId, nodeId, source });
+    }
+    return items;
+  }
+
   // One cluster block: swatch + id/count, label bullets, 1–5 (if eligible),
   // and a metrics slot.
-  function clusterBlock(card, levelUid, cl, labels, levelScores, metric, eligible) {
+  function clusterBlock(card, layerIdx, levelUid, cr, cl, labels, levelScores, metric, eligible) {
     const block = document.createElement("div");
     block.className = "scoring-cluster" + (eligible ? "" : " ineligible");
 
@@ -277,9 +364,35 @@ export function mount(container, _state, config = {}, tabContext = null) {
     headRow.appendChild(sw);
     const idLab = document.createElement("span");
     idLab.className = "scoring-cluster-id";
-    const count = (cl.members && cl.members.length) || cl.count || 0;
-    idLab.textContent = `Cluster ${cl.id} · ${count}`;
+    // Two counts can differ: cl.count/members is total membership (incl. ghost
+    // nodes that carry citation edges but no real paper); the cart only takes
+    // real papers. We show the real-paper count — it's what "Add to cart" pushes
+    // and is the more meaningful figure for scoring. Falls back to total when no
+    // corpus is loaded (cartItems empty → 0).
+    const cartItems = clusterCartItems(cr, layerIdx, cl.id);
+    const totalCount = (cl.members && cl.members.length) || cl.count || 0;
+    const papers = cartItems.length;
+    // No corpus loaded → getIdByRow yields nothing for every node; fall back to
+    // the total membership rather than a misleading "0 papers / N".
+    const noCorpus = papers === 0 && totalCount > 0;
+    idLab.textContent = (noCorpus || papers === totalCount)
+      ? `Cluster ${cl.id} · ${totalCount}`
+      : `Cluster ${cl.id} · ${papers} papers / ${totalCount}`;
     headRow.appendChild(idLab);
+
+    // Add-to-cart: push this cluster's real papers (no ghosts) via the shared
+    // cart helper, which dedupes by paperId across clusters.
+    const cartBtn = document.createElement("button");
+    cartBtn.type = "button";
+    cartBtn.className = "scoring-cart-add";
+    cartBtn.textContent = "+ cart";
+    cartBtn.title = `Add ${papers} paper${papers === 1 ? "" : "s"} from this cluster to the cart`;
+    cartBtn.disabled = papers === 0;
+    cartBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      addToCart(cartItems);
+    });
+    headRow.appendChild(cartBtn);
     left.appendChild(headRow);
 
     // label bullets — only the SELECTED method (combined by default), not every
