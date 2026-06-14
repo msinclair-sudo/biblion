@@ -11,9 +11,29 @@ CLAUDE.md
 # Internal design/discussion docs (not part of the shipped docs)
 docs/conflict_resolution_discussion.md
 
-# network-toy viewer lives in-repo at network_toy/ (single repo as of the
-# monorepo merge). Its nested network_toy/.gitignore covers node_modules/,
-# data/, scratch/; real corpus data is covered by the data/** rules below + *.db.
+# ── network_toy subtree (consolidated from the former network_toy/.gitignore) ──
+# The toy lives in-repo at network_toy/ (single repo as of the monorepo merge).
+# Generic junk (__pycache__/.env/.venv/.vscode/*.log/.claude/CLAUDE.md/etc.) is
+# already covered by the global rules in this file; only toy-specific paths below.
+network_toy/**/node_modules/
+network_toy/package-lock.json
+network_toy/**/*.tmp
+network_toy/**/.cache/
+# Private working notes / planning — not tracked (public docs under
+# network_toy/doc/ ARE tracked).
+network_toy/doc/ui.md
+network_toy/doc/plan.md
+network_toy/doc/clustering-research.md
+network_toy/doc/*-plan.md
+network_toy/pending_changes.md
+# Local-only working dirs.
+network_toy/scratch/
+network_toy/saves/
+# Legacy real-data pipeline + materialised ingest artifacts (read as
+# locally-materialised inputs). The data symlink (network_toy/data -> ../data)
+# stays tracked; only a real data/ dir is ignored.
+network_toy/literture-network/
+network_toy/data/
 
 # Generated network-toy snapshot/embedding artifacts (live next to the DBs
 # under data/<project>/; the *_snapshot.db files are covered by *.db below)
