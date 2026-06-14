@@ -7,9 +7,11 @@ What stays here needs a browser: the card-wiring case imports layer-descriptors
 """
 
 
-def test_cross_cluster_card_and_next_steps(clean_page):
-    """A crossClusterCitations card runs under the picker, computes the
-    per-layer flow, and the picker offers it in its '+'."""
+def test_cross_cluster_panel_and_next_steps(clean_page):
+    """J16: cross-cluster citations no longer spawns a tree CARD. Running the
+    descriptor computes the per-layer flow off the picker's clustering
+    ancestor, stashes it on state.crossClusterCitations, and auto-opens the
+    singleton cross-cluster panel. The picker still offers it in its '+'."""
     out = clean_page.evaluate(r'''async () => {
         const wf = await import("/app/src/ui/workflow.js");
         const st = await import("/app/src/ui/state.js");
@@ -33,23 +35,35 @@ def test_cross_cluster_card_and_next_steps(clean_page):
         st.update({ rawCitationEdges: [0,2, 2,4, 4,0, 1,3] });
         wf.selectStep(pk);
 
-        await ld.getLayerDescriptor("crossClusterCitations").applyChange();
-        const card = wf.listSteps({ type: "crossClusterCitations" }).slice(-1)[0];
-        const cc = card.result && card.result.crossClusterCitations;
+        // No applyChange / card: the descriptor only exposes openModal, which
+        // computes + stashes on state and opens the panel (fire-and-forget).
+        const desc = ld.getLayerDescriptor("crossClusterCitations");
+        desc.openModal();
+        // Poll for the async stash to land.
+        let cc = null;
+        for (let i = 0; i < 200; i++) {
+            cc = st.getState().crossClusterCitations;
+            if (cc) break;
+            await new Promise(r => setTimeout(r, 10));
+        }
+        const noCard = wf.listSteps({ type: "crossClusterCitations" }).length === 0;
+        const secTabs = ((st.getState().panels || {}).secondary || {}).tabs || [];
         return {
-            status: card.status,
-            parentIsPicker: card.parentId === pk,
+            stashed: !!cc,
+            noCard,
             nLayers: cc && cc.byLayer.length,
             l0k: cc && cc.byLayer[0].k,
             l0used: cc && cc.byLayer[0].edgesUsed,
+            panelOpened: secTabs.some(t => t.type === "cross-cluster"),
             pickerOffers: ns.addStepRulesFor("multiLevelPicker").map(r => r.modal),
         };
     }''')
-    assert out["status"] == "done"
-    assert out["parentIsPicker"] is True
+    assert out["stashed"] is True
+    assert out["noCard"] is True                     # J16: no tree card spawned
     assert out["nLayers"] == 2                       # both committed layers
     assert out["l0k"] == 3                            # L0 has 3 clusters
     assert out["l0used"] == 4                         # all 4 edges map (no noise)
+    assert out["panelOpened"] is True                # singleton panel auto-opens
     assert "crossClusterCitations" in out["pickerOffers"]
 
 

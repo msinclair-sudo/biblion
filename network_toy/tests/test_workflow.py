@@ -233,9 +233,9 @@ def test_list_steps_filters_dont_prune_traversal(page):
 # ── workflow-migration tests ────────────────────────────────────────
 
 
-def test_migration_bfs5000_real_mode(page):
-    """Real-mode (BFS-5000): migration emits data → dimred → clustering →
-    citations. The citations card appears because BFS-5000 ships with
+def test_migration_fallworm_real_mode(page):
+    """Real-mode (fallworm): migration emits data → dimred → clustering →
+    citations. The citations card appears because the fixture ships with
     citation_edges.json and the §6.4c `imported-edges` Layer 3
     algorithm populates state.citationResult on ingest. citationLayout /
     alignment / blend are opt-in (§6.16) and NOT emitted by default."""
@@ -257,7 +257,9 @@ def test_migration_bfs5000_real_mode(page):
     # BFS-5000 ships with citations → migration emits the spine + citations.
     # No citationLayout / alignment / blend (opt-in).
     assert out["typeChain"] == ["data", "dimred", "clustering", "citations"]
-    assert "Real · dev_subset_bfs_5000" in out["rootLabel"]
+    # Fixture is now fallworm (no subset name in its config) → label falls back
+    # to "(unknown subset)" with the fallworm node count.
+    assert "Real · (unknown subset) (n=1638)" in out["rootLabel"]
 
 
 def test_migration_empty_plan_when_no_genResult():

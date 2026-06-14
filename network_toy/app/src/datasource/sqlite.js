@@ -431,6 +431,18 @@ export function hasSqliteText() {
   return _handle != null;
 }
 
+// Drop the loaded corpus: close the DB handle and null the module state so
+// hasSqliteText() reads false again. The inverse of produceSqlite() — used
+// when switching away from the sqlite source (and by the test harness to
+// restore a data-free session, since _handle is module-global and survives a
+// state.update reset). Idempotent.
+export function clearSqliteCorpus() {
+  if (_handle && _handle.db) {
+    try { _handle.db.close(); } catch { /* already closed */ }
+  }
+  _handle = null;
+}
+
 // ── SQL library search support (J09) ────────────────────────────────────
 // The active dataset's snapshot DB already lives in the page (_handle.db). The
 // search panel runs read-only SELECTs against it directly, plus any number of

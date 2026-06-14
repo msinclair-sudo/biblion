@@ -257,13 +257,15 @@ def test_multilevel_producer_picker_cards(page):
     assert out["projectedSweep"] is True            # producer ancestor projects the curve
 
 
-def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(page):
-    """Pass 1c + Pass 2a: after the picker commits a ladder, bridgeAnalysis
-    is computed inline (no separate card — Pass 2a removed it) and surfaced
-    on state.bridgeAnalysis. crossClusterCitations auto-spawns ONLY when
-    citation edges are present in live state (gated to avoid a perma-failed
-    card with no edges). Toggling state.rawCitationEdges between two commits
-    proves the gate works."""
+@pytest.mark.slow
+def test_picker_commit_populates_bridges_and_auto_crosscite(page):
+    """Pass 1c + Pass 2a + J16: after the picker commits a ladder,
+    bridgeAnalysis is computed inline (no separate card — Pass 2a removed it)
+    and surfaced on state.bridgeAnalysis. Cross-cluster citations no longer
+    spawns a CARD (J16); instead the flow is computed and stashed on
+    state.crossClusterCitations ONLY when citation edges are present in live
+    state (gated to avoid running the throwing runner with no edges). Toggling
+    state.rawCitationEdges between two commits proves the gate works."""
     out = page.evaluate(r'''async () => {
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
         const wf = await import("/app/src/ui/workflow.js");
@@ -304,37 +306,53 @@ def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(page):
         const phase1_hasBridge = !!phase1_state.bridgeAnalysis;
         // No separate bridgeAnalysis card should exist (Pass 2a deleted the type).
         const phase1_bridgeCards = wf.listSteps().filter(s => s.type === "bridgeAnalysis").length;
-        const xcc1 = wf.listSteps().filter(s => s.type === "crossClusterCitations" && s.parentId === picker.id);
+        // J16: cross-cluster never spawns a card. Gated out with no edges →
+        // no stash on state either.
+        const phase1_xccCards = wf.listSteps().filter(s => s.type === "crossClusterCitations").length;
+        const phase1_xccStash = !!phase1_state.crossClusterCitations;
 
-        // ── Phase 2: synthesise edges + re-pick — crossCluster should join.
-        st.update({ rawCitationEdges: [[0, 1], [1, 2], [2, 0]] });
+        // ── Phase 2: synthesise edges + re-pick — crossCluster flow should
+        //    compute and land on state.crossClusterCitations (no card).
+        st.update({ rawCitationEdges: [0, 1, 1, 2, 2, 0], crossClusterCitations: null });
         await pdesc.applyChange({ pickedCounts: picks });
-        for (let i = 0; i < 25; i++) {
+        let xcc2stash = null;
+        for (let i = 0; i < 50; i++) {
             await new Promise(r => setTimeout(r, 40));
-            const xcc = wf.listSteps().filter(s => s.type === "crossClusterCitations" && s.parentId === picker.id);
-            if (xcc.length && xcc[0].status === "done") break;
+            xcc2stash = st.getState().crossClusterCitations;
+            if (xcc2stash) break;
         }
-        const xcc2 = wf.listSteps().filter(s => s.type === "crossClusterCitations" && s.parentId === picker.id);
+        const phase2_xccCards = wf.listSteps().filter(s => s.type === "crossClusterCitations").length;
 
-        // Restore so we don't bleed into later tests.
-        st.update({ rawCitationEdges: edgesBefore });
+        // Restore so we don't bleed into later tests. J16's auto-fire opened a
+        // singleton cross-cluster panel in the secondary slot and stashed the
+        // flow on state — undo both so later `page` tests see the pristine
+        // panel layout (the viewer keep-alive test depends on it).
+        const sec = (st.getState().panels || {}).secondary;
+        if (sec && Array.isArray(sec.tabs)) {
+            for (const t of sec.tabs.filter(t => t.type === "cross-cluster")) {
+                st.closeTab("secondary", t.id);
+            }
+        }
+        st.update({ rawCitationEdges: edgesBefore, crossClusterCitations: null, bridgeAnalysis: null });
 
         return {
             phase1_hasBridge,
             phase1_bridgeCards,                      // expected: 0 (card type removed)
-            phase1_xccCount: xcc1.length,            // expected: 0 (gated out)
-            phase2_xccCount: xcc2.length,            // expected: 1 (auto-spawned)
-            phase2_xccStatus: xcc2[0] && xcc2[0].status,
+            phase1_xccCards,                         // expected: 0 (J16: no card)
+            phase1_xccStash,                         // expected: false (gated out)
+            phase2_xccCards,                         // expected: 0 (J16: no card)
+            phase2_xccStash: !!xcc2stash,            // expected: true (flow stashed)
         };
     }''')
     # Bridge computed inline + surfaced on state, no separate card.
     assert out["phase1_hasBridge"] is True
     assert out["phase1_bridgeCards"] == 0
-    # CrossCluster gated out when no edges.
-    assert out["phase1_xccCount"] == 0
-    # ...and auto-spawns when edges are present.
-    assert out["phase2_xccCount"] == 1
-    assert out["phase2_xccStatus"] == "done"
+    # CrossCluster: never a card (J16); gated out (no stash) when no edges.
+    assert out["phase1_xccCards"] == 0
+    assert out["phase1_xccStash"] is False
+    # ...and flow lands on state when edges are present.
+    assert out["phase2_xccCards"] == 0
+    assert out["phase2_xccStash"] is True
 
 
 def test_bridge_panel_sections_and_tau(page):

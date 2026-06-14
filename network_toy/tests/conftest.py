@@ -109,9 +109,13 @@ def dev_server():
         return
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # serve.py (not plain http.server): the app fetches /api/datasets on boot,
+    # which only serve.py answers. It roots at network_toy/ and reads the port
+    # from NETWORK_TOY_PORT.
     proc = subprocess.Popen(
-        ["python", "-m", "http.server", str(TEST_PORT)],
+        ["python", "serve.py"],
         cwd=repo_root,
+        env={**os.environ, "NETWORK_TOY_PORT": str(TEST_PORT)},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -363,6 +367,35 @@ def data_only_page(_data_only_session):
     assert not errs, f"console errors during data_only_page test: {errs}"
 
 
+def _wipe_data_slots(page):
+    """Restore the clean session's data-free contract. Some clean_page tests
+    deliberately run a real ingest (granular build-out: data/dimred cards),
+    which leaves genResult / embedding / dimredResult / clusterLevels (and a
+    materialised-text source that flips c-TF-IDF availability) on the shared
+    _clean_session. Without this, a later clean_page test inherits that data
+    and mis-reports (e.g. labelling's availCTfidf). Mirrors a fresh clean.zip
+    rehydrate without re-paying the load."""
+    page.evaluate(
+        '''async () => {
+            const st = await import("/app/src/ui/state.js");
+            const sq = await import("/app/src/datasource/sqlite.js");
+            // The loaded sqlite corpus lives in a module-global handle that a
+            // state reset can't touch; drop it so hasSqliteText() reads false
+            // (else c-TF-IDF labelling / RIS export stay "available").
+            sq.clearSqliteCorpus();
+            st.update({
+                genResult: null, embedding: null, rawCitationEdges: null,
+                dimredResult: null, dimredResultPreFusion: null,
+                _basePos: null, _basePos2d: null, _basePosPreFusion: null,
+                clusterLevels: null, clusterResult: null,
+                bridgeAnalysis: null, crossClusterCitations: null,
+                nodeDisplacement: null, fusionActive: false,
+                dataSource: { mode: "sqlite", configs: { sqlite: { dataset: "fallworm" } } },
+            });
+        }'''
+    )
+
+
 @pytest.fixture
 def clean_page(_clean_session):
     """Per-test page with NO data loaded. For pure-module tests (queue.js,
@@ -370,6 +403,7 @@ def clean_page(_clean_session):
     Reset per test off the shared rehydrated clean session — no per-test
     boot, no ingest."""
     _reset_page(_clean_session)
+    _wipe_data_slots(_clean_session)
     yield _clean_session
     errs = relevant_errors(_clean_session)
     assert not errs, f"console errors during clean_page test: {errs}"

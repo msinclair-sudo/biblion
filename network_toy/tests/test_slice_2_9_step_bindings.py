@@ -84,12 +84,18 @@ def test_bootstrap_sidecar_runs_with_clustering(page):
     assert out["clusteringStored_B"] == 5
 
 
+@pytest.mark.slow
 def test_dim_sweep_descriptor_creates_card_under_dimred(page):
     """Phase 2 slice 2.9.b — running a dim-sweep forks a dimSweep card
     under the selected dimred ancestor and persists the verdict.
 
-    Uses a 2-dim × 1-seed sweep (the minimum runDimSweep accepts) for
-    fast wall time on the slow CI PC.
+    Uses a 2-dim × 1-seed sweep (the minimum runDimSweep accepts).
+
+    @slow: this recomputes a real dim-sweep (noise=PCA→compression=UMAP at
+    n=1638), which the default fast tier must not do. NOTE: the in-browser
+    umap-js@1.4.0 currently overflows its call stack on the fallworm fixture
+    (RangeError in umap-js `se`/`kt` recursion) — see the integration report;
+    flagged for the slow tier.
     """
     out = page.evaluate(
         '''async () => {

@@ -30,8 +30,10 @@ def test_method_receipt_renders(page):
             };
         }'''
     )
-    # Sanity: receipt mentions the data source + algorithm.
-    assert "real" in out["bodyText"].lower() or "bfs" in out["bodyText"].lower()
+    # Sanity: receipt mentions the data source + algorithm. J27 flipped the
+    # default source to `sqlite` (and retired `real`), so the receipt now
+    # renders "Data: sqlite, ...".
+    assert "sqlite" in out["bodyText"].lower()
     assert "hdbscan" in out["bodyText"].lower()
     assert out["hasCopyBtn"] is True
 
