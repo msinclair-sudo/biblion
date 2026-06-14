@@ -32,8 +32,15 @@ export async function deserialiseFile(file) {
     throw new Error("[persistence] no state.json in archive");
   }
   const raw = JSON.parse(strFromU8(entries["state.json"]));
+  // (Back-compat shim entry point — additive normalisation of `raw` for
+  //  older schema versions goes here, before reviveBinaries.)
   const patch = reviveBinaries(raw, entries);
 
+  // reviveBinaries handles nested descriptors recursively, including
+  // multiple descriptors that point at one shared arrays/ entry (the
+  // serialiser's buffer-identity dedup emits these): each descriptor
+  // gets its own copied buffer, so the revived views are independent
+  // and usable even when they share a source path.
   return { patch, manifest };
 }
 

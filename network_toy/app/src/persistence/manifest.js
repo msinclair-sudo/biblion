@@ -10,7 +10,10 @@
 //   layerParams.dimred.viz2d sub-stage. Files saved under v1 don't
 //   carry these fields, so loader refuses (per strict-refusal rule).
 // SCHEMA_VERSION 3: adds state.cart (cluster→cart→biblion-subset round-trip).
-export const SCHEMA_VERSION = 3;
+// SCHEMA_VERSION 4: persists state.workflow (the canonical card tree) +
+//   state.view alongside the flat projection slots. v3 files have no
+//   workflow, so strict-refusal rejects them (acceptable per the rule).
+export const SCHEMA_VERSION = 4;
 
 // Build the manifest header written into the zip. Caller fills in
 // the contents list (paths inside the archive) since it has the
