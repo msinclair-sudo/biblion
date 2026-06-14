@@ -181,20 +181,36 @@ function computeLayout(rootStep) {
   // card to the referencing card (e.g. a fusionComparison card's two
   // source clusterings). Computed after placement since a refId can
   // point anywhere in the already-laid-out tree.
+  //
+  // Exception (J15): nodeDisplacement branches off BOTH fusion branches, so its
+  // ref-edge (the pre branch — the post branch is the parentId) is PROMOTED to a
+  // primary, solid lineage edge. It draws from the source card's bottom into the
+  // ND card's top so it reads like the parentId edge, giving two solid incoming
+  // edges rather than one solid + one dashed.
   const posById = new Map(positions.map(p => [p.step.id, p]));
   const refEdges = [];
   for (const p of positions) {
     const refIds = p.step.refIds || [];
+    const primary = p.step.type === "nodeDisplacement";
     for (const rid of refIds) {
       const src = posById.get(rid);
       if (!src) continue;
-      refEdges.push({
-        fromX:  src.x + NODE_W / 2,
-        fromY:  src.y + NODE_H / 2,
-        toX:    p.x + NODE_W / 2,
-        toY:    p.y + NODE_H / 2,
-        dashed: true,
-      });
+      if (primary) {
+        refEdges.push({
+          fromX: src.x + NODE_W / 2,
+          fromY: src.y + NODE_H,
+          toX:   p.x + NODE_W / 2,
+          toY:   p.y,
+        });
+      } else {
+        refEdges.push({
+          fromX:  src.x + NODE_W / 2,
+          fromY:  src.y + NODE_H / 2,
+          toX:    p.x + NODE_W / 2,
+          toY:    p.y + NODE_H / 2,
+          dashed: true,
+        });
+      }
     }
   }
 

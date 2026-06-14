@@ -22,6 +22,11 @@ export function mount(container, _state, config = {}) {
   let seededFor = null;
 
   function resolveResult() {
+    // J16: cross-cluster citations is no longer a card. It auto-computes after
+    // the layer ladder commits and writes state.crossClusterCitations, which a
+    // singleton (no-stepId) panel reads directly — mirrors bridge analysis.
+    // The card-bound lookup below is kept only for legacy saved workflows that
+    // still carry a crossClusterCitations step; new runs hit the state path.
     let card = null;
     if (fixedStepId) card = getStep(fixedStepId);
     else {
@@ -32,7 +37,8 @@ export function mount(container, _state, config = {}) {
         card = anc.length ? anc[anc.length - 1] : null;
       }
     }
-    const cc = card && card.result && card.result.crossClusterCitations;
+    const cc = (card && card.result && card.result.crossClusterCitations)
+      || getState().crossClusterCitations;
     return { card, cc };
   }
 
@@ -49,8 +55,9 @@ export function mount(container, _state, config = {}) {
     const { cc } = resolveResult();
     if (!cc || !Array.isArray(cc.byLayer) || cc.byLayer.length === 0) {
       wrap.appendChild(empty(
-        "No cross-cluster citation run on this branch — add a “Cross-cluster " +
-        "citations” step from a layer-picker / clustering card’s “+”."));
+        "No cross-cluster citations yet — they auto-compute once a layer ladder " +
+        "is committed and the dataset carries citation edges. On toy data " +
+        "without citations, generate them first, then re-pick the layers."));
       container.appendChild(wrap);
       return;
     }
