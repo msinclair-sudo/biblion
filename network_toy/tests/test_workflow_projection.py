@@ -12,8 +12,9 @@ import pytest
 
 @pytest.mark.slow
 def test_chart_click_swaps_viewer_data(page):
-    """End-to-end on BFS-5000: apply a second clustering creating a
-    sibling card, then click the FIRST clustering card on the chart.
+    """End-to-end on the rehydrated fallworm baseline (n=1638): apply a
+    second clustering creating a sibling card, then click the FIRST
+    clustering card on the chart.
     state.clusterLevels should swap back to the first card's data —
     proves projection wires through workflow-chart's onCardClick."""
     out = page.evaluate(
@@ -63,9 +64,9 @@ def test_chart_click_swaps_viewer_data(page):
             };
         }'''
     )
-    # Both clusterings produced data of the same length (n=5000).
-    assert out["originalNcLen"] == 5000
-    assert out["afterApplyNcLen"] == 5000
+    # Both clusterings produced data of the same length (fallworm n=1638).
+    assert out["originalNcLen"] == 1638
+    assert out["afterApplyNcLen"] == 1638
     # The two clusterings differ (different mutualK).
     assert out["differBeforeProject"] is True
     # Projecting back to the original restored its data byte-for-byte.
