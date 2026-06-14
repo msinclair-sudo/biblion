@@ -13,11 +13,11 @@
 // their own scoring card); scores live ON the scoring card
 // (result.scores[levelUid][clusterId]) and travel with its branch.
 
-import { getState, subscribe }   from "../state.js";
+import { getState, subscribe, setTabConfig } from "../state.js";
 import { getStep, getSelectedStep, getStepDescendants, getStepAncestors,
          findClusterLevels, setCardScore } from "../workflow.js";
 import { computeBridgeAnalysis } from "../bridge-analysis.js";
-import { listLabelMethods }      from "../../labelling/cluster-labels.js";
+import { listLabelMethods, STRAT_PER_BAND } from "../../labelling/cluster-labels.js";
 
 export const ID          = "scoring";
 export const LABEL       = "Scoring";
@@ -29,10 +29,25 @@ const TAU = 0.8;   // dominance cutoff: encapsulated vs bridge
 // Human label per method id (for the bullet prefixes).
 const METHOD_LABEL = Object.fromEntries(listLabelMethods().map(m => [m.id, m.label]));
 
-export function mount(container, _state, config = {}) {
+// Sentinel method id for the combined one-liner pick (combine()'s output),
+// shown by default instead of stacking every method per cluster.
+const COMBINED = "__combined__";
+
+export function mount(container, _state, config = {}, tabContext = null) {
   const fixedStepId = (config && config.stepId) || null;
   // Per-layer parent-score threshold (panel-local; survives re-renders).
   let thresholds = {};
+  // Which labelling method to display (persisted on the tab). Defaults to the
+  // combined pick; the header dropdown lets the user switch to any one method.
+  let labelMethod = (config && config.labelMethod) || COMBINED;
+  // Per-cluster "show all band terms" expansion (panel-local; keyed levelUid:clusterId).
+  const expanded = new Set();
+
+  function persistMethod(id) {
+    labelMethod = id;
+    if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { labelMethod: id });
+    render();
+  }
 
   function resolveCard() {
     if (fixedStepId) return getStep(fixedStepId);
@@ -86,10 +101,53 @@ export function mount(container, _state, config = {}) {
       return;
     }
 
+    // Panel header: pick which labelling method to display (combined by default).
+    container.appendChild(methodHeader(labelsByLevel));
+
     for (let i = 0; i < levels.length; i++) {
       root.appendChild(renderColumn(card, levels, labelsByLevel, scores, i));
     }
     container.appendChild(root);
+  }
+
+  // The labelling methods actually present in this card's stored labels, in
+  // registry order. Built from labels.methods (level-invariant), unioned across
+  // levels in case a level gated a method off.
+  function availableMethods(labelsByLevel) {
+    const seen = new Map();   // id → label
+    for (const lvl of Object.values(labelsByLevel)) {
+      for (const m of (lvl && lvl.methods) || []) {
+        if (m.available && !seen.has(m.id)) seen.set(m.id, m.label);
+      }
+    }
+    return [...seen.entries()].map(([id, label]) => ({ id, label }));
+  }
+
+  function methodHeader(labelsByLevel) {
+    const methods = availableMethods(labelsByLevel);
+    // If the persisted choice no longer exists, fall back to the combined pick.
+    if (labelMethod !== COMBINED && !methods.some(m => m.id === labelMethod)) {
+      labelMethod = COMBINED;
+    }
+    const head = document.createElement("div");
+    head.className = "scoring-board-head";
+    const lab = document.createElement("label");
+    lab.className = "scoring-method-label";
+    lab.textContent = "label method:";
+    head.appendChild(lab);
+    const sel = document.createElement("select");
+    sel.className = "scoring-method-select";
+    const opt = (value, text) => {
+      const o = document.createElement("option");
+      o.value = value; o.textContent = text;
+      if (value === labelMethod) o.selected = true;
+      sel.appendChild(o);
+    };
+    opt(COMBINED, "Combined (preferred)");
+    for (const m of methods) opt(m.id, m.label);
+    sel.addEventListener("change", () => persistMethod(sel.value));
+    head.appendChild(sel);
+    return head;
   }
 
   function renderColumn(card, levels, labelsByLevel, scores, i) {
@@ -224,7 +282,8 @@ export function mount(container, _state, config = {}) {
     headRow.appendChild(idLab);
     left.appendChild(headRow);
 
-    // label bullets — one per available method.
+    // label bullets — only the SELECTED method (combined by default), not every
+    // method stacked. The header dropdown switches which one shows here.
     const info = labels.perCluster && labels.perCluster[cl.id];
     const labWrap = document.createElement("div");
     labWrap.className = "scoring-cluster-labels";
@@ -233,39 +292,64 @@ export function mount(container, _state, config = {}) {
     labHead.textContent = "label:";
     labWrap.appendChild(labHead);
     const byMethod = (info && info.byMethod) || {};
-    const methodIds = Object.keys(byMethod);
-    if (methodIds.length === 0) {
+    const expandKey = `${levelUid}:${cl.id}`;
+
+    if (labelMethod === COMBINED) {
+      const li = document.createElement("div");
+      li.className = "scoring-label-bullet" + (info && info.combined ? "" : " none");
+      li.textContent = `• ${(info && info.combined) || "(unlabelled)"}`;
+      labWrap.appendChild(li);
+    } else if (!byMethod[labelMethod]) {
       const li = document.createElement("div");
       li.className = "scoring-label-bullet none";
-      li.textContent = "• (unlabelled)";
+      li.textContent = "• (no label for this method)";
       labWrap.appendChild(li);
     } else {
-      for (const mid of methodIds) {
-        const v = byMethod[mid];
-        const name = METHOD_LABEL[mid] || mid;
-        // banded (stratified) labels render one band per line for readability.
-        if (v && v.bands) {
-          const wrap = document.createElement("div");
-          wrap.className = "scoring-label-bullet stratified";
-          const head = document.createElement("div");
-          head.className = "scoring-label-method";
-          head.textContent = `• ${name}:`;
-          wrap.appendChild(head);
+      const v = byMethod[labelMethod];
+      const name = METHOD_LABEL[labelMethod] || labelMethod;
+      // banded (stratified) labels render one band per line for readability,
+      // behind a per-cluster show-more so they don't dominate the column.
+      if (v && v.bands) {
+        const wrap = document.createElement("div");
+        wrap.className = "scoring-label-bullet stratified";
+        const head = document.createElement("div");
+        head.className = "scoring-label-method";
+        head.textContent = `• ${name}:`;
+        wrap.appendChild(head);
+        const isOpen = expanded.has(expandKey);
+        if (isOpen) {
           for (const b of ["anchor", "broad", "mid", "specific", "signature"]) {
             const arr = v.bands[b];
             if (!arr || !arr.length) continue;
             const line = document.createElement("div");
             line.className = "scoring-label-band";
-            line.textContent = `${b}: ${arr.map(t => t.term).join(", ")}`;
+            // full per-band terms (up to STRAT_PER_BAND, already computed).
+            line.textContent = `${b}: ${arr.slice(0, STRAT_PER_BAND).map(t => t.term).join(", ")}`;
             wrap.appendChild(line);
           }
-          labWrap.appendChild(wrap);
         } else {
-          const li = document.createElement("div");
-          li.className = "scoring-label-bullet";
-          li.textContent = `• ${name}: ${formatLabel(v)}`;
-          labWrap.appendChild(li);
+          // collapsed: the compact combined one-liner across the gradient.
+          const line = document.createElement("div");
+          line.className = "scoring-label-collapsed";
+          line.textContent = (info && info.combined) || (v.terms || []).slice(0, 3).join(" · ");
+          wrap.appendChild(line);
         }
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "scoring-label-showmore";
+        toggle.textContent = isOpen ? "show less" : "show more";
+        toggle.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (isOpen) expanded.delete(expandKey); else expanded.add(expandKey);
+          render();
+        });
+        wrap.appendChild(toggle);
+        labWrap.appendChild(wrap);
+      } else {
+        const li = document.createElement("div");
+        li.className = "scoring-label-bullet";
+        li.textContent = `• ${name}: ${formatLabel(v)}`;
+        labWrap.appendChild(li);
       }
     }
     left.appendChild(labWrap);
