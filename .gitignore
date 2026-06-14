@@ -4,7 +4,7 @@
 
 # Local dev notes for AI coding agents (not for distribution)
 CLAUDE.md
-
+plans/
 # Local Claude Code settings / scratch (machine-specific)
 .claude/
 
