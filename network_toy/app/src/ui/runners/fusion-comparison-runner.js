@@ -94,7 +94,7 @@ export function buildFusionComparisonJob({ refStepId, candStepId }) {
     try {
       const live = getState();
       const ds   = live.dataSource;
-      const mode = (ds && ds.mode) || "real";
+      const mode = (ds && ds.mode) || "sqlite";
       const cfg  = (ds && ds.configs && ds.configs[mode]) || {};
       const savedId = saveValidationRun({
         type: "fusionComparison",

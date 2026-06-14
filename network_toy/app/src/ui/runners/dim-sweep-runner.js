@@ -69,11 +69,10 @@ export function buildDimSweepJob({ parentDimredStepId, settings }) {
     const verdict   = dimSweepVerdict(sweep, pair[0], pair[1], threshold);
 
     const ds   = live.dataSource;
-    const mode = (ds && ds.mode) || "real";
+    const mode = (ds && ds.mode) || "sqlite";
     const cfg  = (ds && ds.configs && ds.configs[mode]) || {};
-    const subsetTag = mode === "real"
-      ? (cfg.subset || "real")
-      : `toy n=${live.genResult ? live.genResult.nodes.length : "?"}`;
+    const subsetTag = cfg.dataset
+      || `n=${live.genResult ? live.genResult.nodes.length : "?"}`;
     const compTag = settings.compression && settings.compression.method;
     const clusTag = settings.clustering  && settings.clustering.method;
     const label   = `dimsweep ${compTag}-{${settings.dims.join("/")}} ${clusTag} · ${subsetTag}`;

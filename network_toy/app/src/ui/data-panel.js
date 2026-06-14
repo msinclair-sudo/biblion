@@ -4,7 +4,12 @@
 // Source SELECTION lives in the workflow-chart's Data card → modal
 // (see modals/data-source-modal.js); this panel is just the
 // fast-iteration UI for whatever's currently active: read-only stats
-// + Reload ▶ (hitting Reload re-runs reingest against the same subset).
+// + Reload ▶ (hitting Reload re-runs reingest against the same dataset).
+//
+// The only source today is the biblion `sqlite` corpus: the panel
+// names the actually-connected dataset (id from the active config,
+// stats from the last ingest's genResult.params) rather than a baked-in
+// label.
 
 import { getState, subscribe, setLayerState } from "./state.js";
 import * as engine from "./engine.js";
@@ -14,39 +19,63 @@ export function mountDataPanel() {
   if (!root) return;
   render(root);
 
+  // Re-render when the connected dataset changes (picker) OR when a
+  // pipeline run completes (engineRevision bump) so the stats drawn from
+  // genResult.params appear once an ingest has run.
   subscribe((state) => {
-    if (root.dataset.mode !== state.dataSource.mode) {
-      render(root);
-    }
+    if (root.dataset.sig !== panelSig(state)) render(root);
   });
+}
+
+// Signature of everything the panel renders from, so we only rebuild when
+// the displayed identity / stats actually change.
+function panelSig(state) {
+  const cfg = (state.dataSource.configs && state.dataSource.configs.sqlite) || {};
+  return `${state.dataSource.mode}|${cfg.dataset || ""}|${state.engineRevision}`;
 }
 
 function render(root) {
   const state = getState();
-  root.dataset.mode = state.dataSource.mode;
+  root.dataset.sig = panelSig(state);
   root.innerHTML = "";
 
-  root.appendChild(renderRealMode(state));
+  root.appendChild(renderSqliteMode(state));
 }
 
-function renderRealMode(state) {
-  const cfg   = state.dataSource.configs.real;
-  const wrap  = document.createElement("div");
-  wrap.appendChild(title("Real data"));
+function renderSqliteMode(state) {
+  const cfg     = (state.dataSource.configs && state.dataSource.configs.sqlite) || {};
+  const gen     = state.genResult;
+  // Identity comes from the active config (set the moment a dataset is
+  // picked) and is enriched by the last ingest's params once it has run.
+  const params  = gen && gen.params;
+  const dataset = (params && params.dataset) || cfg.dataset || null;
+  const wrap    = document.createElement("div");
 
-  // Read-only summary. Subset is chosen + applied via the Data card
-  // modal in the workflow chart, not here.
-  wrap.appendChild(stat("Subset", cfg.subset || "—"));
+  // Title = the connected dataset id, not a hardcoded "Real data".
+  wrap.appendChild(title(dataset || "No dataset connected"));
 
   const emb   = state.embedding;
-  const nodes = state.genResult && state.genResult.nodes;
-  if (emb && nodes) {
+  const nodes = gen && gen.nodes;
+  if (dataset && emb && nodes) {
     wrap.appendChild(stat("Papers",    formatInt(nodes.length)));
     wrap.appendChild(stat("Embedding", emb.d ? `${emb.d}-d` : "—"));
+    if (params) {
+      if (Array.isArray(params.yearRange)) {
+        wrap.appendChild(stat("Years", `${params.yearRange[0]}–${params.yearRange[1]}`));
+      }
+      if (Number.isFinite(params.edgesKept)) {
+        wrap.appendChild(stat("Citations", formatInt(params.edgesKept)));
+      }
+      if (params.nGhost) {
+        wrap.appendChild(stat("Ghosts", formatInt(params.nGhost)));
+      }
+    }
   } else {
     const hint = document.createElement("div");
     hint.className = "data-panel-hint";
-    hint.textContent = "Open the Data card in the workflow chart to load a subset. Viewer stays empty until a 3-d viz reduction runs.";
+    hint.textContent = dataset
+      ? `Dataset "${dataset}" selected. Run the Data card in the workflow chart to ingest it; the viewer stays empty until a 3-d viz reduction runs.`
+      : "Open the Data card in the workflow chart to connect a biblion dataset. The viewer stays empty until a 3-d viz reduction runs.";
     wrap.appendChild(hint);
   }
 
@@ -54,7 +83,8 @@ function renderRealMode(state) {
   actions.className = "data-panel-actions";
   const reloadBtn = document.createElement("button");
   reloadBtn.textContent = "Reload ▶";
-  reloadBtn.title = "Re-run the pipeline against the currently-selected subset.";
+  reloadBtn.title = "Re-run the pipeline against the currently-connected dataset.";
+  reloadBtn.disabled = !dataset;
   reloadBtn.addEventListener("click", fireReingest);
   actions.appendChild(reloadBtn);
   wrap.appendChild(actions);

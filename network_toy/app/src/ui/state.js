@@ -20,10 +20,10 @@ const state = {
   // the data panel owns them UX-wise; the engine plumbs them into
   // Layer 3 params on reingest.
   dataSource: {
-    mode: "real",          // "real"; mirrors activeAlgorithm.dataSource
+    mode: "sqlite",        // "sqlite"; mirrors activeAlgorithm.dataSource
     configs: {
-      real: {
-        subset: "dev_subset_1000",
+      sqlite: {
+        dataset: null,     // chosen from /api/datasets via the data-source picker
       },
     },
   },
@@ -160,7 +160,7 @@ const state = {
   // ── active algorithm per pluggable layer ─────────────────────
   // populated as registries come online; placeholders for now
   activeAlgorithm: {
-    "dataSource": "real",        // "real"; selects which datasource registry entry runs
+    "dataSource": "sqlite",      // "sqlite"; selects which datasource registry entry runs
     // dimred has three stages now (noise + compression + viz); the workflow
     // chart reads layerParams.dimred directly to summarise. activeAlgorithm
     // here holds only the compression-side method as a single legacy label.
@@ -280,7 +280,7 @@ const state = {
   //     label:        string,           // user-set or auto-generated
   //     timestamp:    string,           // ISO datetime
   //     inputs: {                        // snapshot at time-of-run
-  //       dataSourceId:       string,    // "real" / "sqlite"
+  //       dataSourceId:       string,    // "sqlite"
   //       dataSourceConfig:   object,    // subset, seed, etc.
   //       layerParamsSnapshot: object,   // dim/fusion/etc. active
   //     },

@@ -161,7 +161,7 @@ export async function ingestDataOnly() {
   ensureLayerParams();
   const s = getState();
 
-  const sourceId = s.activeAlgorithm.dataSource || "real";
+  const sourceId = s.activeAlgorithm.dataSource;
   const source   = getDataSource(sourceId);
   const config   = (s.dataSource.configs && s.dataSource.configs[sourceId]) || source.defaultParams();
 
@@ -1019,7 +1019,7 @@ export function reneighbour() {
 export async function resampleViaImport() {
   const s = getState();
   const citAlgo = activeCitationAlgorithm();
-  const dsId = s.activeAlgorithm.dataSource || "real";
+  const dsId = s.activeAlgorithm.dataSource;
   const dataSourceParams = (s.dataSource.configs && s.dataSource.configs[dsId]) || {};
 
   let citationResult;
