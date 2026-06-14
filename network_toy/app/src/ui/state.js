@@ -207,7 +207,6 @@ const state = {
   // stored here. Persisted (SCHEMA_VERSION 3).
   cart: [],
   filter: null,
-  blend: 0.0,
   // Fusion-comparison slider (Layer 1.5 A/B). Interpolates basePos
   // between pre-fusion (semantic-only) and post-fusion (citation-aware)
   // positions. Inert when _basePosPreFusion is null — i.e. fusion is
@@ -498,10 +497,6 @@ export function setActiveAlgorithm(layer, algoId) {
   update({
     activeAlgorithm: { ...state.activeAlgorithm, [layer]: algoId },
   });
-}
-
-export function setBlend(alpha) {
-  update({ blend: Math.max(0, Math.min(1, +alpha || 0)) });
 }
 
 export function setFusionBlend(alpha) {

@@ -19,7 +19,7 @@
 //     `data → dimred → clustering`. Every project with a loaded source
 //     has these in some form.
 //
-//   - **Citations branch** (`citations → layout → alignment → blend`)
+//   - **Citations branch** (`citations → layout → alignment`)
 //     appended off the clustering card. These only exist when the
 //     corresponding state slots are populated — i.e. when the user
 //     imports citation edges + applies citation layout.
@@ -188,20 +188,6 @@ export function inferBaselineTree(state) {
             alignedCitationLayout: state.alignedCitationLayout,
             alignmentCorrelation:  state.alignmentCorrelation,
           },
-        });
-
-        // Blend lives at the leaf — it interpolates basePos +
-        // alignedCitationLayout per frame. Represented as a card so
-        // the user sees it in the tree, even though its "result" is
-        // just the current α value.
-        plan.push({
-          ref:       "blend",
-          type:      "blend",
-          label:     `Blend · α=${(state.blend || 0).toFixed(2)}`,
-          params:    { alpha: state.blend || 0 },
-          parentRef: "alignment",
-          refRefs:   [],
-          result:    { alpha: state.blend || 0 },
         });
       }
     }

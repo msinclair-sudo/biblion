@@ -594,7 +594,6 @@ function subLabelFor(step) {
   }
   if (step.type === "citationLayout") return p.method || null;
   if (step.type === "alignment")      return "match-RMS";
-  if (step.type === "blend")          return `α = ${(p.alpha || 0).toFixed(2)}`;
   if (step.type === "bootstrapStability") {
     if (p.B != null) return `B=${p.B}`;
     return "bootstrap";

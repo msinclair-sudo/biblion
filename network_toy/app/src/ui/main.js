@@ -13,14 +13,13 @@ import { mountTopbar }         from "./topbar.js";
 import { mountDataPanel }      from "./data-panel.js";
 import { mountWorkflowChart }  from "./workflow-chart.js";
 import { mountPanelSystem }    from "./panel-system.js";
-import { setBlend, setFusionBlend, setView, getState, subscribe } from "./state.js";
+import { setFusionBlend, setView, getState, subscribe } from "./state.js";
 
 export function boot() {
   mountTopbar();
   mountDataPanel();
   mountWorkflowChart();
   mountPanelSystem();
-  mountBlendSlider();
   mountFusionBlendSlider();
   mountEdgeControls();
 
@@ -30,29 +29,6 @@ export function boot() {
   // that need data trigger engine.regenerate()/reingest() themselves;
   // see tests/conftest.py.)
   console.log("[ui] shell mounted; engine wired (idle — add a data source to begin).");
-}
-
-function mountBlendSlider() {
-  const input    = document.getElementById("blend-slider");
-  const readout  = document.getElementById("blend-readout");
-  if (!input || !readout) return;
-
-  input.value = String(getState().blend);
-  readout.textContent = (+input.value).toFixed(2);
-
-  input.addEventListener("input", (e) => {
-    const v = +e.target.value;
-    setBlend(v);
-    readout.textContent = v.toFixed(2);
-  });
-
-  // Keep in sync if state changes elsewhere.
-  subscribe((state) => {
-    if (Math.abs(+input.value - state.blend) > 1e-9) {
-      input.value = String(state.blend);
-      readout.textContent = state.blend.toFixed(2);
-    }
-  });
 }
 
 // Fusion-comparison slider — interpolates between pre-fusion and

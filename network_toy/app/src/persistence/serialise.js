@@ -31,7 +31,6 @@ const PASS_THROUGH_KEYS = [
   "selection",
   "cart",
   "filter",
-  "blend",
   "fusionBlend",
   "bridgeConfig",
   "view",          // viewer-3d edge toggles + colours
