@@ -19,6 +19,10 @@ import { openPanelPickerModal }                               from "./modals/pan
 
 const SLOTS = ["primary", "secondary", "bottom"];
 
+// MIME-ish key for the drag payload. Custom type so we only react to our
+// own tab drags, never to text/file drops dragged in from outside.
+const TAB_DRAG_TYPE = "application/x-panel-tab";
+
 // Per-slot tracking. panelsRef lets us skip tab-strip rebuilds when
 // only state.blend (or other unrelated slices) changed.
 const slotInstances = new Map();   // slot → { panelsRef, instance, tabId, keepAlive, wrapper }
@@ -73,6 +77,11 @@ function renderTabs(slot, slotEl) {
 
   tabsEl.innerHTML = "";
 
+  // The whole strip is a drop target — dropping a dragged tab here moves it
+  // into THIS slot (see moveTab). dragover must preventDefault to mark the
+  // strip droppable; we only do so for our own tab-drag payload.
+  wireSlotDropTarget(slot, tabsEl);
+
   // One tab per entry, with × close button.
   for (const tab of slotState.tabs) {
     const meta = getPanelType(tab.type);
@@ -80,11 +89,30 @@ function renderTabs(slot, slotEl) {
     tabEl.className = "panel-tab" + (tab.id === slotState.activeTabId ? " active" : "");
     tabEl.title = meta.description || meta.label || "";
 
+    // Drag affordance: pick the tab up and drop it on another slot's strip.
+    tabEl.draggable = true;
+    tabEl.addEventListener("dragstart", (e) => {
+      // Identify source slot + tab; the strip drop handler reads this back.
+      e.dataTransfer.setData(TAB_DRAG_TYPE, JSON.stringify({ slot, tabId: tab.id }));
+      // text/plain fallback so the drag is recognised as carrying data even
+      // where the custom type isn't surfaced during dragover (some browsers
+      // hide non-standard types until drop).
+      e.dataTransfer.setData("text/plain", tab.id);
+      e.dataTransfer.effectAllowed = "move";
+    });
+
     const label = document.createElement("span");
     label.className = "panel-tab-label";
     label.textContent = meta.label || tab.type;
     label.addEventListener("click", () => setActiveTab(slot, tab.id));
     tabEl.appendChild(label);
+
+    // Context action: right-click a tab to move it to another slot without
+    // dragging (keyboard / touch-friendly fallback for the drag affordance).
+    tabEl.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      openMoveMenu(slot, tab.id, e.clientX, e.clientY);
+    });
 
     const closeBtn = document.createElement("span");
     closeBtn.className = "panel-tab-close";
@@ -127,6 +155,143 @@ function renderTabs(slot, slotEl) {
   slotLabel.style.cursor = "default";
   slotLabel.textContent = slot;
   tabsEl.appendChild(slotLabel);
+}
+
+// Move (pop) a tab from one slot to another, reusing the addTab/closeTab
+// plumbing rather than splicing panel DOM by hand. Returns the new tab id on
+// success, or null if the move was rejected / a no-op.
+//
+// Singleton guard: viewers like viewer-2d/viewer-3d (registry `singleton`)
+// must never end up double-claimed. If the target slot already hosts a tab of
+// the same singleton type, we reject — duplicating a singleton viewer would
+// leave two panels fighting over one WebGL context. Same-slot moves are a
+// no-op (nothing to do but re-activate).
+export function moveTab(fromSlot, tabId, toSlot) {
+  if (fromSlot === toSlot) { setActiveTab(toSlot, tabId); return null; }
+  const src = getState().panels[fromSlot];
+  const dst = getState().panels[toSlot];
+  if (!src || !dst) return null;
+
+  const tab = src.tabs.find(t => t.id === tabId);
+  if (!tab) return null;
+
+  const meta = getPanelType(tab.type);
+  if (meta && meta.singleton && dst.tabs.some(t => t.type === tab.type)) {
+    // Target already hosts this singleton — refuse rather than duplicate.
+    console.warn(`[panel-system] refusing to move singleton "${tab.type}" into ${toSlot}: already present`);
+    return null;
+  }
+
+  // A kept-alive instance is cached by tabId; addTab below mints a fresh id,
+  // so the old cache entry would orphan its detached DOM/instance. Drop it so
+  // the panel mounts cleanly in its new home. (Acceptable for the rare move;
+  // the common keep-alive path — switching tabs in place — is untouched.)
+  if (keptAlive.has(tabId)) {
+    const cached = keptAlive.get(tabId);
+    keptAlive.delete(tabId);
+    if (cached.instance && cached.instance.destroy) {
+      try { cached.instance.destroy(); } catch (e) { console.warn(e); }
+    }
+  }
+
+  // Order matters: copy the config out, drop the source tab, then re-add to
+  // the target. addTab makes the new tab active in its slot.
+  const config = tab.config || {};
+  closeTab(fromSlot, tabId);
+  return addTab(toSlot, tab.type, { ...config });
+}
+
+// Mark a tab strip as a drop target for tab drags. Idempotent per render —
+// renderTabs rebuilds the strip's children but the strip element itself is
+// stable, so we guard against re-binding the same listeners twice.
+function wireSlotDropTarget(slot, tabsEl) {
+  if (tabsEl._tabDropWired) return;
+  tabsEl._tabDropWired = true;
+
+  tabsEl.addEventListener("dragover", (e) => {
+    // Only treat our own tab drags as droppable.
+    if (!Array.from(e.dataTransfer.types || []).includes(TAB_DRAG_TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  });
+
+  tabsEl.addEventListener("drop", (e) => {
+    const raw = e.dataTransfer.getData(TAB_DRAG_TYPE);
+    if (!raw) return;
+    e.preventDefault();
+    let payload;
+    try { payload = JSON.parse(raw); } catch { return; }
+    if (!payload || !payload.slot || !payload.tabId) return;
+    moveTab(payload.slot, payload.tabId, slot);
+  });
+}
+
+// Right-click context menu offering "Move to <slot>" for each other slot.
+// Built with inline-styled DOM so it needs no CSS-file changes (styles are
+// owned by another job). Singleton targets that already host the type are
+// shown disabled so the user sees why the move is unavailable.
+function openMoveMenu(fromSlot, tabId, x, y) {
+  closeMoveMenu();
+  const tab = getState().panels[fromSlot]?.tabs.find(t => t.id === tabId);
+  if (!tab) return;
+  const meta = getPanelType(tab.type);
+
+  const menu = document.createElement("div");
+  menu.className = "panel-tab-move-menu";
+  menu.style.cssText =
+    "position:fixed;z-index:1000;min-width:140px;padding:4px 0;" +
+    "background:var(--bg-elev,#222);color:var(--text,#ddd);" +
+    "border:1px solid var(--border,#444);border-radius:4px;" +
+    "box-shadow:0 2px 8px rgba(0,0,0,0.4);font-size:12px;";
+  menu.style.left = `${x}px`;
+  menu.style.top  = `${y}px`;
+
+  for (const target of SLOTS) {
+    if (target === fromSlot) continue;
+    const dst = getState().panels[target];
+    const blocked = !!(meta && meta.singleton && dst &&
+      dst.tabs.some(t => t.type === tab.type));
+
+    const item = document.createElement("div");
+    item.className = "panel-tab-move-item";
+    item.textContent = `Move to ${target}`;
+    item.style.cssText =
+      "padding:5px 12px;cursor:pointer;white-space:nowrap;" +
+      (blocked ? "opacity:0.4;cursor:not-allowed;" : "");
+    if (!blocked) {
+      item.addEventListener("mouseenter", () => { item.style.background = "var(--bg-hover,#333)"; });
+      item.addEventListener("mouseleave", () => { item.style.background = ""; });
+      item.addEventListener("click", () => {
+        moveTab(fromSlot, tabId, target);
+        closeMoveMenu();
+      });
+    } else {
+      item.title = `${meta.label || tab.type} is already open in ${target}`;
+    }
+    menu.appendChild(item);
+  }
+
+  document.body.appendChild(menu);
+  activeMoveMenu = menu;
+  // Dismiss on the next click / escape anywhere else.
+  setTimeout(() => {
+    document.addEventListener("click", closeMoveMenu, { once: true });
+    document.addEventListener("keydown", onMoveMenuKey);
+  }, 0);
+}
+
+let activeMoveMenu = null;
+
+function onMoveMenuKey(e) {
+  if (e.key === "Escape") closeMoveMenu();
+}
+
+function closeMoveMenu() {
+  document.removeEventListener("keydown", onMoveMenuKey);
+  if (activeMoveMenu && activeMoveMenu.parentNode) {
+    activeMoveMenu.parentNode.removeChild(activeMoveMenu);
+  }
+  activeMoveMenu = null;
 }
 
 function renderActivePanel(slot, slotEl) {
