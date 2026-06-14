@@ -37,7 +37,6 @@ const PROJECTORS = {
   citations:      (step, patch) => projectCitations(step, patch),
   citationLayout: (step, patch) => projectCitationLayout(step, patch),
   alignment:      (step, patch) => projectAlignment(step, patch),
-  blend:          (step, patch) => projectBlend(step, patch),
 };
 
 function projectData(step, patch) {
@@ -167,12 +166,6 @@ function projectAlignment(step, patch) {
   if (!r) return;
   if (r.alignedCitationLayout) patch.alignedCitationLayout = r.alignedCitationLayout;
   if (r.alignmentCorrelation !== undefined) patch.alignmentCorrelation = r.alignmentCorrelation;
-}
-
-function projectBlend(step, patch) {
-  const r = step.result;
-  if (!r) return;
-  if (typeof r.alpha === "number") patch.blend = r.alpha;
 }
 
 /**

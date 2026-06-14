@@ -87,11 +87,6 @@
 
       <div class="lr-section">
         <div class="lr-section-title">Blend</div>
-        <div class="lr-row lr-row-slider">
-          <label title="0 = basePos (semantic similarity layout); 1 = citation-topology layout">α</label>
-          <input id="blend-slider" type="range" min="0" max="1" step="0.001" value="0">
-          <span id="blend-readout" class="lr-readout">0.00</span>
-        </div>
         <div class="lr-row lr-row-slider" id="fusion-blend-row" style="display:none">
           <label title="0 = pre-fusion semantic position; 1 = post-fusion (citation-aware) position. Only active when fusion is non-identity.">fusion</label>
           <input id="fusion-blend-slider" type="range" min="0" max="1" step="0.001" value="1">

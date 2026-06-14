@@ -54,6 +54,12 @@ export async function deserialiseFile(file) {
 function normaliseLegacyToy(raw) {
   if (!raw || typeof raw !== "object") return;
 
+  // The topbar alpha/blend slider was retired (J14). Older archives may
+  // still carry a top-level `blend` value — drop it so it isn't merged
+  // back into live state as a stray key. The fusion-blend slider's
+  // `fusionBlend` is unrelated and kept.
+  if ("blend" in raw) delete raw.blend;
+
   if (raw.citations && raw.citations.method === "taste-network") {
     raw.citations.method = "imported-edges";
   }
