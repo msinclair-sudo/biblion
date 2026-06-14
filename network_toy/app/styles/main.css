@@ -2028,16 +2028,73 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .labelling-modal-empty       { color: var(--text-faint); font-style: italic; padding: 8px 4px; }
 
-/* ── dim-reduction modal (two-section) ────────────────────────────── */
+/* ── dim-reduction modal (two-column: pickers | detail) ───────────── */
 
 .dimred-modal-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-width: 460px;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr);
+  gap: 16px;
+  min-width: 620px;
+  align-items: start;
 }
 
-.dimred-modal-section {
+/* Left column — one algorithm picker per stage + reset control. */
+.dimred-modal-pickers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dimred-modal-picker {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+.dimred-modal-picker.active {
+  border-color: var(--accent-dim);
+  background: var(--bg-3);
+}
+.dimred-modal-picker-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+.dimred-modal-picker.active .dimred-modal-picker-title {
+  color: var(--text);
+}
+.dimred-modal-picker .dimred-modal-select {
+  grid-column: auto;
+  width: 100%;
+}
+
+/* Reset-to-default control, pinned below the pickers. */
+.dimred-modal-reset {
+  margin-top: 2px;
+}
+.dimred-modal-reset-btn {
+  width: 100%;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.dimred-modal-reset-btn:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+/* Right column — focused stage's description + params. */
+.dimred-modal-detail {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 12px;
@@ -2045,6 +2102,7 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 120px;
 }
 
 .dimred-modal-section-title {
