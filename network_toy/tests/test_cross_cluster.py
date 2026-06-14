@@ -1,62 +1,10 @@
-"""Cross-cluster citation degree — pure compute, card wiring, panel.
+"""Browser-only residue of the cross-cluster citation tests.
 
-For each committed layer, every citation edge (directed citing→cited, in
-node-index space) is mapped to a cluster pair via nodeCluster, building a
-directed cluster×cluster flow matrix + per-cluster in/out/intra degree + top
-inter-cluster links. Edges with a noise endpoint (cluster < 0) are dropped.
+The pure-compute cases (computeCrossClusterAllLayers matrix / degrees / null
+handling) moved to tests/unit/cross-cluster.test.mjs (run under `node --test`).
+What stays here needs a browser: the card-wiring case imports layer-descriptors
+/ next-steps-rules (→ esm.sh engine), and the panel-render case mounts DOM.
 """
-
-
-def test_cross_cluster_compute(clean_page):
-    """Directed matrix + degrees on a hand-built level with known edges.
-      nodeCluster = [0,0,1,1,2,-1]  → c0={0,1}, c1={2,3}, c2={4}, node5=noise
-      edges (citing→cited):
-        0→2 (c0→c1), 1→3 (c0→c1), 2→4 (c1→c2), 4→4 (c2 intra), 5→0 (noise→drop)
-    """
-    out = clean_page.evaluate(r'''async () => {
-        const m = await import("/app/src/ui/cross-cluster-citations.js");
-        const levels = [ { uid: "L0", clusterResult: {
-            nodeCluster: Int32Array.from([0,0,1,1,2,-1]),
-            clusters: [{id:0,count:2},{id:1,count:2},{id:2,count:1}],
-        }}];
-        const edges = [0,2, 1,3, 2,4, 4,4, 5,0];
-        const res = m.computeCrossClusterAllLayers(levels, edges);
-        const L = res.byLayer[0];
-        const pc = Object.fromEntries(L.perCluster.map(p => [p.id, p]));
-        return {
-            nLevels: res.nLevels, totalEdges: res.totalEdges,
-            layer: L.layer, k: L.k, edgesUsed: L.edgesUsed, edgesDropped: L.edgesDropped,
-            matrix: L.matrix,
-            c0: pc[0], c1: pc[1], c2: pc[2],
-            topLinks: L.topLinks,
-        };
-    }''')
-    assert out["nLevels"] == 1
-    assert out["totalEdges"] == 5
-    assert out["edgesUsed"] == 4 and out["edgesDropped"] == 1   # 5→0 dropped (noise)
-    # matrix[a][b]: c0→c1 = 2 ; c1→c2 = 1 ; c2→c2 (intra) = 1
-    assert out["matrix"] == [[0, 2, 0], [0, 0, 1], [0, 0, 1]]
-    # degrees: c0 out=2 in=0 intra=0 ; c1 out=1 in=2 intra=0 ; c2 out=0 in=1 intra=1
-    assert out["c0"]["outDeg"] == 2 and out["c0"]["inDeg"] == 0 and out["c0"]["intra"] == 0
-    assert out["c1"]["outDeg"] == 1 and out["c1"]["inDeg"] == 2 and out["c1"]["intra"] == 0
-    assert out["c2"]["outDeg"] == 0 and out["c2"]["inDeg"] == 1 and out["c2"]["intra"] == 1
-    # top inter-cluster links (a≠b), strongest first: c0→c1 (2), c1→c2 (1)
-    assert [(l["a"], l["b"], l["count"]) for l in out["topLinks"]] == [(0, 1, 2), (1, 2, 1)]
-
-
-def test_cross_cluster_no_edges_returns_null(clean_page):
-    """No citation edges → null (the card surfaces a clear message)."""
-    out = clean_page.evaluate(r'''async () => {
-        const m = await import("/app/src/ui/cross-cluster-citations.js");
-        const levels = [ { uid: "L0", clusterResult: {
-            nodeCluster: Int32Array.from([0,0,1,1]), clusters: [{id:0},{id:1}] }}];
-        return {
-            empty: m.computeCrossClusterAllLayers(levels, []),
-            noLevels: m.computeCrossClusterAllLayers([], [0,1]),
-        };
-    }''')
-    assert out["empty"] is None
-    assert out["noLevels"] is None
 
 
 def test_cross_cluster_card_and_next_steps(clean_page):
