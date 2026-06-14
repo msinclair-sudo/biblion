@@ -1,17 +1,17 @@
 // Panel: multi-layer LAYER PICKER (§9 producer/picker split, 2026-06-01;
 // heatmap + live readout added 2026-06-02, Pass 1b).
 //
-// Two-column body:
-//   LEFT  — reproducibility (stability) curve. One point per candidate
+// Single-column stacked body (top → bottom):
+//   bridge heatmap — one cell per (child > parent) pair across the sweep
+//           candidates. Cell = bridge count (raw in tile, normalised colour).
+//           Click a cell to highlight both layers on the curve; click a curve
+//           point to shade the matching heatmap row/column.
+//   reproducibility (stability) curve + selector — one point per candidate
 //           granularity the sweep tried. Click points to toggle picks.
-//   RIGHT — bridge heatmap. One cell per (child > parent) pair across the
-//           sweep candidates. Cell = bridge count (raw in tile, normalised
-//           colour). Click a cell to highlight both layers on the curve;
-//           click a curve point to shade the matching heatmap row/column.
-//
-// Bottom — live readout: lists the picked layers (coarse → fine) with their
-//          cluster counts, and the bridge counts between adjacent picks.
-//          Updates instantly (filters from pre-computed bridgesPerPair).
+//   live readout — lists the picked layers (coarse → fine) with their cluster
+//           counts, and the bridge counts between adjacent picks. Updates
+//           instantly (filters from pre-computed bridgesPerPair).
+//   Apply / Clear controls.
 //
 // Reads the producer card's sweep through the multiLevelPicker descriptor's
 // getActive() (so each picker shows its own producer's curve + its committed
@@ -95,18 +95,20 @@ export function mount(container, _state, _config = {}) {
       (picked.size ? ` (${[...picked].sort((a, b) => a - b).join(", ")} clusters)` : " — click points to choose");
     wrap.appendChild(summary);
 
-    // ── Two-column body: stability curve | bridge heatmap ─────────────────
+    // ── Single-column stacked body: heatmap, then curve, then readout, then
+    //    controls. Order is provisional (see J22 open question). The hosts are
+    //    appended below in display order; rendering into them is unchanged.
     const body = document.createElement("div");
     body.className = "multilayer-curve-body";
     wrap.appendChild(body);
 
-    const chartHost = document.createElement("div");
-    chartHost.className = "multilayer-curve-chart";
-    body.appendChild(chartHost);
-
     const heatHost = document.createElement("div");
     heatHost.className = "multilayer-curve-chart";
     body.appendChild(heatHost);
+
+    const chartHost = document.createElement("div");
+    chartHost.className = "multilayer-curve-chart";
+    body.appendChild(chartHost);
 
     // Sweep candidates in coarse → fine order. The heatmap indices match
     // candidate array indices; the curve x-axis is cluster count.
@@ -138,7 +140,7 @@ export function mount(container, _state, _config = {}) {
       xLabel: "cluster count", yLabel: "reproducibility",
       formatX: (v) => String(v),
       formatY: (v) => v.toFixed(2),
-      chartW: Math.max(220, ((container.clientWidth || 720) - 60) / 2 - 20),
+      chartW: Math.max(220, (container.clientWidth || 720) - 60),
       chartH: 200,
       onPointClick: (p) => {
         // Cmd/Ctrl/Alt-click toggles a heatmap-side highlight without
@@ -190,8 +192,8 @@ export function mount(container, _state, _config = {}) {
         matrix.push(row);
       }
       const labels = candidates.map(c => String(c.count));
-      // Compact cells so the heatmap fits beside the curve at typical widths.
-      const cellSize = Math.max(20, Math.min(38, Math.floor(((container.clientWidth || 720) / 2 - 60) / n)));
+      // Size cells to the full panel width (single-column stack).
+      const cellSize = Math.max(20, Math.min(38, Math.floor(((container.clientWidth || 720) - 60) / n)));
       // Cross-binding: outline rows/cols matching the highlighted pair.
       const hiRows = new Set(), hiCols = new Set();
       if (highlightedPair) {
@@ -223,7 +225,7 @@ export function mount(container, _state, _config = {}) {
 
     // ── Live readout: picks + adjacent-pair bridges ────────────────────────
     const readout = renderReadout(picked, candidates, bpp);
-    if (readout) wrap.appendChild(readout);
+    if (readout) body.appendChild(readout);
 
     // ── Apply / clear controls ────────────────────────────────────────────
     const controls = document.createElement("div");
@@ -266,7 +268,7 @@ export function mount(container, _state, _config = {}) {
       controls.appendChild(unhighlightBtn);
     }
 
-    wrap.appendChild(controls);
+    body.appendChild(controls);
     container.appendChild(wrap);
   }
 

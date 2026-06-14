@@ -2765,12 +2765,12 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
 .multilayer-curve-summary { font-size: 10px; color: var(--text-faint); font-family: var(--font-mono); }
 .multilayer-curve-empty { color: var(--text-faint); font-style: italic; font-size: 12px; padding: 12px 4px; line-height: 1.5; }
 .multilayer-curve-chart { overflow-x: auto; }
-/* Picker: two-column body (curve | heatmap) + bottom readout */
+/* Picker: single-column stacked body (heatmap, curve, readout, controls) */
 .multilayer-curve-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  align-items: start;
+  align-items: stretch;
 }
 .multilayer-curve-bridge-empty {
   color: var(--text-faint); font-style: italic; font-size: 11px;
