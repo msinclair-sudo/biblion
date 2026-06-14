@@ -5,11 +5,9 @@
 # Local dev notes for AI coding agents (not for distribution)
 CLAUDE.md
 plans/
+
 # Local Claude Code settings / scratch (machine-specific)
 .claude/
-
-# Internal design/discussion docs (not part of the shipped docs)
-docs/conflict_resolution_discussion.md
 
 # ── network_toy subtree (consolidated from the former network_toy/.gitignore) ──
 # The toy lives in-repo at network_toy/ (single repo as of the monorepo merge).
@@ -21,7 +19,6 @@ network_toy/**/*.tmp
 network_toy/**/.cache/
 # Private working notes / planning — not tracked (public docs under
 # network_toy/doc/ ARE tracked).
-network_toy/doc/ui.md
 network_toy/doc/plan.md
 network_toy/doc/clustering-research.md
 network_toy/doc/*-plan.md
@@ -41,9 +38,6 @@ data/**/paper_index.json
 data/**/nodes.jsonl
 data/**/manifest.json
 data/**/embeddings.npy
-
-# Stray temp artifact from an unexpanded shell var
-$TMPDB
 
 # Python
 __pycache__/
