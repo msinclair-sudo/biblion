@@ -416,15 +416,21 @@ function dimredDescriptor(editStepId = null) {
           catch (e) { console.error("[dimred-descriptor] redimred failed:", e); throw e; }
         },
       });
-      // When fusion produced a second (pre-fusion) embedding, auto-fork the
-      // workflow into a pre branch + a post branch under this dimred card and
-      // select the POST one (the fused result). Identity fusion → no fork
-      // (one embedding); the user adds clustering under the dimred directly.
+      // A non-identity fusion produces a SECOND (pre-fusion) embedding, so this
+      // dimred card forks into a pre branch + a post branch. The branch cards
+      // are pure routers (their jobs are trivial stamps — fusion-branch-runner)
+      // and the FIFO queue keeps them behind the dimred job, so we spawn them
+      // EAGERLY here — as soon as Apply is hit — rather than waiting for
+      // engine.redimred() to resolve. They sit pending under the dimred card
+      // while it computes, which lets the user queue clustering on either branch
+      // before dim-reduction finishes. The branches are keyed on the fusion
+      // param (known up front from the modal config); identity fusion → no fork.
       //
       // Once both branches exist we also auto-spawn a nodeDisplacement card
       // under the dimred (Pass 1d) — it's a property of the fork itself
       // (needs only the two branches' positions, no clustering), so it
-      // shouldn't sit behind a manual "+".
+      // shouldn't sit behind a manual "+". It needs the resolved dimred result,
+      // so it (and the POST selection) waits for the promise to land below.
       const spawnNodeDispIfMissing = (dimredCard) => {
         const existingND = listSteps({ type: "nodeDisplacement" })
           .find(d => d.parentId === dimredCard.id);
@@ -432,30 +438,39 @@ function dimredDescriptor(editStepId = null) {
         nodeDisplacementDescriptor().applyChange()
           .catch(e => { if (!(e && e.name === "AbortError")) console.error("[dimred-descriptor] auto node-displacement failed:", e); });
       };
-      promise.then(() => {
-        const dimredCard = listSteps({ type: "dimred" }).slice(-1)[0];
-        if (!dimredCard || !(dimredCard.result && dimredCard.result.fusionActive)) return;
+      // The dimred card was just created (and selected) by createAndRunStep, or
+      // re-armed in place under the gear edit; resolve its id synchronously so
+      // we can hang placeholder branches off it now. (Legacy no-tree fallback:
+      // createAndRunStep ran engineFn without a step — getSelectedStep won't be
+      // a dimred — so the guard below skips the fork, matching old behaviour.)
+      const dimredCard = editStepId ? getStep(editStepId) : getSelectedStep();
+      const fusionActive = fusion && fusion.method && fusion.method !== "identity";
+      if (dimredCard && dimredCard.type === "dimred" && fusionActive) {
         const existing = listSteps({ type: "fusionBranch" })
           .filter(b => b.parentId === dimredCard.id);
-        if (existing.length) {
-          // Branches already in place (e.g. re-run of an existing dimred) —
-          // make sure nodeDisplacement is too, then select POST.
-          spawnNodeDispIfMissing(dimredCard);
-          const post = existing.find(b => b.params && b.params.endpoint === "post");
-          if (post) selectStep(post.id);
-          return;
+        // Re-run path: branches already in place — don't double-spawn. The
+        // placeholder/refresh happens via the existing cards (and the dimred
+        // job re-running refreshes the result they project on selection).
+        if (!existing.length) {
+          fusionBranchDescriptor().applyChange({ endpoint: "pre",  parentId: dimredCard.id })
+            .catch(() => {});
+          fusionBranchDescriptor().applyChange({ endpoint: "post", parentId: dimredCard.id })
+            .catch(() => {});
         }
-        fusionBranchDescriptor().applyChange({ endpoint: "pre",  parentId: dimredCard.id })
-          .catch(() => {});
-        fusionBranchDescriptor().applyChange({ endpoint: "post", parentId: dimredCard.id })
-          .then(() => {
-            const post = listSteps({ type: "fusionBranch" })
-              .find(b => b.parentId === dimredCard.id && b.params.endpoint === "post");
-            if (post) selectStep(post.id);
-            // Both branches now exist — spawn the cross-branch analysis.
-            spawnNodeDispIfMissing(dimredCard);
-          })
-          .catch(() => {});
+      }
+      // When the dimred job lands and fusion really did yield a second
+      // embedding, finish the fork: select the POST branch (the fused result)
+      // and ensure the cross-branch nodeDisplacement card exists. The branch
+      // cards themselves were already spawned eagerly above.
+      promise.then(() => {
+        const card = listSteps({ type: "dimred" })
+          .find(d => dimredCard && d.id === dimredCard.id)
+          || listSteps({ type: "dimred" }).slice(-1)[0];
+        if (!card || !(card.result && card.result.fusionActive)) return;
+        const post = listSteps({ type: "fusionBranch" })
+          .find(b => b.parentId === card.id && b.params && b.params.endpoint === "post");
+        if (post) selectStep(post.id);
+        spawnNodeDispIfMissing(card);
       }).catch(() => { /* dimred failure already logged */ });
       return promise;
     },
