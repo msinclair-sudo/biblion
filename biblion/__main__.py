@@ -1894,29 +1894,59 @@ class _SelectorError(Exception):
     """Bad selector arguments for build_selector()."""
 
 
+def _ids_from_file(path) -> list:
+    """Read an id list from a JSON file. Accepts a flat list ``[id, …]``, an
+    ``{"ids": [...]}`` object, or the toy's cart export
+    ``{"papers": [{"id": …}, …]}``. Raises _SelectorError on anything else."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as e:
+        raise _SelectorError(f"--ids-file: cannot read {path}: {e}")
+    if isinstance(data, dict):
+        if isinstance(data.get("papers"), list):
+            data = [p.get("id") for p in data["papers"] if isinstance(p, dict)]
+        elif isinstance(data.get("ids"), list):
+            data = data["ids"]
+        else:
+            raise _SelectorError(
+                "--ids-file: object must have an 'ids' or 'papers' list")
+    if not isinstance(data, list):
+        raise _SelectorError("--ids-file: expected a JSON list or {ids|papers} object")
+    ids = [i for i in data if i is not None]
+    if not ids:
+        raise _SelectorError(f"--ids-file: no ids in {path}")
+    return ids
+
+
 def build_selector(args) -> tuple:
     """Return (where, params) from exactly one of --seeds / --all / --year /
-    --ids / --where. Shared by `export` and `subset make` so the two can't
-    drift. Raises _SelectorError on misuse. (--where is free-form SQL — the
+    --ids / --ids-file / --where. Shared by `export` and `subset make` so the two
+    can't drift. Raises _SelectorError on misuse. (--where is free-form SQL — the
     caller's trust boundary; only used by surfaces that expose it.)"""
     seeds = bool(getattr(args, 'seeds', False))
     take_all = bool(getattr(args, 'all', False))
     year = getattr(args, 'year', None)
     ids = getattr(args, 'ids', None)
+    ids_file = getattr(args, 'ids_file', None)
     where = getattr(args, 'where', None)
-    if sum([seeds, take_all, year is not None, bool(ids), bool(where)]) != 1:
+    if sum([seeds, take_all, year is not None, bool(ids), bool(ids_file),
+            bool(where)]) != 1:
         raise _SelectorError("choose exactly one selector: --seeds | --all | "
-                             "--year YEAR | --ids ID,ID,... | --where SQL")
+                             "--year YEAR | --ids ID,ID,... | --ids-file PATH | "
+                             "--where SQL")
     if seeds:
         return "is_seed = 1", ()
     if take_all:
         return "1 = 1", ()
     if year is not None:
         return "year = ?", (year,)
-    if ids:
-        id_list = [s.strip() for s in ids.split(',') if s.strip()]
-        if not id_list:
-            raise _SelectorError("--ids was empty")
+    if ids or ids_file:
+        if ids:
+            id_list = [s.strip() for s in ids.split(',') if s.strip()]
+            if not id_list:
+                raise _SelectorError("--ids was empty")
+        else:
+            id_list = _ids_from_file(ids_file)
         ph = ','.join('?' * len(id_list))
         return f"id IN ({ph})", tuple(id_list)
     return where, ()
@@ -1973,6 +2003,46 @@ def cmd_subset(args) -> int:
     for s in subs:
         mark = '*' if s.get('embedded') else ' '
         print(f"  {mark} {s['name']:<{width}}  n={s.get('n_nodes')}  {s.get('selector', '')}")
+    return 0
+
+
+def cmd_update(args) -> int:
+    """Update this biblion install: `git pull` the latest code (unless
+    --reinstall-only) then `pip install -e .[dev,embed]` so new dependencies and
+    the console script are picked up. Operates on the editable source tree this
+    package was installed from (resolved from the package location)."""
+    import subprocess
+
+    # Repo root = the dir holding pyproject.toml, derived from this package's
+    # location (works for an editable `pip install -e` checkout).
+    root = Path(__file__).resolve().parent.parent
+    if not (root / "pyproject.toml").exists():
+        print(f"[biblion update] no pyproject.toml at {root} -- this doesn't look "
+              f"like an editable (pip install -e) checkout; nothing to update.")
+        return 2
+
+    if not args.reinstall_only:
+        if not (root / ".git").exists():
+            print(f"[biblion update] {root} is not a git checkout; skipping pull "
+                  f"(re-run with --reinstall-only to silence this).")
+        else:
+            print(f"[biblion update] git pull (--ff-only) in {root}")
+            r = subprocess.run(["git", "-C", str(root), "pull", "--ff-only"])
+            if r.returncode != 0:
+                print("[biblion update] git pull failed -- resolve it and retry, "
+                      "or run `biblion update --reinstall-only`.")
+                return r.returncode
+
+    # `.[dev,embed]` resolved via cwd=root so a space in the repo path (e.g.
+    # OneDrive) can't trip pip's requirement parser.
+    print(f"[biblion update] pip install -e .[dev,embed]  (cwd={root})")
+    r = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".[dev,embed]"],
+        cwd=str(root))
+    if r.returncode != 0:
+        print("[biblion update] pip install failed.")
+        return r.returncode
+    print("[biblion update] done.")
     return 0
 
 
@@ -2128,6 +2198,9 @@ def _add_advanced_subcommands(sub) -> None:
     ss_make.add_argument('--all', action='store_true', help='Every embeddable paper')
     ss_make.add_argument('--year', type=int, default=None, help='A single publication year')
     ss_make.add_argument('--ids', type=str, default=None, help='Comma-separated papers.id list')
+    ss_make.add_argument('--ids-file', type=str, default=None,
+        help='JSON file of ids: a flat list, {"ids":[...]}, or a cart export '
+             '{"papers":[{"id":...}]}')
     ssubsub.add_parser('list', help='List subsets for the current project (default)')
     ss_rm = ssubsub.add_parser('remove', help='Delete a subset bundle')
     ss_rm.add_argument('name')
@@ -2177,6 +2250,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # `biblion use <name>` — shortcut for `biblion project use <name>`.
     su = sub.add_parser('use', help='Shortcut for `project use <name>`')
     su.add_argument('name')
+
+    # Self-update: pull the latest code + reinstall so new deps / the console
+    # script are picked up. Needs no DB or Redis.
+    sup = sub.add_parser('update',
+        help='Update this biblion install (git pull + pip reinstall with [dev,embed])')
+    sup.add_argument('--reinstall-only', action='store_true',
+        help='Skip the git pull; just reinstall the current source tree')
 
     sim = sub.add_parser('import',
         help='Ingest papers from a RIS (.ris) or BibTeX (.bib) reference file')
@@ -2293,6 +2373,10 @@ def main(argv: list[str] = None) -> int:
         return cmd_project(args)
     if args.cmd == 'project':
         return cmd_project(args)
+
+    # `update` maintains the install itself — no DB or Redis needed.
+    if args.cmd == 'update':
+        return cmd_update(args)
 
     # Most commands need a DB path. `init` is special — it creates one.
     if args.cmd != 'init':

@@ -3,10 +3,12 @@
 import argparse
 import json
 import sqlite3
+import struct
 
 import pytest
 
 from biblion import db
+from biblion.npy_slice import _v1_header, read_npy_header
 from biblion.snapshot import build_subset, write_subset_index
 from biblion.__main__ import build_selector, _SelectorError
 
@@ -32,9 +34,33 @@ def _make_snapshot(path):
 
 
 def _args(**kw):
-    base = dict(seeds=False, all=False, year=None, ids=None, where=None)
+    base = dict(seeds=False, all=False, year=None, ids=None, ids_file=None, where=None)
     base.update(kw)
     return argparse.Namespace(**base)
+
+
+def _write_master(project_dir, ids, d=4, manifest=None):
+    """Write a stand-in project master: embeddings.npy (row i = ids[i], filled
+    with float(ids[i])) + paper_index.json + manifest.json. Returns the matrix."""
+    mat = [[float(pid)] * d for pid in ids]
+    payload = b"".join(struct.pack("<f", x) for row in mat for x in row)
+    (project_dir / "embeddings.npy").write_bytes(_v1_header(len(ids), d) + payload)
+    (project_dir / "paper_index.json").write_text(
+        json.dumps({str(i): pid for i, pid in enumerate(ids)}))
+    man = manifest if manifest is not None else {
+        "embedding_model": "allenai/specter2_base",
+        "embedding_adapter": "allenai/specter2",
+        "embedding_dim": d, "embedding_normalized": False, "embedding_domain": "soil",
+    }
+    (project_dir / "manifest.json").write_text(json.dumps(man))
+    return mat
+
+
+def _row_bytes(path, i):
+    n, dd, _dt, off = read_npy_header(path)
+    with open(path, "rb") as f:
+        f.seek(off + i * dd * 4)
+        return f.read(dd * 4)
 
 
 @pytest.mark.unit
@@ -55,6 +81,78 @@ def test_build_selector_requires_exactly_one():
         build_selector(_args(seeds=True, year=2020))  # two
     with pytest.raises(_SelectorError):
         build_selector(_args(ids="   "))              # empty ids
+
+
+@pytest.mark.unit
+def test_build_selector_ids_file(tmp_path):
+    # flat list
+    f = tmp_path / "flat.json"
+    f.write_text(json.dumps([3, 1]))
+    where, params = build_selector(_args(ids_file=str(f)))
+    assert where == "id IN (?,?)" and params == (3, 1)
+    # cart export shape
+    f.write_text(json.dumps({"papers": [{"id": 5, "source": "L2·c1"}, {"id": 6}]}))
+    where, params = build_selector(_args(ids_file=str(f)))
+    assert params == (5, 6)
+    # {"ids": [...]}
+    f.write_text(json.dumps({"ids": [9]}))
+    assert build_selector(_args(ids_file=str(f)))[1] == (9,)
+    # bad shapes / empty
+    f.write_text(json.dumps({"nope": 1}))
+    with pytest.raises(_SelectorError):
+        build_selector(_args(ids_file=str(f)))
+    f.write_text(json.dumps([]))
+    with pytest.raises(_SelectorError):
+        build_selector(_args(ids_file=str(f)))
+    with pytest.raises(_SelectorError):                # missing file
+        build_selector(_args(ids_file=str(tmp_path / "nope.json")))
+
+
+@pytest.mark.unit
+def test_build_subset_slices_master(tmp_path):
+    snap = tmp_path / "proj_snapshot.db"
+    _make_snapshot(snap)
+    _write_master(tmp_path, [1, 2, 3])               # master rows 0..2 = ids 1,2,3
+
+    where, params = build_selector(_args(ids="3,1"))
+    m = build_subset(snap, "picks", where, params, tmp_path, "proj")
+
+    sd = tmp_path / "subsets" / "picks"
+    # node set is ORDER BY id -> [1, 3]; both present in master -> flat index.
+    assert json.loads((sd / "paper_index.json").read_text()) == {"0": 1, "1": 3}
+    # manifest stamped from the master, dim from the npy header.
+    assert m["embedding_model"] == "allenai/specter2_base"
+    assert m["embedding_dim"] == 4
+    assert m["embedding_normalized"] is False
+    assert "include_structural" not in m
+    # Δ=0: subset row i is byte-identical to its master row (id1->row0, id3->row2).
+    assert _row_bytes(sd / "embeddings.npy", 0) == _row_bytes(tmp_path / "embeddings.npy", 0)
+    assert _row_bytes(sd / "embeddings.npy", 1) == _row_bytes(tmp_path / "embeddings.npy", 2)
+    # index marks it embedded.
+    idx = json.loads((tmp_path / "subsets" / "index.json").read_text())
+    assert idx["subsets"][0]["embedded"] is True
+
+
+@pytest.mark.unit
+def test_build_subset_master_absent_goes_structural(tmp_path):
+    snap = tmp_path / "proj_snapshot.db"
+    _make_snapshot(snap)
+    _write_master(tmp_path, [1, 2])                  # master lacks id 3
+
+    where, params = build_selector(_args(ids="1,3"))
+    m = build_subset(snap, "mix", where, params, tmp_path, "proj")
+
+    sd = tmp_path / "subsets" / "mix"
+    # present (id1) first, absent (id3) demoted to a structural row.
+    assert json.loads((sd / "paper_index.json").read_text()) == {
+        "0": {"id": 1, "structural": False},
+        "1": {"id": 3, "structural": True},
+    }
+    assert m["include_structural"] is True
+    assert m["n_embedded"] == 1 and m["n_structural"] == 1
+    # only the embedded row got a vector.
+    assert read_npy_header(sd / "embeddings.npy")[0] == 1
+    assert _row_bytes(sd / "embeddings.npy", 0) == _row_bytes(tmp_path / "embeddings.npy", 0)
 
 
 @pytest.mark.unit

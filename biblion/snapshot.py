@@ -267,17 +267,44 @@ def build_subset(snapshot_db: Path, name: str, where: str, params: tuple,
     if n == 0:
         raise ValueError(f"subset {name!r} is empty -- check the selector")
 
+    # If the project has a master embedding, carve the subset's vectors straight
+    # out of it (SPECTER2 is set-independent, so the rows are byte-identical to a
+    # re-embed -- no GPU). `present` keep their master order-by-id; `absent` ids
+    # (not in the master) drop to structural rows with no embedding, mirroring the
+    # `snapshot --include-structural` layout the toy already understands.
+    pdir = Path(project_dir)
+    sliced = _slice_master_for_subset(pdir, rows, out / "embeddings.npy")
+
+    if sliced is not None:
+        present, absent, d, embed_meta = sliced
+        ordered = present + absent
+        n_embedded = len(present)
+    else:
+        ordered = rows
+        absent = []
+        d = None
+        embed_meta = {}
+        n_embedded = n
+    structural_mode = bool(absent)
+
     paper_index = {}
     with open(jsonl_path, "w", encoding="utf-8") as jf:
-        for i, r in enumerate(rows):
+        for i, r in enumerate(ordered):
             paper_index[str(i)] = r["id"]
-            jf.write(json.dumps({
+            node = {
                 "row": i, "id": r["id"],
                 "title": r["title"] or "", "abstract": r["abstract"] or "",
                 "year": r["year"],
-            }, ensure_ascii=False) + "\n")
+            }
+            if structural_mode:
+                node["structural"] = i >= n_embedded
+            jf.write(json.dumps(node, ensure_ascii=False) + "\n")
     with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(paper_index, f)
+        if structural_mode:
+            json.dump({k: {"id": v, "structural": int(k) >= n_embedded}
+                       for k, v in paper_index.items()}, f)
+        else:
+            json.dump(paper_index, f)
 
     manifest = {
         "subset": name,
@@ -287,18 +314,77 @@ def build_subset(snapshot_db: Path, name: str, where: str, params: tuple,
         "n_nodes": n,
         "selector": where,
         "selector_params": list(params),
-        # the embed step fills these in:
-        "embedding_model": None,
-        "embedding_adapter": None,
-        "embedding_dim": None,
+        # filled from the master when we sliced, else by a later embed step:
+        "embedding_model": embed_meta.get("embedding_model"),
+        "embedding_adapter": embed_meta.get("embedding_adapter"),
+        "embedding_dim": d,
     }
+    for k in ("embedding_normalized", "embedding_domain"):
+        if k in embed_meta:
+            manifest[k] = embed_meta[k]
+    if structural_mode:
+        manifest["include_structural"] = True
+        manifest["n_embedded"] = n_embedded
+        manifest["n_structural"] = len(absent)
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     write_subset_index(project_dir)
     print(f"[subset] {name}: {n} nodes  ->  {out}")
-    print(f"[subset] next: biblion advanced embedding --subset {name}")
+    if sliced is not None:
+        if absent:
+            print(f"[subset] sliced master: {n_embedded} embedded + {len(absent)} "
+                  f"structural (ids absent from master)")
+        else:
+            print(f"[subset] sliced {n_embedded} rows from project master (no re-embed)")
+    else:
+        print(f"[subset] next: biblion advanced embedding --subset {name}")
     return manifest
+
+
+def _slice_master_for_subset(project_dir: Path, rows, dst):
+    """Carve `dst` (subset embeddings.npy) from the project master if present.
+
+    Returns (present_rows, absent_rows, dim, embed_meta) where present_rows are the
+    subset rows found in the master (their vectors written to `dst`, in this order)
+    and absent_rows are subset ids not embedded in the master. Returns None when no
+    master embedding exists (caller falls back to a node-set-only subset)."""
+    master_npy = project_dir / "embeddings.npy"
+    master_index = project_dir / "paper_index.json"
+    if not (master_npy.exists() and master_index.exists()):
+        return None
+    from . import npy_slice
+
+    id_to_row = {}
+    for k, v in json.loads(master_index.read_text()).items():
+        if isinstance(v, dict):
+            if v.get("structural"):
+                continue          # structural master rows have no embedding
+            pid = v.get("id")
+        else:
+            pid = v
+        id_to_row[pid] = int(k)
+
+    m, d, _dtype, _off = npy_slice.read_npy_header(master_npy)
+    present, present_master_rows, absent = [], [], []
+    for r in rows:
+        mr = id_to_row.get(r["id"])
+        if mr is not None and mr < m:
+            present.append(r)
+            present_master_rows.append(mr)
+        else:
+            absent.append(r)
+    npy_slice.slice_npy_rows(master_npy, present_master_rows, dst)
+
+    embed_meta = {}
+    master_manifest = project_dir / "manifest.json"
+    if master_manifest.exists():
+        mm = json.loads(master_manifest.read_text())
+        for k in ("embedding_model", "embedding_adapter", "embedding_normalized",
+                  "embedding_domain"):
+            if mm.get(k) is not None:
+                embed_meta[k] = mm[k]
+    return present, absent, d, embed_meta
 
 
 def write_subset_index(project_dir: Path) -> None:
