@@ -382,7 +382,32 @@ const state = {
   // shape. Slice 2.2 will migrate populated legacy slots into a baseline
   // linear tree on first load.
   workflow: { steps: {}, rootId: null, selected: null },
+
+  // ── UI prefs (J10 — dynamic layout) ──────────────────────────────────
+  // Per-browser layout preferences: the live rail/slot sizes that drive
+  // the #layout grid CSS vars, plus per-rail collapsed booleans. This is
+  // deliberately a SELF-CONTAINED slice that does NOT travel with the
+  // project save. Persistence is OPTION A from J10: a localStorage blob
+  // (key UI_PREFS_KEY below), written on every change and hydrated on
+  // boot — so persistence/serialise.js is untouched and layout is
+  // per-browser, not per-project.
+  //
+  //   leftRailW / rightRailW / bottomH — pixel sizes mirrored to the
+  //     --left-rail-w / --right-rail-w / --bottom-h vars on #layout.
+  //   leftCollapsed / rightCollapsed   — when true the rail width is
+  //     forced to 0 (a thin re-expand stub stays clickable); the prior
+  //     width is preserved in the *W field so expand restores it.
+  uiPrefs: {
+    leftRailW:      280,
+    rightRailW:     320,
+    bottomH:        220,
+    leftCollapsed:  false,
+    rightCollapsed: false,
+  },
 };
+
+// localStorage key for the OPTION A UI-prefs blob (see uiPrefs slice).
+export const UI_PREFS_KEY = "networkToy.uiPrefs.v1";
 
 const subscribers = new Set();
 
@@ -647,4 +672,51 @@ export function getClusterScore(levelUid, clusterId) {
 // next update() callback.
 export function setView(partial) {
   update({ view: { ...state.view, ...(partial || {}) } });
+}
+
+// ── UI prefs (J10) ──────────────────────────────────────────────────
+// Read the current layout prefs slice. Returned object is the live
+// reference; treat as read-only and mutate via setUiPrefs.
+export function getUiPrefs() {
+  return state.uiPrefs;
+}
+
+// Patch the layout prefs slice (partial). Persists the merged slice to
+// localStorage (OPTION A) so it survives reload; failures there are
+// swallowed — a missing/blocked Storage must not break the layout.
+export function setUiPrefs(partial) {
+  const next = { ...state.uiPrefs, ...(partial || {}) };
+  update({ uiPrefs: next });
+  try {
+    localStorage.setItem(UI_PREFS_KEY, JSON.stringify(next));
+  } catch (e) {
+    // Storage disabled / quota / private mode — layout still works in
+    // memory; we just lose persistence for this session.
+  }
+}
+
+// Hydrate the layout prefs slice from the localStorage blob on boot.
+// Only known numeric/boolean fields are copied across (defends against a
+// stale or hand-edited blob). Writes straight to state without a further
+// localStorage round-trip. Returns the active slice.
+export function hydrateUiPrefs() {
+  let stored = null;
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY);
+    if (raw) stored = JSON.parse(raw);
+  } catch (e) {
+    stored = null;
+  }
+  if (stored && typeof stored === "object") {
+    const cur = state.uiPrefs;
+    const merged = { ...cur };
+    for (const k of ["leftRailW", "rightRailW", "bottomH"]) {
+      if (Number.isFinite(stored[k])) merged[k] = stored[k];
+    }
+    for (const k of ["leftCollapsed", "rightCollapsed"]) {
+      if (typeof stored[k] === "boolean") merged[k] = stored[k];
+    }
+    update({ uiPrefs: merged });
+  }
+  return state.uiPrefs;
 }

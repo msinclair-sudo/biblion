@@ -152,6 +152,7 @@ html, body {
 /* ── layout grid ────────────────────────────────────────────────────── */
 
 #layout {
+  position: relative;   /* anchor for the absolutely-positioned splitters (J10) */
   height: calc(100vh - var(--topbar-h));
   display: grid;
   grid-template-columns: var(--left-rail-w) 1fr var(--right-rail-w);
@@ -160,6 +161,80 @@ html, body {
     "left primary secondary"
     "left bottom  bottom";
 }
+
+/* ── dynamic-layout splitters + rail collapse (J10) ──────────────────── */
+/* Handles overlay the grid boundaries; layout-splitters.js positions them
+   off the live CSS vars. A wide invisible hit area straddles the seam; a
+   thin line paints on hover/drag. */
+
+.layout-split {
+  position: absolute;
+  z-index: 40;
+  background: transparent;
+}
+
+.layout-split-v {
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  margin-left: -4px;       /* centre the 8px hit area on the seam */
+  cursor: col-resize;
+}
+
+.layout-split-h {
+  right: 0;
+  height: 8px;
+  margin-bottom: -4px;     /* centre on the seam */
+  cursor: row-resize;
+}
+
+.layout-split::after {
+  content: "";
+  position: absolute;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.layout-split-v::after { top: 0; bottom: 0; left: 3px; width: 2px; }
+.layout-split-h::after { left: 0; right: 0; top: 3px; height: 2px; }
+
+.layout-split:hover::after,
+.layout-split.dragging::after { opacity: 0.7; }
+
+/* Per-rail collapse / expand toggle, riding on its vertical splitter. */
+.rail-toggle {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 14px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 41;
+}
+.rail-toggle:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+/* Glyph: chevron toward the rail being collapsed; flips to point back out
+   when that rail is already collapsed (a thin re-expand stub). */
+#toggle-left-rail::before  { content: "\2039"; }   /* ‹ collapse left */
+#toggle-right-rail::before { content: "\203A"; }   /* › collapse right */
+#layout.left-collapsed  #toggle-left-rail::before  { content: "\203A"; }
+#layout.right-collapsed #toggle-right-rail::before { content: "\2039"; }
+
+/* Collapsed rail: hide its contents so the viewer reclaims the space; the
+   splitter (with its toggle stub) stays put as the re-expand affordance. */
+#layout.left-collapsed  #left-rail       { display: none; }
+#layout.right-collapsed #secondary-panel { display: none; }
 
 #left-rail {
   grid-area: left;

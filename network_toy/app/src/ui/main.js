@@ -9,10 +9,11 @@
 // Modules below render placeholder content where the engine isn't yet
 // wired; the layout shell is fully functional.
 
-import { mountTopbar }         from "./topbar.js";
-import { mountDataPanel }      from "./data-panel.js";
-import { mountWorkflowChart }  from "./workflow-chart.js";
-import { mountPanelSystem }    from "./panel-system.js";
+import { mountTopbar }           from "./topbar.js";
+import { mountDataPanel }        from "./data-panel.js";
+import { mountWorkflowChart }    from "./workflow-chart.js";
+import { mountPanelSystem }      from "./panel-system.js";
+import { mountLayoutSplitters }  from "./layout-splitters.js";
 import { setBlend, setFusionBlend, setView, getState, subscribe } from "./state.js";
 
 export function boot() {
@@ -20,6 +21,7 @@ export function boot() {
   mountDataPanel();
   mountWorkflowChart();
   mountPanelSystem();
+  mountLayoutSplitters();
   mountBlendSlider();
   mountFusionBlendSlider();
   mountEdgeControls();
