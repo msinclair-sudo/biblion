@@ -52,6 +52,39 @@ test("in-degree log mode spreads the skewed low-degree tail", () => {
   assert.equal(JSON.stringify(raw), JSON.stringify(linear));      // raw/linear share the ramp
 });
 
+test("highlight glow (J25) composes additively over base + selection-dim", () => {
+  // Two nodes, single-selection on node 0 → node 1 dims. A "scoring" highlight
+  // group lights node 1 in its own colour, overriding the dim; node 0 keeps base.
+  const nodes = [{ id: 0, t: 0 }, { id: 1, t: 1 }];
+  const state = {
+    genResult: { nodes },
+    clusterLevels: [],
+    citationResult: null,
+    selection: { type: "node", id: 0 },
+    highlights: { bySource: { scoring: { ids: new Set([1]), colour: "#ff00ff" } } },
+  };
+  const c0 = cm.nodeColourFor(nodes[0], state, "year");   // selected, not highlighted
+  const c1 = cm.nodeColourFor(nodes[1], state, "year");   // dimmed by selection, but highlighted
+
+  assert.notEqual(c0, cm.DIMMED_COLOUR);          // selected node keeps base
+  assert.equal(c1, "#ff00ff");                     // glow wins over selection-dim
+  assert.equal(cm.highlightColourFor(nodes[1], state), "#ff00ff");
+  assert.equal(cm.highlightColourFor(nodes[0], state), null);
+});
+
+test("highlight signature changes on add / clear / membership", () => {
+  const base = { highlights: { bySource: {} } };
+  const a = cm.highlightSignature(base);
+  const withGroup = { highlights: { bySource: { s: { ids: new Set([1, 2]), colour: "#fff" } } } };
+  const b = cm.highlightSignature(withGroup);
+  const grown = { highlights: { bySource: { s: { ids: new Set([1, 2, 3]), colour: "#fff" } } } };
+  const c = cm.highlightSignature(grown);
+
+  assert.notEqual(a, b);     // add a group
+  assert.notEqual(b, c);     // membership grew
+  assert.equal(a, "");        // empty channel → empty signature
+});
+
 test("year mode maps real publication years across the gradient", () => {
   const nodes = [{ id: 0, year: 1960 }, { id: 1, year: 1990 }, { id: 2, year: 2020 }];
   const state = { genResult: { nodes }, citationResult: null, clusterLevels: [] };

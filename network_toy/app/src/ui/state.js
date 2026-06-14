@@ -199,13 +199,32 @@ const state = {
     },
   },
   selection: { type: null, id: null },
-  // ── search highlight (J09) ───────────────────────────────────
-  // Set of ACTIVE-dataset nodeIds matched by the SQL library-search panel.
-  // When non-empty, the "search" colour branch lights these and dims the rest.
-  // Hits from ATTACHed non-active DBs have no node in the viz (list-only), so
-  // they never appear here. STANDALONE for now: J25 (Wave 4) folds this into a
-  // general node-highlight channel — search highlighting will then plug into
-  // that instead of this dedicated Set.
+  // ── node highlights (J25) ────────────────────────────────────
+  // General multi-source highlight channel: a coloured glow drawn ADDITIVELY
+  // over the active colour mode + selection-dim, in both viewers, driven by
+  // highlight *requests* from any source (scoring-card select, SQL search, …).
+  // Distinct from the single state.selection dim mechanism — several sources
+  // can glow concurrently, each with its own colour.
+  //
+  // Shape: { bySource: { [source]: { ids: Set<number>, colour: string } } }
+  //   source — provenance/group tag ("scoring", "search", …). One group per
+  //            source; re-highlighting a source replaces (or, additive, unions)
+  //            its set. Multiple sources coexist.
+  //   ids    — Set of ACTIVE-dataset nodeIds to glow.
+  //   colour — the glow hex for that group.
+  //
+  // PURELY VISUAL + in-memory only — never serialised into a project save
+  // (absent from serialise.js PASS_THROUGH_KEYS, so it's dropped on save).
+  // Mutated through addHighlight / clearHighlight / clearAllHighlights; those
+  // bump engineRevision so the viewers repaint via the cheap nodeColor accessor
+  // (no rebuildData / engine recompute).
+  highlights: { bySource: {} },
+  // ── search highlight (J09 → folded into J25) ──────────────────
+  // RETAINED as a back-compat shim only: the SQL search panel now routes its
+  // hits through the general highlight channel (addHighlight("search", …)).
+  // Kept as an always-empty Set so any straggler reader of state.searchMatches
+  // sees "no dedicated search dim" rather than crashing; the colour resolver no
+  // longer consults it. Safe to delete once nothing references it.
   searchMatches: new Set(),
   // ── cart ─────────────────────────────────────────────────────
   // Papers collected (from clusters / selections) for export to a biblion
@@ -575,23 +594,70 @@ export function setSelection(selection) {
   update({ selection: selection || { type: null, id: null } });
 }
 
-// ── Search highlight (J09) ──────────────────────────────────────────
-// Light up a set of active-dataset nodeIds from the SQL search panel. We bump
-// engineRevision so the viewers (which repaint on selection / engineRevision
-// change) pick up the new "search" colour branch — there's no dedicated
-// search-repaint hook in the viewers, and a colour-only bump is cheap at
-// toy/dev-subset sizes. STANDALONE for now; J25 folds this into the general
-// highlight channel.
+// ── Node highlights (J25) ───────────────────────────────────────────
+// General multi-source highlight channel. Any caller lights up a group of
+// nodeIds under a `source` tag with a glow `colour`; the viewers compose the
+// glow additively over the colour mode via the shared resolver. update() alone
+// notifies subscribers — the viewers detect the highlight change via a cheap
+// signature and re-run only the nodeColor accessor (NO rebuildData / engine
+// recompute). We deliberately do NOT bump engineRevision: an engineRevision
+// bump forces the viewers down their rebuildData path, which J25 forbids for a
+// purely-visual interaction-speed toggle.
+
+const DEFAULT_HIGHLIGHT_COLOUR = "#ffd23f";   // warm amber glow default
+
+// Add (or replace) a highlight group for `source`. nodeIds is filtered to
+// integers. With additive=false (plain click) the source's set is replaced;
+// with additive=true (Ctrl+click) the new ids are unioned onto the existing
+// set, and the colour is updated. Passing an empty/no nodeIds with
+// additive=false clears the source.
+export function addHighlight(source, nodeIds, colour, additive = false) {
+  if (!source) return;
+  const ids = (nodeIds || []).filter((n) => Number.isInteger(n));
+  const prev = state.highlights.bySource[source];
+  let nextIds;
+  if (additive && prev) {
+    nextIds = new Set(prev.ids);
+    for (const n of ids) nextIds.add(n);
+  } else {
+    nextIds = new Set(ids);
+  }
+  if (nextIds.size === 0) {            // additive=false with no ids = clear
+    clearHighlight(source);
+    return;
+  }
+  const group = { ids: nextIds, colour: colour || (prev && prev.colour) || DEFAULT_HIGHLIGHT_COLOUR };
+  update({
+    highlights: { bySource: { ...state.highlights.bySource, [source]: group } },
+  });
+}
+
+// Remove the highlight group for `source`. No-op when absent.
+export function clearHighlight(source) {
+  if (!source || !state.highlights.bySource[source]) return;
+  const next = { ...state.highlights.bySource };
+  delete next[source];
+  update({ highlights: { bySource: next } });
+}
+
+// Drop every highlight group across all sources.
+export function clearAllHighlights() {
+  if (Object.keys(state.highlights.bySource).length === 0) return;
+  update({ highlights: { bySource: {} } });
+}
+
+// ── Search highlight (J09 → folded into J25) ────────────────────────
+// Thin shims kept for the SQL search panel, now routing through the general
+// highlight channel under the "search" source so there's a single mechanism.
 export function setSearchMatches(nodeIds) {
-  update({ searchMatches: new Set((nodeIds || []).filter((n) => Number.isInteger(n))) });
-  bumpEngineRevision();
+  addHighlight("search", nodeIds, SEARCH_HIGHLIGHT_COLOUR);
 }
 
 export function clearSearchMatches() {
-  if (state.searchMatches && state.searchMatches.size === 0) return;
-  update({ searchMatches: new Set() });
-  bumpEngineRevision();
+  clearHighlight("search");
 }
+
+export const SEARCH_HIGHLIGHT_COLOUR = "#4fc3f7";   // cool cyan for search hits
 
 export function setProjectName(name) {
   update({ projectName: name || null });

@@ -13,7 +13,7 @@
 // their own scoring card); scores live ON the scoring card
 // (result.scores[levelUid][clusterId]) and travel with its branch.
 
-import { getState, subscribe, setTabConfig } from "../state.js";
+import { getState, subscribe, setTabConfig, addHighlight } from "../state.js";
 import { getStep, getSelectedStep, getStepDescendants, getStepAncestors,
          findClusterLevels, setCardScore } from "../workflow.js";
 import { computeBridgeAnalysis } from "../bridge-analysis.js";
@@ -181,7 +181,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
     if (i === 0) {
       // Top layer — every cluster scoreable, no parent gate, no bridge split.
       for (const cl of cr.clusters) {
-        body.appendChild(clusterBlock(card, levelUid, cl, labels, levelScores, null, true));
+        body.appendChild(clusterBlock(card, levelUid, cr, cl, labels, levelScores, null, true));
       }
       return col;
     }
@@ -218,7 +218,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
     const addBlocks = (arr) => {
       for (const it of arr) {
-        body.appendChild(clusterBlock(card, levelUid, it.cl, labels, levelScores, it.metric, it.eligible));
+        body.appendChild(clusterBlock(card, levelUid, cr, it.cl, labels, levelScores, it.metric, it.eligible));
       }
     };
     const divider = (text, muted) => {
@@ -260,11 +260,30 @@ export function mount(container, _state, config = {}, tabContext = null) {
     return wrap;
   }
 
+  // Collect the active-dataset nodeIds belonging to cluster `cl` in this level.
+  // nodeCluster is indexed by node id (same convention the viewers use:
+  // cr.nodeCluster[node.id]), so the index IS the node id.
+  function nodeIdsForCluster(cr, cl) {
+    const ids = [];
+    const nc = cr && cr.nodeCluster;
+    if (!nc) return ids;
+    for (let id = 0; id < nc.length; id++) if (nc[id] === cl.id) ids.push(id);
+    return ids;
+  }
+
   // One cluster block: swatch + id/count, label bullets, 1–5 (if eligible),
-  // and a metrics slot.
-  function clusterBlock(card, levelUid, cl, labels, levelScores, metric, eligible) {
+  // and a metrics slot. Clicking the block highlights its nodes in both viewers
+  // via the general highlight channel (J25); Ctrl/Cmd+click adds to the current
+  // "scoring" group instead of replacing it (multi-select).
+  function clusterBlock(card, levelUid, cr, cl, labels, levelScores, metric, eligible) {
     const block = document.createElement("div");
     block.className = "scoring-cluster" + (eligible ? "" : " ineligible");
+    block.addEventListener("click", (e) => {
+      // Score buttons / show-more stopPropagation, so a block click here is a
+      // genuine "select this cluster" gesture. Glow in the cluster's own colour.
+      const additive = e.ctrlKey || e.metaKey;
+      addHighlight("scoring", nodeIdsForCluster(cr, cl), cl.colour || "#ffd23f", additive);
+    });
 
     const left = document.createElement("div");
     left.className = "scoring-cluster-main";

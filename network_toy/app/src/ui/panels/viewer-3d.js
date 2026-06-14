@@ -24,7 +24,7 @@ import { makeBlendForce }                  from "../../blend/blend.js";
 import { buildBaseEdges }                   from "../../base-edges.js";
 import { getState, setTabConfig }          from "../state.js";
 import {
-  getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE,
+  getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
@@ -404,6 +404,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
   lastDataRevision = getState().engineRevision;
   lastFusionBlend  = getState().fusionBlend;
   let lastViewSig  = viewSignature(getState().view);
+  // J25: highlight-channel fingerprint — a change here repaints colours via the
+  // cheap nodeColor accessor (no rebuildData / engine recompute).
+  let lastHlSig    = highlightSignature(getState());
 
   return {
     update(s) {
@@ -441,13 +444,18 @@ export function mount(container, _state, config = {}, tabContext = null) {
         try { Graph.resumeAnimation();   }   catch (_) {}
       }
 
-      // Selection-only change: re-paint colours, no rebuild.
+      // Selection-only OR highlight-only change: re-paint colours, no rebuild.
+      // Both flow through the same cheap nodeColor accessor (repaintSelection),
+      // which the shared resolver now composes the highlight glow into.
       const selChanged =
         !lastSelection ||
         lastSelection.type !== s.selection.type ||
         lastSelection.id   !== s.selection.id;
-      if (selChanged) {
+      const hlSig = highlightSignature(s);
+      const hlChanged = hlSig !== lastHlSig;
+      if (selChanged || hlChanged) {
         lastSelection = s.selection;
+        lastHlSig     = hlSig;
         repaintSelection();
       }
     },

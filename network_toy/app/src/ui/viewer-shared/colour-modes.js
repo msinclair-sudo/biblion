@@ -225,21 +225,66 @@ export function nodeMatchesSelection(node, state, sel) {
   return null;
 }
 
-// Final node colour = base ± selection dim ± search-match dim. The single
-// function each viewer calls per node per frame.
+// Highlight glow (J25). Resolve a node's glow colour from the general
+// multi-source highlight channel (state.highlights.bySource). Returns the
+// group colour when the node is in any source's id set, else null (no glow).
+// Multiple groups can match; first-source-wins on colour (order = insertion).
+// This is the ADDITIVE layer composed ON TOP of the base/dim colour by
+// nodeColourFor — a glow, not a recolour of the underlying mode.
+export function highlightColourFor(node, state) {
+  const hs = state.highlights;
+  if (!hs || !hs.bySource) return null;
+  for (const source in hs.bySource) {
+    const g = hs.bySource[source];
+    if (g && g.ids && g.ids.has(node.id)) return g.colour || "#ffd23f";
+  }
+  return null;
+}
+
+// Cheap fingerprint of the highlight channel — each viewer caches the prior
+// tick's signature and, when it changes, repaints via the nodeColor accessor
+// only (no rebuildData). Size + a small id-sum per source is enough to catch
+// add / clear / membership changes at toy/dev-subset sizes without hashing
+// every id every tick.
+export function highlightSignature(state) {
+  const hs = state.highlights;
+  if (!hs || !hs.bySource) return "";
+  const parts = [];
+  for (const source of Object.keys(hs.bySource).sort()) {
+    const g = hs.bySource[source];
+    if (!g || !g.ids) continue;
+    let sum = 0;
+    for (const id of g.ids) sum += id;
+    parts.push(`${source}:${g.ids.size}:${sum}:${g.colour || ""}`);
+  }
+  return parts.join("|");
+}
+
+// Final node colour = base ± selection dim, with the highlight glow composed
+// ADDITIVELY on top. The single function each viewer calls per node per frame.
 //
-// Search highlight (J09) takes precedence over selection dimming: when the SQL
-// search panel has a non-empty match set, matched nodes keep their base colour
-// and every other node dims, regardless of the current selection. The match set
-// is STANDALONE state.searchMatches for now — J25 (Wave 4) folds it into a
-// general highlight channel, at which point this branch reads that instead.
+// Composition order (J25):
+//   1. base colour for the active mode;
+//   2. selection-dim — non-matching nodes drop to DIMMED_COLOUR (the existing
+//      single-selection mechanism). Search is NO LONGER a dedicated dim branch;
+//      it's a highlight SOURCE now (state.highlights "search" group).
+//   3. highlight glow — if the node is in any highlight group, its glow colour
+//      WINS over the base/dim colour, so a highlighted node lights up even when
+//      it would otherwise be dimmed. Highlights do NOT dim non-highlighted
+//      nodes (that's selection's job); they only brighten their own members.
+//
+// NOTE (open question flagged in J25): the viewers render a single per-node
+// colour (3d-force-graph spheres / force-graph canvas dots), and the cheap
+// no-rebuild path is the nodeColor accessor — so the "glow" is implemented as
+// a colour override on the highlighted node rather than a separate emissive
+// halo mesh (which would require geometry rebuild, forbidden here). It
+// composes with selection-dim by overriding it: a highlighted dimmed node
+// shows its glow colour; non-highlighted nodes keep whatever the
+// selection-dim produced.
 export function nodeColourFor(node, state, mode) {
   const base = baseColourFor(node, state, mode);
-  const matches = state.searchMatches;
-  if (matches && matches.size > 0) {
-    return matches.has(node.id) ? base : DIMMED_COLOUR;
-  }
   const matched = nodeMatchesSelection(node, state, state.selection);
-  if (matched === null) return base;
-  return matched ? base : DIMMED_COLOUR;
+  const dimmed = (matched === null) ? base : (matched ? base : DIMMED_COLOUR);
+  const glow = highlightColourFor(node, state);
+  return glow || dimmed;
 }
