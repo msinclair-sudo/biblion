@@ -26,10 +26,8 @@ network_toy/pending_changes.md
 # Local-only working dirs.
 network_toy/scratch/
 network_toy/saves/
-# Legacy real-data pipeline + materialised ingest artifacts (read as
-# locally-materialised inputs). The data symlink (network_toy/data -> ../data)
-# stays tracked; only a real data/ dir is ignored.
-network_toy/literture-network/
+# Materialised real-data inputs. The data symlink (network_toy/data ->
+# ../data) stays tracked; only a real data/ dir is ignored.
 network_toy/data/
 
 # Generated network-toy snapshot/embedding artifacts (live next to the DBs
