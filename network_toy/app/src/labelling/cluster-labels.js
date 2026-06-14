@@ -327,20 +327,26 @@ function runKeyBERT(cr, ctx, membersArg) {
 }
 
 // STRATIFIED labels — describe a cluster at several specificity altitudes at
-// once instead of taking the top-N from one slice. The "grain" is a term's
-// cluster document-frequency df = #clusters containing it; we bucket candidate
-// terms into five bands from general ("anchor", in many clusters — places the
-// cluster in the corpus) down to "signature" (df==1, unique to this cluster —
-// what it actually holds), and take the top STRAT_PER_BAND of each by the same
-// class-TF-IDF relevance the other text methods use.
+// once instead of taking the top-N from one slice. The banding "grain" is a
+// term's PAPER document-frequency (how many papers in the whole corpus contain
+// it), NOT its cluster-df: cluster-df only ranges over the handful of clusters,
+// so "mid"/"specific" collapsed onto near-unique terms and read as too specific.
+// Paper-df spreads terms over the real corpus distribution, so a corpus-common
+// word lands in a general band and a rare word in a specific one. We bucket
+// candidate terms into five bands from general ("anchor", in many papers —
+// places the cluster in the corpus) down to "signature" (paper-df==1, in a
+// single paper — what it actually holds), and take the top STRAT_PER_BAND of
+// each by the same c-TF-IDF relevance the other text methods use (relevance
+// ranking — which terms enter the bands — is unchanged; only the banding axis
+// moved from cluster-df to paper-df).
 //
 // The band edges are NOT fixed thresholds — they're read off this dataset's own
-// df distribution so the slices transfer across corpora. df is Zipfian (most
-// terms are df==1, and even df>=2 piles on 2), so the informative distinctions
+// paper-df distribution so the slices transfer across corpora. df is heavy-
+// tailed (most terms sit in very few papers), so the informative distinctions
 // live in the sparse upper tail and that axis is logarithmic: we log-space the
 // four non-signature bands over [2 .. maxDf]. See scratch/label_overlap/ for the
 // analysis that motivated this (quantiles collapse, flat ratios don't transfer).
-const STRAT_PER_BAND = 3;
+export const STRAT_PER_BAND = 3;
 const STRAT_BANDS = ["anchor", "broad", "mid", "specific", "signature"];
 
 // Common non-English (Romance) function words that survive the English-only
@@ -361,26 +367,38 @@ function stratifiedLabels(cr, ctx, membersArg, opts) {
   const members = membersArg || membersOf(cr);
   const nClusters = cr.clusters.length;
 
-  // Per-cluster phrase frequencies (1..ngramMax grams).
+  // Per-cluster phrase frequencies (1..ngramMax grams) for relevance, AND a
+  // corpus-wide paper-df pass: how many distinct PAPERS contain each phrase.
+  // Paper-df is the banding axis; cluster-df is no longer computed.
   const tf = new Array(nClusters);
+  const paperDf = new Map();
+  let nPapers = 0;
   for (let c = 0; c < nClusters; c++) {
     const counts = new Map();
     for (const i of members[c]) {
       const text = ctx.getText(ctx.nodes[i] ? ctx.nodes[i].id : i);
       if (!text) continue;
+      nPapers++;
+      const seen = new Set();   // de-dup within a paper so df counts papers, not hits
       for (const ph of ngrams(tokenize(text), ngramMax)) {
         counts.set(ph, (counts.get(ph) || 0) + 1);
+        if (!seen.has(ph)) { seen.add(ph); paperDf.set(ph, (paperDf.get(ph) || 0) + 1); }
       }
     }
     tf[c] = counts;
   }
 
-  // Global cluster document-frequency, then the dataset-adaptive band edges.
-  const df = new Map();
-  for (let c = 0; c < nClusters; c++) {
-    for (const ph of tf[c].keys()) df.set(ph, (df.get(ph) || 0) + 1);
-  }
-  const edges = bandEdges(df);
+  // Modest minimum-support floor: drop terms that appear in too few papers to
+  // be worth banding. Frequency-1 terms in a tiny corpus stay (a unique
+  // signature is the point), but as the corpus grows we require a term to show
+  // up in at least ~0.5% of papers (min 1) before it can enter a band. Junk is
+  // still caught by looksJunk in the signature tail; this is the support gate.
+  const supportFloor = Math.max(1, Math.ceil(nPapers * 0.005));
+
+  // Dataset-adaptive band edges from the paper-df distribution (above-floor).
+  const bandDf = new Map();
+  for (const [ph, c] of paperDf) if (c >= supportFloor) bandDf.set(ph, c);
+  const edges = bandEdges(bandDf);
 
   const out = new Array(nClusters);
   for (let c = 0; c < nClusters; c++) {
@@ -388,15 +406,17 @@ function stratifiedLabels(cr, ctx, membersArg, opts) {
     for (const v of tf[c].values()) total += v;
     total = total || 1;
 
-    // Score every candidate, then split into bands by its global df.
+    // Score every above-floor candidate (c-TF-IDF relevance, cluster-based idf),
+    // then split into bands by its corpus paper-df.
     const perBand = { anchor: [], broad: [], mid: [], specific: [], signature: [] };
     const scored = [];
     for (const [ph, count] of tf[c]) {
-      const dfv = df.get(ph) || 1;
+      const pdf = paperDf.get(ph) || 1;
+      if (pdf < supportFloor) continue;   // below support floor — drop before banding
       const tfv = count / total;
-      const idf = Math.log(1 + nClusters / (1 + dfv));
+      const idf = Math.log(1 + nClusters / (1 + pdf));
       const boost = lenBoost ? 1 + 0.15 * (ph.split(" ").length - 1) : 1;
-      scored.push({ term: ph, score: tfv * idf * boost, df: dfv });
+      scored.push({ term: ph, score: tfv * idf * boost, df: pdf });
     }
     scored.sort((a, b) => b.score - a.score);
     for (const cand of scored) perBand[bandOf(cand.df, edges)].push(cand);
@@ -431,8 +451,9 @@ function stratifiedLabels(cr, ctx, membersArg, opts) {
   return out;
 }
 
-// Three df cut points (tops of specific|mid|broad; anchor is everything above),
-// log-spaced over [2 .. maxDf]. signature (df==1) is handled separately.
+// Three paper-df cut points (tops of specific|mid|broad; anchor is everything
+// above), log-spaced over [2 .. maxDf]. signature (paper-df==1) is handled
+// separately. `df` here is the paper-df map (terms → #papers containing them).
 function bandEdges(df) {
   let maxdf = 2;
   for (const v of df.values()) if (v > maxdf) maxdf = v;

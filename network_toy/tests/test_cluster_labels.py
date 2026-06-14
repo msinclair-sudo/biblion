@@ -121,26 +121,28 @@ def test_text_methods_gate_without_titles(clean_page):
 
 
 def test_stratified_bands(clean_page):
-    """Banded labels describe each cluster across df bands: a corpus-wide term
-    lands in a more-general band than a cluster-unique term, the band edges
-    adapt to the df distribution, and the signature (df==1) tail is cleaned of
-    pure-numeric / foreign-stopword junk. Stratification is an option on each
-    text scorer (here c-TF-IDF banded)."""
+    """Banded labels describe each cluster across PAPER-df bands: a term in many
+    papers lands in a more-general band than a term in few papers, the band edges
+    adapt to the paper-df distribution, and the signature (paper-df==1) tail is
+    cleaned of pure-numeric / foreign-stopword junk. Banding is on paper-df now,
+    not cluster-df. Stratification is an option on each text scorer (here
+    c-TF-IDF banded)."""
     out = clean_page.evaluate(r'''async () => {
         const { labelClusters } = await import("/app/src/labelling/cluster-labels.js");
-        // 6 clusters × 2 nodes. "alga" is in every cluster (general → anchor);
-        // "soil" in three (mid-ish); each cluster has a unique signature word.
-        // Cluster 0 also carries a numeric token and a Portuguese stopword that
-        // must be filtered out of its signature band.
+        // 6 clusters × 2 nodes = 12 papers. "alga" is in every paper (general →
+        // anchor); "soil" in four papers (broad); "zeta" in cluster 0's two
+        // papers (specific). Each cluster-0 paper carries its OWN df==1 word
+        // (gax/gbx) so the signature band is populated. Paper 0 also carries a
+        // numeric token and a Portuguese stopword that must be filtered out.
         const common = "alga";
         const mk = (uniq, extra="") => `${common} ${extra} ${uniq} ${uniq}`;
         const texts = {
-            0: mk("zeta", "soil 12345 para"), 1: mk("zeta", "soil"),
-            2: mk("eta",  "soil"),            3: mk("eta",  "soil"),
-            4: mk("theta"),                   5: mk("theta"),
-            6: mk("iota"),                    7: mk("iota"),
-            8: mk("kappa"),                   9: mk("kappa"),
-            10: mk("mu"),                     11: mk("mu"),
+            0: mk("zeta", "soil gax 12345 para"), 1: mk("zeta", "soil gbx"),
+            2: mk("eta",  "soil"),                3: mk("eta",  "soil"),
+            4: mk("theta"),                       5: mk("theta"),
+            6: mk("iota"),                        7: mk("iota"),
+            8: mk("kappa"),                       9: mk("kappa"),
+            10: mk("mu"),                         11: mk("mu"),
         };
         const nodeCluster = Int32Array.from([0,0,1,1,2,2,3,3,4,4,5,5]);
         const cr = { nodeCluster, clusters: [0,1,2,3,4,5].map(id => ({ id })) };
@@ -161,8 +163,8 @@ def test_stratified_bands(clean_page):
             available: res.methods[0].available,
             hasBands: !!c0.bands && ORDER.every(b => Array.isArray(c0.bands[b])),
             hasFlatTerms: Array.isArray(c0.terms) && c0.terms.length > 0,
-            algaBand: bandOfTerm(c0, "alga"),       // general
-            zetaBand: bandOfTerm(c0, "zeta"),       // unique to cluster 0
+            algaBand: bandOfTerm(c0, "alga"),       // in every paper → general
+            zetaBand: bandOfTerm(c0, "zeta"),       // in two papers → more specific
             sigTerms,
             edges: c0.edges,
         };
@@ -170,11 +172,11 @@ def test_stratified_bands(clean_page):
     assert out["available"] is True
     assert out["hasBands"] is True
     assert out["hasFlatTerms"] is True
-    # general term sits in a lower band index (more general) than the unique one
+    # a corpus-common term sits in a lower band index (more general) than a rare one
     assert out["algaBand"] != -1 and out["zetaBand"] != -1
     assert out["algaBand"] < out["zetaBand"]
-    # the cluster-unique word is a signature; junk is filtered out of it
-    assert "zeta" in out["sigTerms"]
+    # a paper-df==1 word is a signature; junk is filtered out of it
+    assert "gax" in out["sigTerms"] or "gbx" in out["sigTerms"]
     assert "12345" not in out["sigTerms"]
     assert "para" not in out["sigTerms"]
     assert len(out["edges"]) == 3
