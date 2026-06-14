@@ -7,7 +7,8 @@ clone-safe projection riding on `clusterResult.condensedTree`. These tests
 assert it's present, well-formed, survives a save/load round-trip, and is
 faithful to the shipped flat labels.
 
-The real-data `page` fixture (n=5000 HDBSCAN) backs these `@slow` tests.
+The real-data `page` fixture (rehydrated fallworm baseline, n=1638
+HDBSCAN) backs these `@slow` tests.
 """
 
 import pytest
@@ -15,7 +16,7 @@ import pytest
 
 # In-page helper: pull a structural + correctness summary of the condensed
 # tree off state.clusterLevels[0].clusterResult, computing the heavy
-# per-leaf invariant in JS so we don't ship 400–5000-length arrays over the
+# per-leaf invariant in JS so we don't ship 400–1638-length arrays over the
 # evaluate bridge.
 _SUMMARY_JS = r'''async () => {
     const st = await import("/app/src/ui/state.js");
@@ -171,7 +172,7 @@ def test_condensed_tree_survives_save_load(page):
     }''')
     assert out["beforeNodes"] > 0
     assert out["afterNodes"] == out["beforeNodes"]
-    assert out["afterN"] == 5000
+    assert out["afterN"] == 1638
     assert out["afterRoot"] == 0
     assert out["identical"] is True
     assert out["valuesOk"] is True
@@ -180,8 +181,8 @@ def test_condensed_tree_survives_save_load(page):
 @pytest.mark.slow
 def test_condensed_tree_surfaced_real(page):
     """Same surfacing + faithfulness invariant at real-data scale — the
-    n=5000 BFS subset is where the degenerate deep-chain trees the
+    fallworm baseline (n=1638) is where the degenerate deep-chain trees the
     condensation guards against actually appear."""
     out = page.evaluate(_SUMMARY_JS)
     _assert_wellformed(out)
-    assert out["n"] == 5000
+    assert out["n"] == 1638

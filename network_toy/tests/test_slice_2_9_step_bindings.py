@@ -15,12 +15,17 @@ browser test.
 import pytest
 
 
+@pytest.mark.slow
 def test_bootstrap_sidecar_runs_with_clustering(page):
     """cards.md Pass 2b — bootstrap is no longer a standalone card. It's a
     sidecar to single-level clustering: knobs live in the clustering modal,
     engine.recluster runs bootstrap after HDBSCAN, the result lands on
     state.bootstrapStability for the panel to render. There must be NO
-    bootstrapStability card on the tree (the type was removed)."""
+    bootstrapStability card on the tree (the type was removed).
+
+    @slow: re-applying the clustering runs a real HDBSCAN recluster plus a
+    B=5 bootstrap over the fallworm fixture — a genuine full recompute, so
+    the default fast tier must not pay it."""
     out = page.evaluate(
         '''async () => {
             const ld = await import("/app/src/ui/modals/layer-descriptors.js");

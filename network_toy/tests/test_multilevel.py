@@ -90,11 +90,16 @@ def test_parallel_distance_matches_sync(clean_page):
 
 
 # ── Engine lane (real data) ─────────────────────────────────────────────
+@pytest.mark.slow
 def test_multilevel_sweep_then_commit(page):
     """The produce/picker split: recomputeMultiLevelSweep scores every
     candidate (state.multiLevelSweep, no clusterLevels yet); then
     commitMultiLevelLayers(pickedCounts) builds the coarse→fine ladder in
-    state.clusterLevels with bridge analysis."""
+    state.clusterLevels with bridge analysis.
+
+    @slow: recomputeMultiLevelSweep runs a real bootstrap HDBSCAN sweep
+    (B=5) over the fallworm fixture — a genuine full recompute the default
+    fast tier must not pay."""
     out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const st = await import("/app/src/ui/state.js");
@@ -183,12 +188,17 @@ def test_multilevel_sweep_then_commit(page):
     assert out["bppUpperOnly"] is True
 
 
+@pytest.mark.slow
 def test_multilevel_producer_picker_cards(page):
     """The produce/picker card split: the multiLevel descriptor creates a
     SWEEP card under the dimred ancestor whose result holds the scored sweep
     (multiLevelSweep, no clusterLevels). A picker card auto-spawns under it;
     picking granularities + applyChange commits clusterLevels into the picker
-    card's result, and selecting the picker projects them into legacy state."""
+    card's result, and selecting the picker projects them into legacy state.
+
+    @slow: the multiLevel applyChange runs a real bootstrap HDBSCAN sweep over
+    the fallworm fixture (B=5) — a genuine full recompute, not a single op on
+    loaded geometry, so the default fast tier must not pay it."""
     out = page.evaluate(r'''async () => {
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
         const wf = await import("/app/src/ui/workflow.js");
@@ -355,10 +365,15 @@ def test_picker_commit_populates_bridges_and_auto_crosscite(page):
     assert out["phase2_xccStash"] is True
 
 
+@pytest.mark.slow
 def test_bridge_panel_sections_and_tau(page):
     """After a multi-level run, the bridge panel renders Encapsulated +
     Bridges sections that together account for every fine cluster, and the
-    τ slider re-buckets without an engine recompute."""
+    τ slider re-buckets without an engine recompute.
+
+    @slow: the setup runs a real bootstrap HDBSCAN sweep (B=5) over the
+    fallworm fixture — a genuine full recompute the default fast tier must
+    not pay."""
     out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const state = await import("/app/src/ui/state.js");
@@ -410,9 +425,10 @@ def test_bridge_panel_sections_and_tau(page):
 
 @pytest.mark.slow
 def test_multilevel_engine_real(page):
-    """Real BFS-5000: the sweep's Phase-1 nested-worker distance fan-out runs
-    inside the clustering worker, Phase-2 bootstraps fan out across workers,
-    and a coarse→fine reproducible ladder lands."""
+    """Real data (rehydrated fallworm baseline, n=1638): the sweep's Phase-1
+    nested-worker distance fan-out runs inside the clustering worker, Phase-2
+    bootstraps fan out across workers, and a coarse→fine reproducible ladder
+    lands."""
     out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const st = await import("/app/src/ui/state.js");
@@ -439,7 +455,7 @@ def test_multilevel_engine_real(page):
             hasBridge: !!s.bridgeAnalysis,
         };
     }''')
-    assert out["n"] == 5000
+    assert out["n"] == 1638
     assert out["nLevels"] >= 2
     assert out["noNoise"] is True
     assert out["counts"] == sorted(out["counts"])
