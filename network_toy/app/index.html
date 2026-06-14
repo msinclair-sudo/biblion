@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Network Toy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="styles/main.css">
+
+<!-- THREE / 3d-force-graph load order: same trick as legacy.html.
+     THREE r161+ removed the UMD build, but 3d-force-graph's UMD still
+     reads window.THREE. So: import THREE as an ES module via importmap,
+     attach to window, THEN inject the 3d-force-graph UMD <script>. -->
+<script type="importmap">
+{
+  "imports": {
+    "three":       "https://unpkg.com/three@0.180.0/build/three.module.min.js",
+    "umap-js":     "https://esm.sh/umap-js@1.4.0",
+    "fflate":      "https://esm.sh/fflate@0.8.2",
+    "force-graph": "https://esm.sh/force-graph@1.43.0",
+    "sql.js":      "https://esm.sh/sql.js@1.10.3"
+  }
+}
+</script>
+<script type="module">
+  // Surface every failure path as a visible banner. The previous
+  // contract was "module load failure → silent + empty panels" which
+  // was a debugging dead-end. Anything that throws between here and
+  // ui.boot() now paints a red strip across the top so the user
+  // sees there's a problem without having to open DevTools.
+  function bootFail(stage, err) {
+    console.error(`[boot] ${stage}:`, err);
+    const banner = document.createElement("div");
+    banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;"
+      + "padding:8px 12px;background:#c43d3d;color:#fff;font:12px/1.4 monospace;"
+      + "border-bottom:2px solid #871f1f;white-space:pre-wrap;";
+    banner.textContent = `[boot failed at: ${stage}]\n${err && err.message || err}`;
+    document.body && document.body.appendChild(banner);
+  }
+  // These catch failures DURING boot only. Once boot succeeds they're
+  // removed — otherwise any later runtime error (e.g. 3d-force-graph's
+  // known stale-tick on teardown when switching away from the 3-D viewer)
+  // would paint the red "boot failed" banner and look like a crash.
+  const onBootError  = (e) => bootFail("uncaught error", e.error || e.message);
+  const onBootReject = (e) => bootFail("unhandled rejection", e.reason);
+  window.addEventListener("error", onBootError);
+  window.addEventListener("unhandledrejection", onBootReject);
+
+  try {
+    const THREE = await import("three").catch(e => { throw new Error(`importmap 'three' failed: ${e.message}`); });
+    window.THREE = THREE;
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js";
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("Failed to load 3d-force-graph from unpkg.com"));
+      document.head.appendChild(s);
+    });
+    const ui = await import("./src/ui/main.js").catch(e => { throw new Error(`local module './src/ui/main.js' failed: ${e.message}`); });
+    ui.boot();
+    console.log("[boot] ok");
+    // Boot is done — stop treating later runtime errors as boot failures.
+    window.removeEventListener("error", onBootError);
+    window.removeEventListener("unhandledrejection", onBootReject);
+  } catch (err) {
+    bootFail("startup", err);
+  }
+</script>
+</head>
+<body>
+
+<header id="topbar">
+  <!-- topbar.js renders into here -->
+</header>
+
+<div id="layout">
+  <aside id="left-rail">
+    <section id="data-panel">
+      <!-- data-panel.js -->
+    </section>
+    <section id="workflow-chart">
+      <!-- workflow-chart.js -->
+    </section>
+    <section id="blend-control">
+      <!-- bottom of left rail: blend slider, then per-edge-kind groups.
+           Single-row entries — label | slider | readout, or one checkbox
+           per row. Thin hairlines separate groups; no boxed cards. -->
+
+      <div class="lr-section">
+        <div class="lr-section-title">Blend</div>
+        <div class="lr-row lr-row-slider">
+          <label title="0 = basePos (semantic similarity layout); 1 = citation-topology layout">α</label>
+          <input id="blend-slider" type="range" min="0" max="1" step="0.001" value="0">
+          <span id="blend-readout" class="lr-readout">0.00</span>
+        </div>
+        <div class="lr-row lr-row-slider" id="fusion-blend-row" style="display:none">
+          <label title="0 = pre-fusion semantic position; 1 = post-fusion (citation-aware) position. Only active when fusion is non-identity.">fusion</label>
+          <input id="fusion-blend-slider" type="range" min="0" max="1" step="0.001" value="1">
+          <span id="fusion-blend-readout" class="lr-readout">1.00</span>
+        </div>
+      </div>
+
+      <div class="lr-section">
+        <div class="lr-section-title">Citation edges</div>
+        <div class="lr-row lr-row-toggles">
+          <input type="color"    id="ec-cit-colour" class="lr-swatch" value="#8a8a8a" title="Citation edge colour">
+          <label class="lr-inline-check"><input type="checkbox" id="ec-citations"> Show</label>
+          <label class="lr-inline-check"><input type="checkbox" id="ec-cit-arrows"> Arrows</label>
+        </div>
+        <div class="lr-row lr-row-slider">
+          <label for="ec-cit-opacity">Opacity</label>
+          <input type="range" id="ec-cit-opacity"
+                 min="0.05" max="1" step="0.01" value="0.15">
+          <span id="ec-cit-opacity-readout" class="lr-readout">0.15</span>
+        </div>
+      </div>
+
+      <div class="lr-section">
+        <div class="lr-section-title">Base edges</div>
+        <div class="lr-row lr-row-toggles">
+          <input type="color"    id="ec-base-colour" class="lr-swatch" value="#5a6878" title="Base edge colour">
+          <label class="lr-inline-check"><input type="checkbox" id="ec-base"> Show</label>
+        </div>
+        <div class="lr-row lr-row-slider">
+          <label for="ec-base-density">Density</label>
+          <input type="range" id="ec-base-density"
+                 min="0" max="0.2" step="0.005" value="0.02">
+          <span id="ec-base-density-readout" class="lr-readout">0.020</span>
+        </div>
+      </div>
+
+      <div class="lr-section">
+        <div class="lr-section-title">Cluster skeleton</div>
+        <div class="lr-row lr-row-toggles">
+          <input type="color"    id="ec-structure-colour" class="lr-swatch" value="#5dd39e" title="Cluster skeleton colour">
+          <label class="lr-inline-check"><input type="checkbox" id="ec-structure"> Show</label>
+        </div>
+      </div>
+    </section>
+  </aside>
+
+  <main id="primary-panel" class="panel-slot" data-slot="primary">
+    <div class="panel-tabs">
+      <!-- panel-system.js renders tab strip -->
+    </div>
+    <div class="panel-content">
+      <!-- panel-system.js mounts active panel here -->
+    </div>
+  </main>
+
+  <aside id="secondary-panel" class="panel-slot" data-slot="secondary">
+    <div class="panel-tabs"></div>
+    <div class="panel-content"></div>
+  </aside>
+
+  <section id="bottom-panel" class="panel-slot" data-slot="bottom">
+    <div class="panel-tabs"></div>
+    <div class="panel-content"></div>
+  </section>
+</div>
+
+<div id="modal-root">
+  <!-- modals mounted here as needed -->
+</div>
+
+<!-- Phase 2 slice 2.11 removed the §6.13 bottom busy-bar. Per-card
+     spinner + queue-position badge on the workflow chart are the
+     user-visible surface for in-flight jobs now. -->
+
+</body>
+</html>

@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Network Dynamics</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d222c;
+    --line: #2a2f3a;
+    --text: #d8dee9;
+    --muted: #8a93a6;
+    --accent: #ff6b35;
+    --accent-2: #4aa3ff;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+  button, select, input { font: inherit; color: var(--text); }
+
+  /* Production layout — mirrors the old network-dynamics.html shell:
+     topbar / left controls / canvas / right legend / bottom bar.
+     Right panel is reserved for read-only summaries (cluster legend etc.)
+     so a long list there can't push the left-side sliders around. */
+  #app {
+    display: grid;
+    grid-template-rows: 40px 1fr 56px;
+    grid-template-columns: 320px 1fr 240px;
+    grid-template-areas:
+      "topbar topbar topbar"
+      "left   canvas right"
+      "bottom bottom bottom";
+    gap: 4px;
+    background: #000;
+    height: 100vh;
+    width: 100vw;
+  }
+  #topbar { grid-area: topbar; background: var(--panel); display: flex; align-items: center; gap: 8px; padding: 0 10px; position: relative; z-index: 3; }
+  #left   { grid-area: left;   background: var(--panel); padding: 12px; overflow-y: auto; min-width: 0; min-height: 0; z-index: 2; }
+  #canvas { grid-area: canvas; position: relative; background: #06080c; overflow: hidden; min-width: 0; min-height: 0; z-index: 1; }
+  #graph  { position: absolute; inset: 0; }
+  #graph canvas { position: absolute !important; top: 0 !important; left: 0 !important; width: 100% !important; height: 100% !important; display: block !important; }
+  #right  { grid-area: right;  background: var(--panel); padding: 12px; overflow-y: auto; min-width: 0; min-height: 0; z-index: 2; }
+  #bottom { grid-area: bottom; background: var(--panel); display: flex; align-items: center; gap: 14px; padding: 0 12px; flex-wrap: wrap; z-index: 2; }
+
+  /* topbar atoms */
+  .tb-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+  .tb-btn:hover { background: #232a36; }
+  .tb-btn.primary { background: var(--accent); border-color: var(--accent); color: #06080c; }
+  .tb-btn.primary:hover { filter: brightness(1.05); }
+  .tb-btn.active  { background: var(--accent-2); border-color: var(--accent-2); color: #06080c; }
+  .tb-sep { width: 1px; height: 24px; background: var(--line); }
+  .tb-label { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+  .tb-label input { width: 80px; background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 3px 6px; border-radius: 3px; }
+
+  /* dropdown menus (File, Debug, …) */
+  .menu { position: relative; }
+  .menu > .menu-list {
+    display: none; position: absolute; top: 100%; left: 0; min-width: 200px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+    z-index: 50; padding: 4px 0; margin-top: 2px;
+  }
+  .menu.open > .menu-list { display: block; }
+  .menu-list .menu-item {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; padding: 6px 12px; cursor: pointer; color: var(--text);
+    background: transparent; border: 0; text-align: left; font: inherit;
+  }
+  .menu-list .menu-item:hover { background: #2a3140; }
+  .menu-list .menu-item input[type=checkbox] { accent-color: var(--accent-2); }
+  .menu-list .menu-divider { height: 1px; background: var(--line); margin: 4px 0; }
+  .menu-list .menu-section-label {
+    padding: 4px 12px 2px; font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+
+  /* left panel scaffolding (empty for now; future layers populate) */
+  h3 { margin: 0 0 8px 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .group { margin-bottom: 18px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
+  .row label { color: var(--muted); }
+  .placeholder { font-size: 11px; color: var(--muted); line-height: 1.5; font-style: italic; }
+
+  .cluster-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; font-size: 11px; border-bottom: 1px solid var(--line);
+  }
+  .cluster-row .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  .cluster-row .meta { color: var(--muted); font-size: 10px; margin-left: auto; }
+
+  /* bottom-bar atoms — every control lives inside a .bb-group, so the
+     "Base edges" / "Citation edges" / "Nodes" labels stay attached to
+     the controls they describe and the groups can wrap together on
+     narrow screens. */
+  .bb-group { display: inline-flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+  .bb-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .bb-check { font-size: 12px; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .bb-mini  { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+  .bb-mini input[type=range] { width: 90px; }
+  .bb-mini .bb-val { font-variant-numeric: tabular-nums; color: var(--text); min-width: 2.7em; text-align: right; }
+  .bb-mini select  { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+  .bb-swatch { width: 22px; height: 18px; border: 1px solid var(--line); background: transparent; padding: 0; cursor: pointer; }
+  .bb-sep { width: 1px; height: 28px; background: var(--line); }
+
+  /* status overlay */
+  #status { position: absolute; bottom: 8px; left: 8px; font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; pointer-events: none; }
+
+  /* settings modal */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    min-width: 420px; max-width: 90vw; max-height: 90vh; overflow-y: auto;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+  }
+  .modal-head h2 { margin: 0; font-size: 13px; letter-spacing: .05em; text-transform: uppercase; color: var(--text); }
+  .modal-body { padding: 14px; }
+  .modal-foot {
+    display: flex; gap: 8px; justify-content: flex-end;
+    padding: 10px 14px; border-top: 1px solid var(--line);
+  }
+  .field { display: grid; grid-template-columns: 120px 1fr 60px; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; }
+  .field label { color: var(--muted); }
+  .field input[type=number] { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 4px 6px; border-radius: 3px; }
+  .field input[type=range] { width: 100%; }
+  .field .val { font-variant-numeric: tabular-nums; color: var(--text); text-align: right; }
+
+  /* cluster-modal two-column layout (settings | evaluation) */
+  .cluster-modal-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .cluster-modal-eval {
+    border-left: 1px solid var(--line); padding-left: 16px;
+    font-size: 12px; color: var(--text);
+  }
+  .cluster-modal-eval h3 {
+    font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 8px;
+  }
+  .cluster-modal-eval .eval-meta {
+    font-size: 10px; color: var(--muted); margin-bottom: 10px; line-height: 1.4;
+  }
+  .cluster-modal-eval .eval-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 4px 0; gap: 8px;
+  }
+  .cluster-modal-eval .eval-row .ari {
+    font-variant-numeric: tabular-nums; font-weight: 600;
+  }
+  .cluster-modal-eval .eval-row.live { border-bottom: 1px solid var(--line); margin-bottom: 8px; padding-bottom: 6px; }
+  .cluster-modal-eval .eval-empty { color: var(--muted); font-style: italic; padding: 6px 0; }
+  .cluster-modal-eval .sweep-row {
+    display: grid; grid-template-columns: 50px 1fr auto;
+    align-items: center; gap: 8px; padding: 4px 0;
+    border-top: 1px dashed var(--line); font-size: 11px;
+  }
+  .cluster-modal-eval .sweep-row:first-of-type { border-top: none; }
+  .cluster-modal-eval .sweep-row .ari { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .cluster-modal-eval .sweep-row .params { color: var(--muted); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; line-height: 1.4; }
+  .cluster-modal-eval .sweep-row button { padding: 2px 6px; font-size: 10px; }
+  .cluster-modal-eval .sweep-status { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .cluster-modal-eval .sweep-row .count { color: var(--muted); font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── topbar ─────────────────────────────────────────────────────────── -->
+  <div id="topbar">
+
+    <!-- File ▾ (stub for now) -->
+    <div class="menu" id="menu-file">
+      <button class="tb-btn">File ▾</button>
+      <div class="menu-list">
+        <button class="menu-item" data-act="new" disabled style="opacity:0.4;cursor:not-allowed;">New</button>
+        <button class="menu-item" data-act="load" disabled style="opacity:0.4;cursor:not-allowed;">Load…</button>
+        <button class="menu-item" data-act="save" disabled style="opacity:0.4;cursor:not-allowed;">Save…</button>
+        <div class="menu-divider"></div>
+        <button class="menu-item" data-act="export-gexf" disabled style="opacity:0.4;cursor:not-allowed;">Export GEXF…</button>
+      </div>
+    </div>
+
+    <!-- Cluster ▾ — one menu item per registered algorithm. Picking one
+         opens the cluster-settings modal preloaded with that algorithm's
+         params. Items are populated dynamically from the registry, so
+         adding an algorithm doesn't need an HTML edit. -->
+    <div class="menu" id="menu-cluster">
+      <button class="tb-btn">Cluster ▾</button>
+      <div class="menu-list" id="menu-cluster-list">
+        <!-- populated by main.js bindClusterMenu() -->
+      </div>
+    </div>
+
+    <!-- Citations ▾ — opens the citation settings modal. -->
+    <div class="menu" id="menu-citations">
+      <button class="tb-btn">Citations ▾</button>
+      <div class="menu-list">
+        <button class="menu-item" id="cit-settings-open">Settings…</button>
+      </div>
+    </div>
+
+    <!-- Citation Layout ▾ — one menu item per registered layout
+         algorithm. Picking one opens the citation-layout settings
+         modal with that algorithm's params. Items populated from
+         the registry by main.js bindCitationLayoutMenu(). -->
+    <div class="menu" id="menu-citlayout">
+      <button class="tb-btn">Citation Layout ▾</button>
+      <div class="menu-list" id="menu-citlayout-list">
+        <!-- populated by main.js -->
+      </div>
+    </div>
+
+    <!-- Debug ▾ (overlay toggles, live). Grouped by layer with dividers
+         so toggles for one layer don't get tangled up with another. -->
+    <div class="menu" id="menu-debug">
+      <button class="tb-btn">Debug ▾</button>
+      <div class="menu-list">
+        <div class="menu-section-label">Generation</div>
+        <label class="menu-item"><input type="checkbox" id="dbg-origins"> show origin markers</label>
+        <label class="menu-item"><input type="checkbox" id="dbg-origin-edges"> origin → node edges</label>
+        <label class="menu-item"><input type="checkbox" id="dbg-volume"> bounding cube</label>
+        <div class="menu-divider"></div>
+        <div class="menu-section-label">Clustering</div>
+        <label class="menu-item"><input type="checkbox" id="dbg-centroids"> cluster centroids</label>
+        <label class="menu-item"><input type="checkbox" id="dbg-structure-edges"> structure edges</label>
+        <label class="menu-item"><input type="checkbox" id="dbg-noise-rings"> noise rings</label>
+        <div class="menu-divider"></div>
+        <div class="menu-section-label">Physics</div>
+        <label class="menu-item"><input type="checkbox" id="dbg-displacement"> displacement</label>
+      </div>
+    </div>
+
+    <div class="tb-sep"></div>
+
+    <!-- Settings opens the modal; Generate uses current state -->
+    <button class="tb-btn" id="btn-settings">Settings…</button>
+    <button class="tb-btn primary" id="btn-generate">Generate</button>
+    <button class="tb-btn" id="btn-freeze" title="Pause / resume the simulation">❄ Freeze</button>
+    <span class="tb-label">seed: <input type="number" id="seed-input" value="42"></span>
+  </div>
+
+  <!-- ── left panel ─────────────────────────────────────────────────────── -->
+  <!-- The Clusters group has been moved to the topbar Cluster ▾ menu /
+       cluster settings modal, so swapping algorithms doesn't require
+       reshaping this panel. -->
+  <div id="left">
+    <div class="group">
+      <h3>Blend</h3>
+      <div class="row">
+        <label style="width: 70px;">blend</label>
+        <input type="range" id="blend-input" min="0" max="1" step="0.005" value="0" style="flex: 1 1 auto;">
+        <span class="val" id="blend-val" style="font-variant-numeric: tabular-nums; color: var(--text); min-width: 2.5em; text-align: right;">0.00</span>
+      </div>
+      <div style="font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 4px;">
+        0: basePos (generation embedding) · 1: citation-driven layout (per-component aligned to basePos)
+      </div>
+    </div>
+    <div class="group">
+      <h3>Citations</h3>
+      <div class="row">
+        <label style="width: 70px;">density</label>
+        <input type="range" id="cit-density" min="0" max="1" step="0.01" value="0" style="flex: 1 1 auto;">
+        <span class="val" id="cit-density-val" style="font-variant-numeric: tabular-nums; color: var(--text); min-width: 2.5em; text-align: right;">0.00</span>
+      </div>
+      <div class="row">
+        <label style="width: 70px;">intra</label>
+        <input type="range" id="cit-intra" min="0" max="1" step="0.01" value="0" style="flex: 1 1 auto;">
+        <span class="val" id="cit-intra-val" style="font-variant-numeric: tabular-nums; color: var(--text); min-width: 2.5em; text-align: right;">0.00</span>
+      </div>
+      <div class="row">
+        <label style="width: 70px;">cross</label>
+        <input type="range" id="cit-cross" min="0" max="1" step="0.01" value="0" style="flex: 1 1 auto;">
+        <span class="val" id="cit-cross-val" style="font-variant-numeric: tabular-nums; color: var(--text); min-width: 2.5em; text-align: right;">0.00</span>
+      </div>
+      <div class="row" style="margin-top: 6px;">
+        <label style="width: 70px;">seed</label>
+        <input type="number" id="cit-seed" value="17" style="background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 2px 6px; border-radius: 3px; width: 90px; font-size: 12px;">
+        <button class="tb-btn" id="cit-randomize" style="margin-left: auto; padding: 3px 8px; font-size: 11px;">Randomize</button>
+      </div>
+      <div id="cit-status" style="font-size: 10px; color: var(--muted); margin-top: 6px;"></div>
+    </div>
+  </div>
+
+  <!-- ── canvas ─────────────────────────────────────────────────────────── -->
+  <div id="canvas">
+    <div id="graph"></div>
+    <div id="status">…</div>
+  </div>
+
+  <!-- ── right panel: read-only summaries ───────────────────────────────── -->
+  <div id="right">
+    <div class="group">
+      <h3>Cluster legend</h3>
+      <div id="cluster-legend"></div>
+    </div>
+  </div>
+
+  <!-- ── bottom bar ─────────────────────────────────────────────────────── -->
+  <!-- Grouped by subject (Base edges | Citation edges | Nodes) so each
+       control sits next to the others that affect the same thing. v1 had
+       these scattered across the bar; we don't want to repeat that. -->
+  <div id="bottom">
+
+    <!-- BASE EDGES — semantic embedding edges, purely visual (per
+         dynamics.md §4). Density controls how many closest-pair edges
+         we draw. -->
+    <div class="bb-group">
+      <span class="bb-label">Base edges</span>
+      <label class="bb-check"><input type="checkbox" id="show-base"> show</label>
+      <label class="bb-mini">density
+        <input type="range" id="base-density" min="0" max="1" step="0.005" value="0.05">
+        <span class="bb-val" id="base-density-val">0.050</span>
+      </label>
+      <label class="bb-mini">γ
+        <input type="range" id="base-gamma" min="0.2" max="5.0" step="0.05" value="0.3">
+        <span class="bb-val" id="base-gamma-val">0.30</span>
+      </label>
+      <input type="color" id="base-colour" value="#888888" class="bb-swatch">
+    </div>
+
+    <span class="bb-sep"></span>
+
+    <!-- CITATION EDGES -->
+    <div class="bb-group">
+      <span class="bb-label">Citation edges</span>
+      <label class="bb-check"><input type="checkbox" id="show-citations" checked> show</label>
+      <label class="bb-check"><input type="checkbox" id="show-cit-arrows"> arrows</label>
+      <label class="bb-mini">γ
+        <input type="range" id="cit-gamma" min="0" max="1" step="0.01" value="0.30">
+        <span class="bb-val" id="cit-gamma-val">0.30</span>
+      </label>
+      <input type="color" id="cit-colour" value="#ff6b35" class="bb-swatch">
+    </div>
+
+    <span class="bb-sep"></span>
+
+    <!-- NODES — colour-by is about node colour, not edges, so it gets its
+         own group rather than being wedged between edge controls. -->
+    <div class="bb-group">
+      <span class="bb-label">Nodes</span>
+      <label class="bb-mini" style="gap: 4px;">colour by
+        <select id="colour-by">
+          <option value="cluster">cluster</option>
+          <option value="origin">origin</option>
+          <option value="indegree">citation in-degree</option>
+          <option value="uniform">uniform</option>
+        </select>
+      </label>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- ── settings modal ───────────────────────────────────────────────────── -->
+<div class="modal-backdrop" id="settings-modal">
+  <div class="modal" role="dialog" aria-labelledby="settings-title">
+    <div class="modal-head">
+      <h2 id="settings-title">Generation settings</h2>
+      <button class="tb-btn" id="settings-x" aria-label="Close" style="padding: 2px 8px;">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="set-nodes">nodes</label>
+        <input type="range" id="set-nodes-range" min="1" max="2000" step="1" value="100">
+        <input type="number" id="set-nodes" min="1" max="2000" value="100" class="val" style="text-align:right;">
+      </div>
+      <div class="field">
+        <label for="set-origins">origins</label>
+        <input type="range" id="set-origins-range" min="1" max="50" step="1" value="6">
+        <input type="number" id="set-origins" min="1" max="500" value="6" class="val" style="text-align:right;">
+      </div>
+      <div class="field">
+        <label for="set-spread-range">spread</label>
+        <input type="range" id="set-spread-range" min="0.2" max="4.0" step="0.05" value="1.0">
+        <span class="val" id="set-spread-val">1.00</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5;">
+        Settings stage here. Click <b>Generate</b> to apply. <b>Close</b>
+        discards any unsaved changes in this dialog.
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="tb-btn" id="settings-close">Close</button>
+      <button class="tb-btn primary" id="settings-generate">Generate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── cluster settings modal ───────────────────────────────────────────── -->
+<!-- One modal serves every clustering algorithm. The body is rendered
+     dynamically from the active algorithm's modalSchema in the registry,
+     so adding a new algorithm needs no markup edits here. -->
+<div class="modal-backdrop" id="cluster-modal">
+  <div class="modal" role="dialog" aria-labelledby="cluster-modal-title" style="min-width: 760px;">
+    <div class="modal-head">
+      <h2 id="cluster-modal-title">Cluster settings</h2>
+      <button class="tb-btn" id="cluster-modal-x" aria-label="Close" style="padding: 2px 8px;">✕</button>
+    </div>
+    <div class="modal-body" id="cluster-modal-body">
+      <!-- populated by main.js openClusterModal() -->
+    </div>
+    <div class="modal-foot">
+      <button class="tb-btn" id="cluster-modal-cancel">Cancel</button>
+      <button class="tb-btn primary" id="cluster-modal-apply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── citation layout settings modal ───────────────────────────────────── -->
+<!-- One modal serves every citation-layout algorithm. Body rendered from
+     the active algorithm's modalSchema in app/src/citation-layout/registry.js. -->
+<div class="modal-backdrop" id="citlayout-modal">
+  <div class="modal" role="dialog" aria-labelledby="citlayout-modal-title">
+    <div class="modal-head">
+      <h2 id="citlayout-modal-title">Citation layout settings</h2>
+      <button class="tb-btn" id="citlayout-modal-x" aria-label="Close" style="padding: 2px 8px;">✕</button>
+    </div>
+    <div class="modal-body" id="citlayout-modal-body">
+      <!-- populated by main.js openCitationLayoutModal() -->
+    </div>
+    <div class="modal-foot">
+      <button class="tb-btn" id="citlayout-modal-cancel">Cancel</button>
+      <button class="tb-btn primary" id="citlayout-modal-apply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── citation settings modal ──────────────────────────────────────────── -->
+<!-- Apply-on-Apply, like the Generation modal. Pending changes live in a
+     local buffer; Cancel discards. Each section maps to a stage in
+     dynamics.md §3 so the math reference reads naturally next to the UI. -->
+<div class="modal-backdrop" id="cit-modal">
+  <div class="modal" role="dialog" aria-labelledby="cit-modal-title" style="min-width: 520px;">
+    <div class="modal-head">
+      <h2 id="cit-modal-title">Citation settings</h2>
+      <button class="tb-btn" id="cit-modal-x" aria-label="Close" style="padding: 2px 8px;">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <h3 style="margin: 0 0 6px;">Sampling budget (Stage 4)</h3>
+      <div class="field">
+        <label for="cm-density">density</label>
+        <input type="range" id="cm-density" min="0" max="1" step="0.01" value="0">
+        <span class="val" id="cm-density-val">0.00</span>
+      </div>
+      <div class="field">
+        <label for="cm-intra">intra rate</label>
+        <input type="range" id="cm-intra" min="0" max="1" step="0.01" value="0">
+        <span class="val" id="cm-intra-val">0.00</span>
+      </div>
+      <div class="field">
+        <label for="cm-cross">cross rate</label>
+        <input type="range" id="cm-cross" min="0" max="1" step="0.01" value="0">
+        <span class="val" id="cm-cross-val">0.00</span>
+      </div>
+      <div class="field">
+        <label for="cm-eps-intra">ε intra</label>
+        <input type="range" id="cm-eps-intra" min="0" max="0.5" step="0.005" value="0.05">
+        <span class="val" id="cm-eps-intra-val">0.050</span>
+      </div>
+      <div class="field">
+        <label for="cm-eps-cross">ε cross</label>
+        <input type="range" id="cm-eps-cross" min="0" max="0.2" step="0.001" value="0.01">
+        <span class="val" id="cm-eps-cross-val">0.010</span>
+      </div>
+      <div class="field">
+        <label for="cm-sampling-seed">sampling seed</label>
+        <input type="number" id="cm-sampling-seed" value="17" style="background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 3px 6px; border-radius: 3px;">
+        <button class="tb-btn" id="cm-sampling-randomize" style="padding: 3px 8px; font-size: 11px;">Randomize</button>
+      </div>
+
+      <h3 style="margin: 14px 0 6px;">Neighbourhoods (Stage 1)</h3>
+      <div class="field">
+        <label for="cm-neighbourk">neighbour k-NN</label>
+        <input type="range" id="cm-neighbourk" min="1" max="10" step="1" value="3">
+        <span class="val" id="cm-neighbourk-val">3</span>
+      </div>
+
+      <h3 style="margin: 14px 0 6px;">Cluster taste (Stages 2 + 3)</h3>
+      <div class="field">
+        <label for="cm-fav-mean">favourites mean</label>
+        <input type="range" id="cm-fav-mean" min="0.5" max="5" step="0.1" value="1.5">
+        <span class="val" id="cm-fav-mean-val">1.5</span>
+      </div>
+      <div class="field">
+        <label for="cm-shared">shared taste</label>
+        <input type="range" id="cm-shared" min="0" max="3" step="0.05" value="0.7">
+        <span class="val" id="cm-shared-val">0.70</span>
+      </div>
+      <div class="field">
+        <label for="cm-taste-range">taste range</label>
+        <input type="range" id="cm-taste-range" min="2" max="60" step="0.5" value="18">
+        <span class="val" id="cm-taste-range-val">18.0</span>
+      </div>
+      <div class="field">
+        <label for="cm-trans">triangle boost</label>
+        <input type="range" id="cm-trans" min="0" max="1" step="0.02" value="0.4">
+        <span class="val" id="cm-trans-val">0.40</span>
+      </div>
+      <div class="field">
+        <label for="cm-taste-seed">taste seed</label>
+        <input type="number" id="cm-taste-seed" value="23" style="background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 3px 6px; border-radius: 3px;">
+        <button class="tb-btn" id="cm-taste-randomize" style="padding: 3px 8px; font-size: 11px;">Randomize</button>
+      </div>
+
+      <h3 style="margin: 14px 0 6px;">Status (read-only)</h3>
+      <div id="cm-status" style="font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace;">…</div>
+
+      <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5;">
+        Settings stage here. Click <b>Apply</b> to commit. <b>Cancel</b>
+        discards changes.
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="tb-btn" id="cit-modal-cancel">Cancel</button>
+      <button class="tb-btn primary" id="cit-modal-apply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- THREE removed its UMD build (three.min.js) at r161, but 3d-force-graph's
+     UMD bundle still reads THREE off the window global. We import THREE as
+     an ES module via an import map, attach it to window.THREE, THEN inject
+     the 3d-force-graph UMD <script>. Dynamic injection (rather than two
+     static <script> tags) guarantees the UMD runs after THREE is on the
+     window — module scripts are deferred by spec, so a static UMD tag would
+     otherwise execute first and crash.
+     3d-force-graph@1.80 requires THREE >= 0.179 (it uses THREE.Timer). -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.180.0/build/three.module.min.js"
+  }
+}
+</script>
+<script type="module">
+  import * as THREE from "three";
+  window.THREE = THREE;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Failed to load 3d-force-graph"));
+    document.head.appendChild(s);
+  });
+  const main = await import("./src/main.js");
+  main.boot();
+</script>
+
+</body>
+</html>

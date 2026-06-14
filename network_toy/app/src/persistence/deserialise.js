@@ -1,0 +1,74 @@
+// Zip blob → state patch.
+//
+// Reverse of serialise.js: unzips, validates schemaVersion (refuses
+// on mismatch), parses state.json, walks every {__binary, type, length}
+// descriptor and replaces it with a TypedArray view onto the matching
+// arrays/* entry.
+//
+// Returns a state patch suitable for `update(patch)`. Caller is
+// responsible for clearing engineRevision / refreshing UI / etc.
+
+import { unzipSync, strFromU8 } from "fflate";
+import { validateManifest } from "./manifest.js";
+
+const TYPED_ARRAY_CTORS = {
+  Float32Array,
+  Int32Array,
+  Uint8Array,
+  Float64Array,
+};
+
+export async function deserialiseFile(file) {
+  const ab = await file.arrayBuffer();
+  const entries = unzipSync(new Uint8Array(ab));
+
+  if (!entries["manifest.json"]) {
+    throw new Error("[persistence] no manifest.json — not a project file");
+  }
+  const manifest = JSON.parse(strFromU8(entries["manifest.json"]));
+  validateManifest(manifest);   // throws on schema mismatch
+
+  if (!entries["state.json"]) {
+    throw new Error("[persistence] no state.json in archive");
+  }
+  const raw = JSON.parse(strFromU8(entries["state.json"]));
+  const patch = reviveBinaries(raw, entries);
+
+  return { patch, manifest };
+}
+
+// Recursively walk a JSON-deserialised object; whenever we see a
+// {__binary, type, length} descriptor, replace it with the matching
+// TypedArray reconstructed from the zip entry.
+function reviveBinaries(node, entries) {
+  if (node == null) return node;
+  if (typeof node !== "object") return node;
+
+  // Binary descriptor sentinel.
+  if (typeof node.__binary === "string" && node.type) {
+    const bytes = entries[node.__binary];
+    if (!bytes) {
+      throw new Error(`[persistence] missing array entry: ${node.__binary}`);
+    }
+    const Ctor = TYPED_ARRAY_CTORS[node.type];
+    if (!Ctor) {
+      throw new Error(`[persistence] unknown TypedArray type: ${node.type}`);
+    }
+    // unzipSync returns a Uint8Array view onto the file's bytes;
+    // wrap it as the requested TypedArray. Use slice() to copy
+    // because the underlying buffer's alignment isn't guaranteed
+    // for f32/i32 views.
+    const copied = new Uint8Array(bytes);
+    return new Ctor(copied.buffer, copied.byteOffset, node.length);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map(child => reviveBinaries(child, entries));
+  }
+
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    out[k] = reviveBinaries(v, entries);
+  }
+  return out;
+}

@@ -11,8 +11,9 @@ CLAUDE.md
 # Internal design/discussion docs (not part of the shipped docs)
 docs/conflict_resolution_discussion.md
 
-# network-toy viewer: lives in-repo but is its own (untracked) subproject
-network_toy/
+# network-toy viewer lives in-repo at network_toy/ (single repo as of the
+# monorepo merge). Its nested network_toy/.gitignore covers node_modules/,
+# data/, scratch/; real corpus data is covered by the data/** rules below + *.db.
 
 # Generated network-toy snapshot/embedding artifacts (live next to the DBs
 # under data/<project>/; the *_snapshot.db files are covered by *.db below)

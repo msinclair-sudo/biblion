@@ -1,0 +1,9 @@
+{
+  "name": "network-toy",
+  "private": true,
+  "type": "module",
+  "description": "ES-module type marker so the pure pipeline modules under app/src/ can be imported directly by node (eval harnesses, headless metrics). The browser app has no build step and ignores this file; it exists only so `node --input-type=module` / eval/*.mjs resolve app/src/*.js as ESM rather than CommonJS.",
+  "scripts": {
+    "test:unit": "node --test tests/unit/"
+  }
+}

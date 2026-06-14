@@ -1,0 +1,22 @@
+name: network-toy
+channels: [conda-forge]
+dependencies:
+  - python=3.12
+  - nodejs
+  - numpy             # reading / writing .npy embedding artifacts (literture-network/)
+  - pip
+  - pytest              # test runner (tests/ are Playwright-driven pytest)
+  - pip:
+      # Pinned: an unpinned upgrade bumps the REQUIRED browser build and
+      # strands the cached one ("Executable doesn't exist…"). After creating
+      # or updating this env, install the browser once:
+      #     playwright install chromium
+      # (browser binaries live in ~/.cache/ms-playwright, outside conda, so
+      #  they can't be listed here — pinning the package keeps them valid).
+      - playwright==1.60.0
+      # SPECTER2 embedding generation (tools/ingest/embed_specter2.py)
+      - torch              # CPU build by default; for CUDA install the matching
+                           #   wheel manually, e.g. --index-url download.pytorch.org/whl/cu121
+      - transformers
+      - adapters           # SPECTER2 proximity adapter (AutoAdapterModel)
+      - tqdm               # embed progress bar
