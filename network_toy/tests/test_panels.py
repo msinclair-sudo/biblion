@@ -6,7 +6,7 @@
   - fusion-comparison (+ NMI + comparePartitions helpers)
   - dim-sweep (+ heatmap + bars chart helpers + sweep runner)
 
-Real-data (BFS-5000) page by default. Toy-only paths use toy_page.
+Real-data (BFS-5000) page by default.
 """
 
 import pytest

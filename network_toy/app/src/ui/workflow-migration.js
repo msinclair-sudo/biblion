@@ -16,16 +16,13 @@
 // What the migration emits:
 //
 //   - **Always** (the universal spine):
-//     `data → dimred → clustering`. Every project has these in some
-//     form — even an empty toy boot has them as freshly-regenerated
-//     defaults.
+//     `data → dimred → clustering`. Every project with a loaded source
+//     has these in some form.
 //
-//   - **Toy-only branch** (`citations → layout → alignment → blend`)
-//     appended off the clustering card. These are the taste-network
-//     simulation output and only exist when the corresponding state
-//     slots are populated (toy mode always, real mode only when the
-//     user explicitly imports citation edges + applies citation
-//     layout).
+//   - **Citations branch** (`citations → layout → alignment → blend`)
+//     appended off the clustering card. These only exist when the
+//     corresponding state slots are populated — i.e. when the user
+//     imports citation edges + applies citation layout.
 //
 //   - **Saved ValidationRuns** as auxiliary children of their nearest
 //     matching ancestor (e.g. a `type: "optimise"` run attaches under
@@ -84,14 +81,12 @@ export function inferBaselineTree(state) {
   if (!state || !state.genResult) return [];
 
   const plan = [];
-  const dataSourceId = (state.dataSource && state.dataSource.mode) || "toy";
+  const dataSourceId = (state.dataSource && state.dataSource.mode) || "real";
   const dataSourceCfg = (state.dataSource && state.dataSource.configs && state.dataSource.configs[dataSourceId]) || {};
 
   // ── data card (root) — always emitted when genResult exists.
   const nNodes = state.genResult.nodes ? state.genResult.nodes.length : 0;
-  const dataLabel = dataSourceId === "real"
-    ? `Real · ${dataSourceCfg.subset || "(unknown subset)"} (n=${nNodes})`
-    : `Toy · n=${nNodes}`;
+  const dataLabel = `Real · ${dataSourceCfg.subset || "(unknown subset)"} (n=${nNodes})`;
   plan.push({
     ref:       "data",
     type:      "data",
@@ -153,11 +148,10 @@ export function inferBaselineTree(state) {
     });
   }
 
-  // ── toy-only branch (or real-with-imported-citations).
+  // ── citations branch (real data with imported edges).
   // Conditional: only when the corresponding state slot carries a
   // result. The presence/absence of state.citationResult is the
-  // authoritative signal — real-mode-without-imports never populates
-  // it; toy mode always does (via the taste-network).
+  // authoritative signal — real-mode-without-imports never populates it.
   if (state.citationResult) {
     const citationsCfg = lp.citations || {};
     plan.push({

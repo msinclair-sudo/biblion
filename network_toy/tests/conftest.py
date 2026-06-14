@@ -20,9 +20,6 @@ Fixtures:
     page                (function) — yields bfs5000_page after
                                      resetting workflow / validationRuns
                                      / jobs. The default fixture.
-    toy_page            (function) — separate page in toy mode for
-                                     tests that explicitly need the
-                                     taste-network citation path.
     clean_page          (function) — separate page with NO data load;
                                      for pure-module tests (queue.js,
                                      workflow.js CRUD) that don't
@@ -311,44 +308,13 @@ def page(bfs5000_page):
 
 
 @pytest.fixture
-def toy_page(playwright_browser):
-    """Separate page in toy mode (n=400 Gaussian-mixture). Used by tests
-    that specifically need the taste-network citation generation path,
-    Bayes-optimal ARI ceiling, or other toy-only behaviour.
-
-    Boots fresh per test (cheap — no ingest).
-    """
-    ctx, page = _boot_page(playwright_browser)
-    # UI #2: boot no longer auto-runs the pipeline, so toy-mode tests
-    # trigger it explicitly. regenerate() runs the full cascade; the
-    # chart's migration retry may build a partial (data-only) tree from
-    # the transient mid-cascade state, so we clear it and migrate once
-    # from the COMPLETE post-cascade state to get the full
-    # data→dimred→clustering(→citations) baseline tree.
-    page.evaluate(
-        '''async () => {
-            const engine = await import("/app/src/ui/engine.js");
-            await engine.regenerate();
-            const wf  = await import("/app/src/ui/workflow.js");
-            const mig = await import("/app/src/ui/workflow-migration.js");
-            wf.clearWorkflow();
-            mig.migrateLegacyToWorkflowIfNeeded();
-        }'''
-    )
-    yield page
-    errs = relevant_errors(page)
-    assert not errs, f"console errors during toy_page test: {errs}"
-    ctx.close()
-
-
-@pytest.fixture
 def clean_page(playwright_browser):
     """Page with NO data loaded. For pure-module tests (queue.js,
     workflow.js CRUD) that don't need genResult / dimredResult / etc.
 
-    Boots fresh per test (cheap — toy boot still happens by default,
-    but tests using this fixture explicitly clear state.workflow +
-    don't depend on the legacy slots).
+    Boots fresh per test (cheap — no ingest; the app boots with no data
+    and tests using this fixture explicitly clear state.workflow + don't
+    depend on the legacy slots).
     """
     ctx, page = _boot_page(playwright_browser)
     page.evaluate(

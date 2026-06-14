@@ -89,16 +89,16 @@ def test_parallel_distance_matches_sync(clean_page):
     assert out["maxDiff"] < 1e-4
 
 
-# ── Engine lane (toy, fast) ─────────────────────────────────────────────
-def test_multilevel_sweep_then_commit_toy(toy_page):
+# ── Engine lane (real data) ─────────────────────────────────────────────
+def test_multilevel_sweep_then_commit(page):
     """The produce/picker split: recomputeMultiLevelSweep scores every
     candidate (state.multiLevelSweep, no clusterLevels yet); then
     commitMultiLevelLayers(pickedCounts) builds the coarse→fine ladder in
     state.clusterLevels with bridge analysis."""
-    out = toy_page.evaluate(r'''async () => {
+    out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const st = await import("/app/src/ui/state.js");
-        // toy_page pre-runs data→dimred→clustering, so clusterLevels is
+        // page pre-runs data→dimred→clustering, so clusterLevels is
         // already populated. Clear it so we can prove the SWEEP alone commits
         // nothing (it must not create clusterLevels — only the picker does).
         st.update({ clusterLevels: null, clusterResult: null });
@@ -183,20 +183,23 @@ def test_multilevel_sweep_then_commit_toy(toy_page):
     assert out["bppUpperOnly"] is True
 
 
-def test_multilevel_producer_picker_cards_toy(toy_page):
+def test_multilevel_producer_picker_cards(page):
     """The produce/picker card split: the multiLevel descriptor creates a
     SWEEP card under the dimred ancestor whose result holds the scored sweep
     (multiLevelSweep, no clusterLevels). A picker card auto-spawns under it;
     picking granularities + applyChange commits clusterLevels into the picker
     card's result, and selecting the picker projects them into legacy state."""
-    out = toy_page.evaluate(r'''async () => {
+    out = page.evaluate(r'''async () => {
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
         const wf = await import("/app/src/ui/workflow.js");
+        const mig = await import("/app/src/ui/workflow-migration.js");
         const proj = await import("/app/src/ui/workflow-projection.js");
         const st = await import("/app/src/ui/state.js");
 
-        // ensure a dimred card is in the selected lineage (toy_page yields
-        // data→dimred→clustering; select the clustering leaf).
+        // `page` resets the workflow tree but keeps the real-data cascade
+        // loaded; rebuild the data→dimred→clustering spine, then select
+        // the clustering leaf.
+        mig.migrateLegacyToWorkflowIfNeeded();
         const clust = wf.listSteps().filter(s => s.type === "clustering").pop();
         wf.selectStep(clust.id);
 
@@ -254,18 +257,21 @@ def test_multilevel_producer_picker_cards_toy(toy_page):
     assert out["projectedSweep"] is True            # producer ancestor projects the curve
 
 
-def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(toy_page):
+def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(page):
     """Pass 1c + Pass 2a: after the picker commits a ladder, bridgeAnalysis
     is computed inline (no separate card — Pass 2a removed it) and surfaced
     on state.bridgeAnalysis. crossClusterCitations auto-spawns ONLY when
     citation edges are present in live state (gated to avoid a perma-failed
-    card on toy data). Toggling state.rawCitationEdges between two commits
+    card with no edges). Toggling state.rawCitationEdges between two commits
     proves the gate works."""
-    out = toy_page.evaluate(r'''async () => {
+    out = page.evaluate(r'''async () => {
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
         const wf = await import("/app/src/ui/workflow.js");
+        const mig = await import("/app/src/ui/workflow-migration.js");
         const st = await import("/app/src/ui/state.js");
 
+        // `page` resets the workflow tree; rebuild the spine first.
+        mig.migrateLegacyToWorkflowIfNeeded();
         // Build producer → picker.
         const clust = wf.listSteps().filter(s => s.type === "clustering").pop();
         wf.selectStep(clust.id);
@@ -283,7 +289,7 @@ def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(toy_page):
         const picks = [...new Set(cands.map(c => c.count).sort((a,b)=>a-b))].slice(0, 2);
         const pdesc = ld.getLayerDescriptor("multiLevelPicker");
 
-        // ── Phase 1: no edges (toy default) — picker commits + bridges land
+        // ── Phase 1: no edges — picker commits + bridges land
         //    on state.bridgeAnalysis, but crossCluster is gated out.
         const edgesBefore = st.getState().rawCitationEdges;
         st.update({ rawCitationEdges: null });
@@ -331,11 +337,11 @@ def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(toy_page):
     assert out["phase2_xccStatus"] == "done"
 
 
-def test_bridge_panel_sections_and_tau(toy_page):
+def test_bridge_panel_sections_and_tau(page):
     """After a multi-level run, the bridge panel renders Encapsulated +
     Bridges sections that together account for every fine cluster, and the
     τ slider re-buckets without an engine recompute."""
-    out = toy_page.evaluate(r'''async () => {
+    out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const state = await import("/app/src/ui/state.js");
         // Sweep, then commit the two coarsest granularities so bridge

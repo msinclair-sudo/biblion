@@ -1,10 +1,8 @@
 // Optimise tab — sweeps clustering algorithms × params and ranks
 // configs by a chosen scorer.
 //
-// Auto-picks the scorer based on data-source mode:
-//   * toy  → ariScorer(originId)  (ground-truth available)
-//   * real → stabilityScorer({B}) (Hennig fraction-stable)
-// User can override via the "Ranked by" dropdown.
+// Defaults to cluster richness (count × reproducibility). User can
+// override via the "Ranked by" dropdown.
 //
 // Per-row Apply rewrites layerParams.clustering with the chosen
 // (algoId, params) — single level, scope=global — and reclusters.
@@ -17,7 +15,7 @@ import { createStep, listSteps } from "../../workflow.js";
 import { listAlgorithms } from "../../../clustering-registry.js";
 import { sweepAcrossAlgorithms, runTargetRangeSweep } from "../../../eval/sweep.js";
 import {
-  ariScorer, stabilityScorer,
+  stabilityScorer,
   numClustersScorer, clusterRichnessScorer,
 } from "../../../eval/scorers.js";
 import { SCORE_VERSION } from "../../../eval/bootstrap.js";
@@ -42,7 +40,7 @@ export function buildOptimiseTab(host, opts = {}) {
   // ── notice ──────────────────────────────────────────────────────
   const notice = document.createElement("div");
   notice.className = "cm-tab-notice";
-  notice.textContent = "Sweeps algorithm × parameter combinations and ranks by how stable (or how accurate, in toy mode) the resulting clusters are.";
+  notice.textContent = "Sweeps algorithm × parameter combinations and ranks by how stable the resulting clusters are.";
   host.appendChild(notice);
 
   // ── settings ────────────────────────────────────────────────────
@@ -79,9 +77,9 @@ export function buildOptimiseTab(host, opts = {}) {
   settings.appendChild(algosRow);
 
   // B (bootstraps) — only meaningful for bootstrap-based scorers
-  // (stability + richness). Ignored by ARI and numClusters.
+  // (stability + richness). Ignored by numClusters.
   let B = 10;
-  let scorerId = "auto";
+  let scorerId = "richness";
   // §6.18.9 B8 — how the bootstrap treats -1 (noise) labels.
   //   "exclude"   — drop -1 from ref + cand before matching (default;
   //                 reproducibility scored only on the non-noise portion)
@@ -313,29 +311,19 @@ export function buildOptimiseTab(host, opts = {}) {
   scorerRow.appendChild(scorerLabel);
   const scorerSelect = document.createElement("select");
 
-  // §6.18.10 B11 — drop "Automatic" in real-data mode; force an
-  // explicit pick. Toy mode keeps Automatic since ARI vs ground
-  // truth is the obvious answer. "Cluster richness" relabelled to
-  // surface the trade-off ("Cluster count × reproducibility").
-  // The dropdown is rebuilt when the data-source mode changes (via
-  // the subscribe at the bottom of buildOptimiseTab) so toggling
-  // toy ↔ real updates the available options without re-opening
-  // the modal.
-  const isRealMode = () => {
-    const ds = getState().dataSource;
-    return ds && ds.mode === "real";
-  };
+  // "Cluster richness" relabelled to surface the trade-off
+  // ("Cluster count × reproducibility"). The dropdown is rebuilt when
+  // the data-source mode changes (via the subscribe at the bottom of
+  // buildOptimiseTab) so a source switch refreshes it without
+  // re-opening the modal.
   function buildScorerOptions() {
     scorerSelect.innerHTML = "";
     const opts = [];
-    if (!isRealMode()) opts.push({ value: "auto", label: "Automatic (ARI vs ground truth)" });
-    opts.push({ value: "ari",         label: "Match to known groups (ARI)" });
     opts.push({ value: "richness",    label: "Cluster count × reproducibility" });
     opts.push({ value: "numClusters", label: "Number of clusters" });
     opts.push({ value: "stability",   label: "Cluster reproducibility (mean Jaccard)" });
-    // If the previously-selected scorer is no longer available (e.g.
-    // user picked "auto" then switched to real mode), fall back to
-    // "richness" — the closest equivalent default for real data.
+    // If the previously-selected scorer is no longer available, fall
+    // back to "richness" — the default for real data.
     if (!opts.some(o => o.value === scorerId)) scorerId = "richness";
     for (const opt of opts) {
       const o = document.createElement("option");
@@ -350,11 +338,10 @@ export function buildOptimiseTab(host, opts = {}) {
   const scorerHint = document.createElement("div");
   scorerHint.className = "cm-tab-slider-hint cm-tab-select-hint";
   scorerHint.textContent =
-    "Match to known groups compares your clustering against ground-truth labels — only works when those labels exist (e.g. the toy generator's origins; shown alongside the Bayes-optimal ceiling). " +
     "Cluster count × reproducibility multiplies cluster count by mean Jaccard — balanced across both extremes (one mega-cluster vs many noise-fragments). " +
     "Number of clusters ranks purely by how many groups the algorithm produced (informative when you trust the algorithm and want to push toward more clusters; doesn't filter out noise-fragmentation). " +
     "Cluster reproducibility re-clusters resampled data and asks how similar the partitions are — beware it rewards trivially-coarse partitions (a 1-cluster solution scores ~1.0). " +
-    "In real-data mode (no ground truth) we don't auto-pick because each scorer answers a different question; pick the one matching your research aim.";
+    "Each scorer answers a different question; pick the one matching your research aim.";
   scorerRow.appendChild(scorerHint);
   settings.appendChild(scorerRow);
 
@@ -417,11 +404,10 @@ export function buildOptimiseTab(host, opts = {}) {
       return;
     }
 
-    // Resolve the scorer (validate ARI availability before enqueue).
+    // Resolve the scorer.
     let scorer = null;
     if (sweepMode !== "target") {
       scorer = pickScorer(scorerId, s, B, noiseHandling);
-      if (!scorer) { status.textContent = "ARI requires toy mode (no ground truth in real data)."; return; }
     }
 
     // ── Snapshot. Everything the sweep reads, captured now. ───────────
@@ -442,7 +428,7 @@ export function buildOptimiseTab(host, opts = {}) {
       targetBoot,
       sweepAgainst,
       // For the saved ValidationRun's inputs snapshot.
-      dataSourceMode:       (s.dataSource && s.dataSource.mode) || "toy",
+      dataSourceMode:       (s.dataSource && s.dataSource.mode) || "real",
       dataSourceConfig:     (s.dataSource && s.dataSource.configs && s.dataSource.configs[s.dataSource.mode]) || {},
       layerParamsSnapshot:  s.layerParams,
       scorerId, sweepMode_str: sweepMode,
@@ -457,9 +443,8 @@ export function buildOptimiseTab(host, opts = {}) {
     const modeTag = snapshot.sweepMode === "target"
       ? `target [${snapshot.targetMin}, ${snapshot.targetMax}]`
       : snapshot.sweepMode;
-    const subsetTag = snapshot.dataSourceMode === "real"
-      ? (snapshot.dataSourceConfig.subset || "real")
-      : `toy n=${snapshot.genResult.nodes.length}`;
+    const subsetTag = snapshot.dataSourceConfig.subset
+      || `n=${snapshot.genResult.nodes.length}`;
     const label = `Optimise · ${algoTag} · ${modeTag} · ${subsetTag}`;
 
     // Phase 2 slice 2.4 — create a tree step for this sweep as a child
@@ -687,38 +672,16 @@ function persistSweepOutcome(outcome, snapshot, label) {
   }
 }
 
-// Pick the active scorer based on user choice + data-source mode.
-// Returns null when the chosen scorer is unsupported (e.g. ARI under
-// real mode where there's no ground truth).
+// Pick the active scorer based on user choice. Defaults to cluster
+// richness (balanced metric — count × reproducibility — chosen after
+// the stability-alone scorer over-rewarded trivial coarse partitions).
+// Returns null for unknown ids.
 function pickScorer(scorerId, state, B, noiseHandling) {
-  const isReal = state.dataSource && state.dataSource.mode === "real";
   const bootOpts = { B, noiseHandling };
-  if (scorerId === "auto") {
-    // Toy → ARI (ground truth available). Real → cluster richness
-    // (balanced metric — count × reproducibility — chosen as default
-    // after the stability-alone scorer over-rewarded trivial coarse
-    // partitions).
-    return isReal ? clusterRichnessScorer(bootOpts) : ariScorer(extractGroundTruth(state));
-  }
   if (scorerId === "richness")    return clusterRichnessScorer(bootOpts);
   if (scorerId === "numClusters") return numClustersScorer();
   if (scorerId === "stability")   return stabilityScorer(bootOpts);
-  if (scorerId === "ari") {
-    if (isReal) return null;
-    return ariScorer(extractGroundTruth(state));
-  }
-  return null;
-}
-
-function extractGroundTruth(state) {
-  const nodes = state.genResult && state.genResult.nodes;
-  if (!nodes) return null;
-  const gt = new Int32Array(nodes.length);
-  for (let i = 0; i < nodes.length; i++) {
-    const oid = nodes[i].originId;
-    gt[i] = (oid == null) ? -1 : oid;
-  }
-  return gt;
+  return clusterRichnessScorer(bootOpts);
 }
 
 // renderResults + scorer column logic + cell formatters live in

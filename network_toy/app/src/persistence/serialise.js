@@ -41,10 +41,9 @@ const PASS_THROUGH_KEYS = [
 const EXCLUDED_KEYS = new Set([
   "engineRevision",
   // genResult, _basePos, embedding, dimredResult, clusterLevels,
-  // clusterResult, bridgeAnalysis, neighbourhoodResult, tasteResult,
-  // citationResult, citationLayout, alignedCitationLayout,
-  // alignmentCorrelation, evalResults, projectName — all handled
-  // explicitly below.
+  // clusterResult, bridgeAnalysis, citationResult, citationLayout,
+  // alignedCitationLayout, alignmentCorrelation, evalResults,
+  // projectName — all handled explicitly below.
 ]);
 
 export function serialiseState(state) {
@@ -157,9 +156,7 @@ export function serialiseState(state) {
     };
   }
 
-  // 8. Toy citation pipeline outputs (only present in toy mode).
-  if (state.neighbourhoodResult) out.neighbourhoodResult = state.neighbourhoodResult;
-  if (state.tasteResult)         out.tasteResult         = state.tasteResult;
+  // 8. Citation pipeline output (Layer 3).
   if (state.citationResult)      out.citationResult      = state.citationResult;
 
   // 9. Citation layout / alignment.

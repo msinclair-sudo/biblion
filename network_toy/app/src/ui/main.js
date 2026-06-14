@@ -8,8 +8,6 @@
 // not connected in this slice — see doc/ui.md §9 for the build phasing.
 // Modules below render placeholder content where the engine isn't yet
 // wired; the layout shell is fully functional.
-//
-// Legacy UI is preserved at app/legacy.html for comparison.
 
 import { mountTopbar }         from "./topbar.js";
 import { mountDataPanel }      from "./data-panel.js";

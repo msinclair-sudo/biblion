@@ -3,15 +3,15 @@ the WebGL viewer (which rendered a blank canvas on the first switch back and
 leaked GL contexts). The panel system detaches/re-attaches its DOM instead,
 and only truly destroys it when the tab is closed.
 
-Uses `toy_page` — a booted app (panel system mounted) with toy data so the
-3D viewer has a canvas.
+Uses `page` — a booted app (panel system mounted) with real data + a
+3-d viz reduction so the 3D viewer has a canvas.
 """
 
 
-def test_viewer_kept_alive_across_tab_switch(toy_page):
+def test_viewer_kept_alive_across_tab_switch(page):
     """Switching away from and back to the 3D viewer returns the SAME canvas
     element (kept alive), not a freshly-built one."""
-    out = toy_page.evaluate(
+    out = page.evaluate(
         '''async () => {
             const st = await import("/app/src/ui/state.js");
             // mark the live viewer canvas
@@ -42,9 +42,9 @@ def test_viewer_kept_alive_across_tab_switch(toy_page):
     assert out["viewerUiBack"] is True
 
 
-def test_viewer_destroyed_on_tab_close(toy_page):
+def test_viewer_destroyed_on_tab_close(page):
     """Closing the viewer tab (not just switching) DOES tear it down."""
-    out = toy_page.evaluate(
+    out = page.evaluate(
         '''async () => {
             const st = await import("/app/src/ui/state.js");
             const c0 = [...document.querySelectorAll("canvas")]

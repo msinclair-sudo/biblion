@@ -110,7 +110,7 @@ export function buildBootstrapJob({ parentClusteringStepId, settings }) {
     // validationRuns in favour of cards.
     const algoTag  = algoId;
     const ds       = live.dataSource;
-    const mode     = (ds && ds.mode) || "toy";
+    const mode     = (ds && ds.mode) || "real";
     const cfg      = (ds && ds.configs && ds.configs[mode]) || {};
     const subsetTag = mode === "real"
       ? (cfg.subset || "real")

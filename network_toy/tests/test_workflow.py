@@ -5,7 +5,7 @@ All tests share the bfs5000_page session. CRUD tests don't read
 genResult / dimredResult / etc., so they reuse the session context
 (workflow + jobs + validationRuns are reset between tests by the
 `page` fixture). The migration tests verify spine shape on the
-real-data fixture; toy_page handles the toy-mode citation branch.
+real-data fixture, including the imported-edges citation branch.
 """
 
 
@@ -45,7 +45,7 @@ def test_create_step_validation(page):
             try { w.createStep({ type: "data", label: "x", refIds: "no" }); out.badRefs = false; }
             catch (e) { out.badRefs = e.message.includes("refIds must be an array"); }
             // root
-            const rootId = w.createStep({ type: "data", label: "n=400 toy" });
+            const rootId = w.createStep({ type: "data", label: "n=400" });
             out.rootSet = w.getRootStep().id === rootId;
             // second root attempt
             try { w.createStep({ type: "data", label: "another" }); out.twoRoots = false; }
@@ -260,23 +260,6 @@ def test_migration_bfs5000_real_mode(page):
     assert "Real · dev_subset_bfs_5000" in out["rootLabel"]
 
 
-def test_migration_toy_mode_includes_citations(toy_page):
-    """Toy mode: migration emits data → dimred → clustering → citations
-    because the taste-network populates state.citationResult at boot."""
-    out = toy_page.evaluate(
-        '''async () => {
-            const w   = await import("/app/src/ui/workflow.js");
-            const mig = await import("/app/src/ui/workflow-migration.js");
-            w.clearWorkflow();
-            mig.migrateLegacyToWorkflowIfNeeded();
-            return w.listSteps().map(s => s.type);
-        }'''
-    )
-    # Toy boot: data → dimred → clustering → citations (taste-network).
-    # Citation layout / alignment / blend are opt-in (§6.16); not emitted.
-    assert out[:4] == ["data", "dimred", "clustering", "citations"]
-
-
 def test_migration_empty_plan_when_no_genResult():
     """inferBaselineTree on degenerate input returns []. Doesn't need
     a page — the planner is pure JS, but we still need to import it.
@@ -314,7 +297,7 @@ def test_validation_runs_attach_to_right_anchor(page):
             const mig = await import("/app/src/ui/workflow-migration.js");
             w.clearWorkflow();
             const fakeState = {
-                dataSource: { mode: "toy", configs: { toy: {} } },
+                dataSource: { mode: "real", configs: { real: { subset: "test" } } },
                 genResult:  { nodes: new Array(100).fill({}), origins: [] },
                 layerParams: {
                     dimred: {

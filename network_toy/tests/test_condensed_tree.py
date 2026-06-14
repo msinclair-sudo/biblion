@@ -7,35 +7,10 @@ clone-safe projection riding on `clusterResult.condensedTree`. These tests
 assert it's present, well-formed, survives a save/load round-trip, and is
 faithful to the shipped flat labels.
 
-`toy_page` (n=400 HDBSCAN) is the fast default; one `@slow` test confirms
-the same at real-data scale (n=5000).
+The real-data `page` fixture (n=5000 HDBSCAN) backs these `@slow` tests.
 """
 
 import pytest
-
-
-# Toy mode defaults to mutual-kNN clustering (no stability tree); the
-# condensed tree is HDBSCAN-only. Switch the toy tree to HDBSCAN and
-# recluster before inspecting. (The real-data `page` fixture already runs
-# HDBSCAN, so the @slow test needs no prelude.)
-_APPLY_HDBSCAN_JS = r'''async () => {
-    const state  = await import("/app/src/ui/state.js");
-    const engine = await import("/app/src/ui/engine.js");
-    const { defaultHdbscanParams } = await import("/app/src/clustering-hdbscan.js");
-    const cur = state.getState();
-    state.update({
-        layerParams: {
-            ...cur.layerParams,
-            clustering: {
-                method: "hdbscan",
-                levels: [{ uid: "ct-test", params: defaultHdbscanParams(), scope: "global" }],
-            },
-        },
-    });
-    await engine.recluster();
-    const s = state.getState();
-    return s.clusterLevels[0].clusterResult.method;
-}'''
 
 
 # In-page helper: pull a structural + correctness summary of the condensed
@@ -148,22 +123,13 @@ def _assert_wellformed(out):
     assert out["match"] == out["stable"]
 
 
-def test_condensed_tree_surfaced_toy(toy_page):
-    """The condensed tree rides on the L0 clusterResult after a toy
-    HDBSCAN run, is well-formed, and reproduces the flat labels."""
-    assert toy_page.evaluate(_APPLY_HDBSCAN_JS) == "hdbscan"
-    out = toy_page.evaluate(_SUMMARY_JS)
-    _assert_wellformed(out)
-    assert out["n"] == 400
-
-
-def test_condensed_tree_survives_save_load(toy_page):
+@pytest.mark.slow
+def test_condensed_tree_survives_save_load(page):
     """The tree must round-trip through the .zip persistence layer — the
     multi-level work loads a saved project and picks up where it left off,
     so dropping the tree on save would silently break MLC-1+ after a
-    reload."""
-    assert toy_page.evaluate(_APPLY_HDBSCAN_JS) == "hdbscan"
-    out = toy_page.evaluate(r'''async () => {
+    reload. The real-data `page` fixture already runs HDBSCAN."""
+    out = page.evaluate(r'''async () => {
         const st  = await import("/app/src/ui/state.js");
         const ser = await import("/app/src/persistence/serialise.js");
         const des = await import("/app/src/persistence/deserialise.js");
@@ -205,7 +171,7 @@ def test_condensed_tree_survives_save_load(toy_page):
     }''')
     assert out["beforeNodes"] > 0
     assert out["afterNodes"] == out["beforeNodes"]
-    assert out["afterN"] == 400
+    assert out["afterN"] == 5000
     assert out["afterRoot"] == 0
     assert out["identical"] is True
     assert out["valuesOk"] is True

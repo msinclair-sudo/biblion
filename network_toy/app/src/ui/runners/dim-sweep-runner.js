@@ -69,7 +69,7 @@ export function buildDimSweepJob({ parentDimredStepId, settings }) {
     const verdict   = dimSweepVerdict(sweep, pair[0], pair[1], threshold);
 
     const ds   = live.dataSource;
-    const mode = (ds && ds.mode) || "toy";
+    const mode = (ds && ds.mode) || "real";
     const cfg  = (ds && ds.configs && ds.configs[mode]) || {};
     const subsetTag = mode === "real"
       ? (cfg.subset || "real")

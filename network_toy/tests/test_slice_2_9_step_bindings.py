@@ -3,27 +3,34 @@ migrated to step-bound queue jobs.
 
 Compact suite: one test per sub-slice, each exercising the integration
 point that the migration changed (not the underlying analysis — those
-have their own tests). Uses `toy_page` for bootstrap (cheapest data
-fixture with a valid clustering ancestor) and `clean_page` for the
+have their own tests). Uses `page` for bootstrap + dim-sweep (real-data
+fixture with a valid dimred/clustering ancestor) and `clean_page` for the
 save/load mechanic (no data needed).
 """
 
 import pytest
 
 
-def test_bootstrap_sidecar_runs_with_clustering(toy_page):
+def test_bootstrap_sidecar_runs_with_clustering(page):
     """cards.md Pass 2b — bootstrap is no longer a standalone card. It's a
     sidecar to single-level clustering: knobs live in the clustering modal,
     engine.recluster runs bootstrap after HDBSCAN, the result lands on
     state.bootstrapStability for the panel to render. There must be NO
     bootstrapStability card on the tree (the type was removed)."""
-    out = toy_page.evaluate(
+    out = page.evaluate(
         '''async () => {
             const ld = await import("/app/src/ui/modals/layer-descriptors.js");
             const st = await import("/app/src/ui/state.js");
             const wf = await import("/app/src/ui/workflow.js");
+            const mig = await import("/app/src/ui/workflow-migration.js");
 
-            // Clear any prior bootstrap (toy_page may carry one from a
+            // `page` resets the workflow tree; rebuild the spine so the
+            // clustering descriptor has a clustering ancestor to re-apply.
+            mig.migrateLegacyToWorkflowIfNeeded();
+            const clust = wf.listSteps().filter(s => s.type === "clustering").pop();
+            if (clust) wf.selectStep(clust.id);
+
+            // Clear any prior bootstrap (page may carry one from a
             // previous test) so we can assert this clustering produced it.
             st.update({ bootstrapStability: null });
 
@@ -73,17 +80,25 @@ def test_bootstrap_sidecar_runs_with_clustering(toy_page):
     assert out["clusteringStored_B"] == 5
 
 
-def test_dim_sweep_descriptor_creates_card_under_dimred(toy_page):
+def test_dim_sweep_descriptor_creates_card_under_dimred(page):
     """Phase 2 slice 2.9.b — running a dim-sweep forks a dimSweep card
     under the selected dimred ancestor and persists the verdict.
 
     Uses a 2-dim × 1-seed sweep (the minimum runDimSweep accepts) for
     fast wall time on the slow CI PC.
     """
-    out = toy_page.evaluate(
+    out = page.evaluate(
         '''async () => {
             const ld = await import("/app/src/ui/modals/layer-descriptors.js");
             const st = await import("/app/src/ui/state.js");
+            const wf = await import("/app/src/ui/workflow.js");
+            const mig = await import("/app/src/ui/workflow-migration.js");
+
+            // `page` resets the workflow tree; rebuild the spine so the
+            // dim-sweep descriptor has a dimred ancestor to fork under.
+            mig.migrateLegacyToWorkflowIfNeeded();
+            const dimred = wf.listSteps().filter(s => s.type === "dimred").pop();
+            if (dimred) wf.selectStep(dimred.id);
 
             const desc = ld.getLayerDescriptor("dimSweep");
             const active = desc.getActive();

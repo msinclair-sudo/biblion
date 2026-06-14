@@ -8,46 +8,15 @@
 //     numClusters: int,    // surfaced in the results table
 //     extra?:    object,   // metric-specific detail (e.g. perCluster) }
 //
-// Two scorers today:
-//   * ariScorer(groundTruth) — toy mode; ranks by Adjusted Rand Index
-//     against the generator's originId.
+// Scorers today:
 //   * stabilityScorer(opts) — data-source-agnostic; runs bootstrap-
 //     Jaccard and ranks by Hennig fraction-stable.
+//   * numClustersScorer / clusterRichnessScorer — count-based metrics.
 //
 // The scorer signature is uniform so the sweep doesn't care which
 // metric is active.
 
-import { adjustedRandIndex } from "./ari.js";
 import { bootstrapStability } from "./bootstrap.js";
-
-// Toy-mode scorer. groundTruth is an Int32Array(n) of originId values.
-// label reads as a compact noun phrase (used in status lines like
-// "top 5 by match score") — the dropdown UI carries the longer
-// descriptive labels.
-export function ariScorer(groundTruth) {
-  return {
-    id:    "ari",
-    label: "match score",
-    isAsync: false,
-    score(genResult, dimredResult, clusterResult, _algo, _params) {
-      const ari = adjustedRandIndex(clusterResult.nodeCluster, groundTruth);
-      // §6.18.10 B5 — surface the Bayes-optimal ARI ceiling (set on
-      // genResult by the toy datasource) so the user can read the
-      // achieved ARI as a fraction of optimal. The bayesOptimalAri
-      // is constant across the sweep — same data, same generative
-      // model — so this is essentially a free annotation per row.
-      const ceiling = (genResult && Number.isFinite(genResult.bayesOptimalAri))
-        ? genResult.bayesOptimalAri
-        : NaN;
-      return {
-        primary:     Number.isFinite(ari) ? ari : -Infinity,
-        secondary:   clusterResult.clusters.length,
-        numClusters: clusterResult.clusters.length,
-        extra:       { ariCeiling: ceiling },
-      };
-    },
-  };
-}
 
 // Real-data-friendly scorer. Runs B bootstrap iterations and ranks by
 // the cluster-size-weighted mean Jaccard (meanJaccard_macro) per

@@ -125,14 +125,7 @@ function buildReceipt(state) {
   if (ds) {
     const mode = ds.mode || "?";
     const conf = (ds.configs && ds.configs[mode]) || {};
-    if (mode === "toy") {
-      const gen = state.genResult;
-      const n = gen ? gen.nodes.length : "?";
-      const origins = conf.origins != null ? conf.origins : "?";
-      const seed    = conf.seed    != null ? conf.seed    : "?";
-      const spread  = conf.spread  != null ? conf.spread  : "?";
-      lines.push(`Data: toy Gaussian-mixture, n=${n}, ${origins} origins, spread=${spread}, seed=${seed}.`);
-    } else if (mode === "real") {
+    if (mode === "real") {
       const subset = conf.subset || "(unknown subset)";
       const gen = state.genResult;
       const n = gen ? gen.nodes.length : "?";
@@ -207,13 +200,6 @@ function buildReceipt(state) {
   } else {
     lines.push("Latest sweep: none in this session.");
     lines.push("");
-  }
-
-  // ── Bayes-optimal ARI ceiling (toy only). ──
-  const gen = state.genResult;
-  if (gen && Number.isFinite(gen.bayesOptimalAri)) {
-    lines.push(`Bayes-optimal ARI ceiling for this mixture: ${gen.bayesOptimalAri.toFixed(3)}.`);
-    lines.push(`  (Achieved ARI should be read as a fraction of optimal, not as an absolute.)`);
   }
 
   // ── Closing pointer. ──

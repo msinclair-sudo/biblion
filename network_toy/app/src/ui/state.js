@@ -20,17 +20,8 @@ const state = {
   // the data panel owns them UX-wise; the engine plumbs them into
   // Layer 3 params on reingest.
   dataSource: {
-    mode: "toy",           // "toy" | "real"; mirrors activeAlgorithm.dataSource
+    mode: "real",          // "real"; mirrors activeAlgorithm.dataSource
     configs: {
-      toy: {
-        seed:      42,
-        nodeCount: 400,
-        origins:   6,
-        spread:    1.0,
-        density:   0.3,
-        intraRate: 0.5,
-        crossRate: 0.2,
-      },
       real: {
         subset: "dev_subset_1000",
       },
@@ -59,9 +50,9 @@ const state = {
                                   //   that can supply edges directly (today: real-data via
                                   //   produceReal()). Flat number[] of length 2|E| in [src, dst, src,
                                   //   dst, …] form. Read-only outside the data-source layer —
-                                  //   consumers: dimred fusion stage, Layer 3 imported-edges. Null in
-                                  //   toy mode (taste-network generates citations later in the
-                                  //   pipeline; fusion stage falls through as identity).
+                                  //   consumers: dimred fusion stage, Layer 3 imported-edges. Null
+                                  //   when the source supplies no edges (fusion stage falls through
+                                  //   as identity).
   dimredResult:          null,    // Layer 1.5 output: {method, params, n, d, data:Float32Array(n*d)}
                                   //   Layer 2 reads from this for distance computations.
   dimredResultPreFusion: null,    // Layer 1.5 *without* fusion applied — same shape as dimredResult.
@@ -83,8 +74,6 @@ const state = {
   //  clusterLevels. See projectFusionBranch.)
   clusterResult:         null,    // Backward-compat alias for the FINEST level's clusterResult
                                   //   (used by panels that aren't yet level-aware)
-  neighbourhoodResult:   null,    // taste-network internal: {neighbourhoods, nodeNeighbourhood}
-  tasteResult:           null,    // taste-network internal: {tasteByNeighbourhood, tasteByCluster}
   citationResult:        null,    // Layer 3 output: CitationResult contract
   citationLayout:        null,    // Layer 4 output: Float32Array(n × 3) raw layout positions
   alignedCitationLayout: null,    // Layer 5a output: Float32Array(n × 3) — blend force input
@@ -151,7 +140,6 @@ const state = {
                             //   Layer 1.5 has two sequential stages; the engine runs them
                             //   in order. Default is identity for both = pass-through.
     neighbourhood: null,
-    taste:         null,
     citations:     null,
     clustering:    null,    // { method, byAlgo: { algoId: params } }
     layout:        null,    // { method, params }
@@ -172,13 +160,13 @@ const state = {
   // ── active algorithm per pluggable layer ─────────────────────
   // populated as registries come online; placeholders for now
   activeAlgorithm: {
-    "dataSource": "toy",         // "toy" | "real"; selects which datasource registry entry runs
+    "dataSource": "real",        // "real"; selects which datasource registry entry runs
     // dimred has three stages now (noise + compression + viz); the workflow
     // chart reads layerParams.dimred directly to summarise. activeAlgorithm
     // here holds only the compression-side method as a single legacy label.
     "dimred":     "identity",
     "clustering": "hdbscan",    // existing
-    "citations":  "taste-network",   // toy default
+    "citations":  "imported-edges",  // real-data default (corpus edges)
     "layout":     "mds",         // existing
   },
 
@@ -292,7 +280,7 @@ const state = {
   //     label:        string,           // user-set or auto-generated
   //     timestamp:    string,           // ISO datetime
   //     inputs: {                        // snapshot at time-of-run
-  //       dataSourceId:       string,    // "real" / "toy"
+  //       dataSourceId:       string,    // "real" / "sqlite"
   //       dataSourceConfig:   object,    // subset, seed, etc.
   //       layerParamsSnapshot: object,   // dim/fusion/etc. active
   //     },
