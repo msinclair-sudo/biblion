@@ -69,10 +69,12 @@ function mountFusionBlendSlider() {
 }
 
 // Edge-display controls (citations / base / structure / arrows + sliders
-// + colour pickers) at the bottom of the left rail. Writes state.view
-// via setView; viewer-3d reacts on its next update() callback. Each
-// slider/colour input gets a live numeric/hex readout so users can read
-// values without hovering.
+// + colour pickers). The ec-* inputs live in #edge-controls-host, which
+// viewer-3d adopts into its settings popup (J19) — this just wires them
+// by id, so it works regardless of where the host is currently parked.
+// Writes state.view via setView; viewer-3d reacts on its next update()
+// callback. Each slider/colour input gets a live numeric/hex readout so
+// users can read values without hovering.
 function mountEdgeControls() {
   const cite         = document.getElementById("ec-citations");
   const arrows       = document.getElementById("ec-cit-arrows");

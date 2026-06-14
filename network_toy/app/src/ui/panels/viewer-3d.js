@@ -29,8 +29,8 @@ import {
 
 // Per-edge-kind static styling. Widths + default colours + arrow
 // flags live here; runtime colour is read from state.view (the colour
-// pickers in the left rail write there), falling back to .colour as a
-// hard-coded backstop when the view-state colour is missing.
+// pickers in the viewer settings popup write there), falling back to
+// .colour as a hard-coded backstop when the view-state colour is missing.
 const EDGE_STYLE = {
   citation:        { colour: "#8a8a8a", width: 0.3, arrows: true  }, // arrows gated by state.view.citArrows
   base:            { colour: "#5a6878", width: 0.3, arrows: false },
@@ -119,7 +119,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let lastDataRevision = -1;
   let resizeObs = null;
   let lastSelection = null;
-  let lastBlend = null;
   let lastFusionBlend = null;
 
   // Settings overlay (gear button + popup with sliders).
@@ -166,15 +165,15 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const link   = Graph.d3Force("link");   if (link   && link.strength)   link.strength(0);
     const center = Graph.d3Force("center"); if (center && center.strength) center.strength(0);
 
-    // Blend hook reads state through getters every tick. Two
-    // independent sliders feed it: (1) `blend` = basePos ↔ citation
-    // layout, and (2) `fusionBlend` = pre-fusion basePos ↔ post-fusion
-    // basePos (the citation-aware re-embedding endpoint).
+    // Blend hook reads state through getters every tick. The active
+    // slider is `fusionBlend` = pre-fusion basePos ↔ post-fusion basePos
+    // (the citation-aware re-embedding endpoint). The outer basePos ↔
+    // citation `blend` slider was removed (J14); makeBlendForce treats a
+    // missing getBlend as α = 0.
     Graph.d3Force("blend", makeBlendForce({
       getBasePos:            () => getState()._basePos,
       getBasePosPreFusion:   () => getState()._basePosPreFusion,
       getAlignedCitationPos: () => getState().alignedCitationLayout,
-      getBlend:              () => getState().blend,
       getFusionBlend:        () => getState().fusionBlend,
     }));
     Graph.d3VelocityDecay(1.0);
@@ -397,7 +396,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
   init();
   if (Graph) rebuildData();
   lastDataRevision = getState().engineRevision;
-  lastBlend        = getState().blend;
   lastFusionBlend  = getState().fusionBlend;
   let lastViewSig  = viewSignature(getState().view);
 
@@ -417,7 +415,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
         lastDataRevision = s.engineRevision;
         lastViewSig      = viewSig;
         lastSelection    = s.selection;
-        lastBlend        = s.blend;
         if (dataChanged) {
           // New engine output may have added/removed cluster levels —
           // refresh the dropdown options.
@@ -426,15 +423,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
         return;
       }
 
-      // Blend-slider change: d3-force-3d's tick loop quiesces when the
+      // Fusion-slider change: d3-force-3d's tick loop quiesces when the
       // network looks settled (instantly true under deterministic
       // blending), so the blend hook stops firing and slider drags go
       // ignored. Reheat + resume so the tick loop runs again and the
-      // hook picks up the new α. Matches the legacy shell's behaviour
-      // (main.js:1270-1277). Same applies to the fusion-comparison
-      // slider — it feeds the same blend hook via getFusionBlend.
-      if (s.blend !== lastBlend || s.fusionBlend !== lastFusionBlend) {
-        lastBlend       = s.blend;
+      // hook picks up the new fusionBlend. Matches the legacy shell's
+      // behaviour (main.js:1270-1277).
+      if (s.fusionBlend !== lastFusionBlend) {
         lastFusionBlend = s.fusionBlend;
         try { Graph.d3ReheatSimulation(); }   catch (_) {}
         try { Graph.resumeAnimation();   }   catch (_) {}
@@ -454,6 +449,14 @@ export function mount(container, _state, config = {}, tabContext = null) {
       if (resizeObs) {
         try { resizeObs.disconnect(); } catch (_) {}
         resizeObs = null;
+      }
+      // J19: re-park the relocated edge-controls host (hidden) back on the
+      // body before tearing the overlay down, so its ec-* inputs survive and
+      // a later viewer remount can re-adopt them.
+      const edgeHost = document.getElementById("edge-controls-host");
+      if (edgeHost) {
+        edgeHost.hidden = true;
+        document.body.appendChild(edgeHost);
       }
       if (settingsRoot) settingsRoot.remove();
       if (colourOverlay && colourOverlay.root) colourOverlay.root.remove();
@@ -597,6 +600,20 @@ function buildSettingsOverlay(container, cam, onChange) {
   hint.style.marginTop = "6px";
   hint.textContent = "0–1 fraction of native speed";
   popup.appendChild(hint);
+
+  // J19: adopt the relocated edge colour/toggle controls. The host
+  // (#edge-controls-host) is a global singleton in index.html — main.js's
+  // mountEdgeControls wires its ec-* inputs once at boot. We just move the
+  // host into this popup so the controls live with the viewer they drive.
+  // appendChild relocates the existing element (keeps wiring intact).
+  const edgeHost = document.getElementById("edge-controls-host");
+  if (edgeHost) {
+    const edgeHeading = document.createElement("h4");
+    edgeHeading.textContent = "Edges";
+    popup.appendChild(edgeHeading);
+    edgeHost.hidden = false;
+    popup.appendChild(edgeHost);
+  }
 
   root.appendChild(popup);
   container.appendChild(root);
