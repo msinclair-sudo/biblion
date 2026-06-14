@@ -103,15 +103,19 @@ export function mount(container, _state, config = {}) {
     const labels = L.clusterIds.map(id => `c${id}`);
     let matrix = L.matrix;
     let vmax = 1, fmt = (v) => v ? String(v) : "";
+    // Diagonal (i→i) holds intra-cluster citations, which dominate the colour
+    // scale; suppress it and rescale vmax over off-diagonal cells only.
     if (ui.normalised) {
-      matrix = L.matrix.map(row => {
-        const out = row.reduce((a, b) => a + b, 0) || 1;
+      matrix = L.matrix.map((row, r) => {
+        const out = row.reduce((a, b, c) => c === r ? a : a + b, 0) || 1;
         return row.map(v => v / out);
       });
       vmax = 1;
       fmt = (v) => v ? v.toFixed(2) : "";
     } else {
-      vmax = Math.max(1, ...L.matrix.flat());
+      const offDiag = [];
+      L.matrix.forEach((row, r) => row.forEach((v, c) => { if (r !== c) offDiag.push(v); }));
+      vmax = Math.max(1, ...offDiag);
     }
     const heatHost = document.createElement("div");
     heatHost.className = "xcc-heatmap";
@@ -119,6 +123,7 @@ export function mount(container, _state, config = {}) {
     renderHeatmap(heatHost, {
       matrix, rowLabels: labels, colLabels: labels,
       vmin: 0, vmax,
+      cellEnabled: (r, c) => r !== c,
       cellSize: Math.max(18, Math.min(40, Math.floor(360 / Math.max(1, L.k)))),
       legendLabel: ui.normalised ? "out-fraction" : "citations",
       formatCell: fmt,
