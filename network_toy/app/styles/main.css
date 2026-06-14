@@ -2124,6 +2124,28 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   font-style: italic;
 }
 
+/* Databases ▸ Make New — id field + the copy-paste biblion command block. */
+.databases-make-id {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.databases-make-cmds {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 8px 10px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+
 /* ── data panel ──────────────────────────────────────────────────── */
 
 .data-panel-hint {

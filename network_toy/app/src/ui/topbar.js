@@ -19,6 +19,9 @@ import { createStep, getRootStep, importWorkflow } from "./workflow.js";
 import { projectStepIntoLegacyState } from "./workflow-projection.js";
 import { getLayerDescriptor } from "./modals/layer-descriptors.js";
 import { openDataSourceModal } from "./modals/data-source-modal.js";
+import { openDatabasesConnectModal } from "./modals/databases-connect-modal.js";
+import { openDatabasesMakeModal }    from "./modals/databases-make-modal.js";
+import { openDatabasesManageModal }  from "./modals/databases-manage-modal.js";
 
 // Phase 2 slice 2.11.b — disabled stub items removed. The 7 dropped
 // were either subsumed by panels (ARI dim-sweep → Dim sweep panel /
@@ -65,6 +68,10 @@ export function mountTopbar() {
   const root = document.getElementById("topbar");
   if (!root) return;
   root.innerHTML = "";
+
+  // Databases dropdown sits at the top-LEFT (first menu) — the data-source /
+  // serve.py entry point, paired with the top-right cart precedent.
+  root.appendChild(renderMenu(databasesMenu()));
 
   for (const menu of MENUS) {
     root.appendChild(renderMenu(menu));
@@ -131,6 +138,24 @@ function closeAllMenus() {
   document.querySelectorAll("#topbar .topbar-menu.open").forEach((el) => {
     el.classList.remove("open");
   });
+}
+
+// Databases dropdown (top-left): the three data-source actions, each opening
+// its modal wired to the data layer descriptor (applyChange → serve.py /
+// datasource flow). Built as a normal topbar menu so it shares the open/close
+// + click-outside behaviour with File/Data/etc.
+function databasesMenu() {
+  const dataDescriptor = () => getLayerDescriptor("data");
+  return {
+    id: "databases",
+    label: "Databases",
+    items: [
+      { label: "Connect New",        action: () => openDatabasesConnectModal(dataDescriptor()) },
+      { label: "Make New",           action: () => openDatabasesMakeModal(dataDescriptor()) },
+      { divider: true },
+      { label: "Manage Connections", action: () => openDatabasesManageModal(dataDescriptor()) },
+    ],
+  };
 }
 
 // Global cart button (top-right): opens the cart panel and shows a live count
