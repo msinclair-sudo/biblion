@@ -38,6 +38,12 @@ export function boot() {
 // makeBlendForce). Hidden when _basePosPreFusion is null (fusion is
 // identity or hasn't run); shown as soon as a fusion run produces a
 // pre-fusion endpoint to compare against.
+//
+// J20: the #fusion-blend-row host is relocated by viewer-3d into a
+// bottom-left vertical overlay (it owns the row's `display` layout there),
+// so wiring here is by id and stays valid regardless of where the host is
+// parked. Gating toggles the `hidden` attribute rather than `display`, so it
+// doesn't clobber the overlay's `display:flex` when it un-hides the row.
 function mountFusionBlendSlider() {
   const row     = document.getElementById("fusion-blend-row");
   const input   = document.getElementById("fusion-blend-slider");
@@ -47,7 +53,7 @@ function mountFusionBlendSlider() {
   const s0 = getState();
   input.value = String(s0.fusionBlend);
   readout.textContent = (+input.value).toFixed(2);
-  row.style.display = s0._basePosPreFusion ? "" : "none";
+  row.hidden = !s0._basePosPreFusion;
 
   input.addEventListener("input", (e) => {
     const v = +e.target.value;
@@ -61,9 +67,8 @@ function mountFusionBlendSlider() {
       readout.textContent = state.fusionBlend.toFixed(2);
     }
     const wantShown = !!state._basePosPreFusion;
-    const isShown   = row.style.display !== "none";
-    if (wantShown !== isShown) {
-      row.style.display = wantShown ? "" : "none";
+    if (wantShown === row.hidden) {
+      row.hidden = !wantShown;
     }
   });
 }

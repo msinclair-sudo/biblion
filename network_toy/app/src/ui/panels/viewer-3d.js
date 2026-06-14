@@ -143,6 +143,12 @@ export function mount(container, _state, config = {}, tabContext = null) {
   });
   container.appendChild(colourOverlay.root);
 
+  // J20: fusion-blend overlay (bottom-left, vertical). Adopts the global
+  // #fusion-blend-row host so it sits over the layout it blends. main.js
+  // wires + gates the host's inputs by id; we just relocate it here. The
+  // host stays in #blend-control when no viewer is mounted.
+  const fusionOverlay = buildFusionBlendOverlay(container);
+
   // (Graph / lastDataRevision / resizeObs / lastSelection hoisted above)
 
   function init() {
@@ -458,6 +464,17 @@ export function mount(container, _state, config = {}, tabContext = null) {
         edgeHost.hidden = true;
         document.body.appendChild(edgeHost);
       }
+      // J20: re-park the relocated fusion-blend row (hidden) back on the body
+      // before tearing the overlay down, so its inputs + main.js wiring/gating
+      // survive and a later viewer remount can re-adopt them. Strip the
+      // overlay's vertical-orientation inline styling so a re-adopt starts clean.
+      const fusionRow = document.getElementById("fusion-blend-row");
+      if (fusionRow) {
+        fusionRow.removeAttribute("style");
+        fusionRow.style.display = "none";
+        document.body.appendChild(fusionRow);
+      }
+      if (fusionOverlay) fusionOverlay.remove();
       if (settingsRoot) settingsRoot.remove();
       if (colourOverlay && colourOverlay.root) colourOverlay.root.remove();
 
@@ -560,6 +577,61 @@ function buildColourModeOverlay({ initial, getOptions, onChange }) {
     root,
     refreshOptions: rebuildOptions,
   };
+}
+
+/* ── fusion-blend overlay (bottom-left, vertical) ──────────────────────── */
+
+// Relocate the global #fusion-blend-row host into a bottom-left overlay and
+// orient its range input vertically. The host's inputs (#fusion-blend-slider
+// / #fusion-blend-readout) are wired + show/hide-gated by main.js by id, so
+// this function only handles placement + orientation, never wiring. Returns
+// the overlay root (or null if the host isn't present) so mount()/destroy()
+// can add + remove it. appendChild relocates the existing element, keeping
+// its wiring intact (same approach as the J19 edge-controls host).
+function buildFusionBlendOverlay(container) {
+  const fusionRow = document.getElementById("fusion-blend-row");
+  if (!fusionRow) return null;
+
+  const root = document.createElement("div");
+  root.className = "viewer-3d-fusion-blend";
+  // No CSS class is styled for this overlay (viewer-3d.css is owned
+  // elsewhere), so position + orient inline. z-index sits above the empty
+  // overlay (5) and level with the other corner overlays (10).
+  root.style.position = "absolute";
+  root.style.left = "8px";
+  root.style.bottom = "8px";
+  root.style.zIndex = "10";
+  root.style.display = "flex";
+  root.style.flexDirection = "column";
+  root.style.alignItems = "center";
+  root.style.gap = "6px";
+  root.style.padding = "8px 6px";
+  root.style.background = "rgba(40, 44, 52, 0.85)";
+  root.style.border = "1px solid var(--border-light)";
+  root.style.borderRadius = "3px";
+  root.style.userSelect = "none";
+
+  // Vertical orientation: a column flex with the range input flipped to run
+  // bottom→top. writing-mode is the standards-track way; the WebKit appearance
+  // hint covers older Chromium. The label sits above, the readout below.
+  fusionRow.style.display = "flex";
+  fusionRow.style.flexDirection = "column";
+  fusionRow.style.alignItems = "center";
+  fusionRow.style.gap = "6px";
+  fusionRow.style.margin = "0";
+
+  const slider = fusionRow.querySelector("#fusion-blend-slider");
+  if (slider) {
+    slider.style.writingMode = "vertical-lr";
+    slider.style.direction = "rtl";              // 0 at the bottom, 1 at the top
+    slider.style.webkitAppearance = "slider-vertical";
+    slider.style.width = "auto";
+    slider.style.height = "120px";
+  }
+
+  root.appendChild(fusionRow);
+  container.appendChild(root);
+  return root;
 }
 
 /* ── settings overlay ───────────────────────────────────────────────── */
