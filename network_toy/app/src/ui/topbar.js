@@ -14,7 +14,8 @@ import {
 import { serialiseState }   from "../persistence/serialise.js";
 import { deserialiseFile }  from "../persistence/deserialise.js";
 import { enqueueJob }       from "./queue.js";
-import { createStep, getRootStep } from "./workflow.js";
+import { createStep, getRootStep, importWorkflow } from "./workflow.js";
+import { projectStepIntoLegacyState } from "./workflow-projection.js";
 
 // Phase 2 slice 2.11.b — disabled stub items removed. The 7 dropped
 // were either subsumed by panels (ARI dim-sweep → Dim sweep panel /
@@ -247,10 +248,8 @@ function loadProject() {
     input.remove();
     if (!file) return;
     // Phase 2 slice 2.9.c — load runs as a job. Card creation happens
-    // AFTER deserialise + apply, because loading replaces state.workflow
-    // wholesale; creating a card pre-load on the OUTGOING tree would be
-    // wasted work. Post-load, we attach the load card to the LOADED
-    // tree's root so the user's history records the import.
+    // AFTER deserialise + apply. Post-load, we attach the load card to
+    // the LOADED tree's root so the user's history records the import.
     const label = `Load "${file.name}"`;
     const { promise } = enqueueJob({
       type:  "load",
@@ -267,8 +266,9 @@ function loadProject() {
         }
         // Apply the patch wholesale — engine cascade is intentionally
         // skipped (we have all the results already; re-running would
-        // overwrite them and defeat the point of saving). engineRevision
-        // bumps so panels rebuild from the loaded data.
+        // overwrite them and defeat the point of saving). This sets the
+        // flat projection slots AND state.workflow (the canonical tree)
+        // from the saved file.
         const cur = getState();
         update({
           ...res.patch,
@@ -276,8 +276,23 @@ function loadProject() {
                            ? res.patch.clusterLevels[res.patch.clusterLevels.length - 1].clusterResult
                            : null,
           projectName:    res.patch.projectName || stripExtension(file.name),
-          engineRevision: cur.engineRevision + 1,
         });
+
+        // Re-install the tree through workflow.js so the module-local
+        // serial counter advances past the restored ids (a later
+        // createStep mustn't collide with a loaded id).
+        importWorkflow(res.patch.workflow ?? { steps: {}, rootId: null, selected: null });
+
+        // Reconcile the flat slots with the restored tree and force the
+        // viewer to repaint. If a card was selected, re-project it so the
+        // flat slots match the tree exactly (and bumps engineRevision);
+        // otherwise just bump engineRevision so panels rebuild.
+        const selected = getState().workflow.selected;
+        if (selected) {
+          projectStepIntoLegacyState(selected, { bumpRevision: true });
+        } else {
+          update({ engineRevision: cur.engineRevision + 1 });
+        }
         console.log(`[topbar] loaded project '${file.name}' (saved ${res.manifest.savedAt})`);
 
         // Attach a load-history card to the loaded tree, if it has a

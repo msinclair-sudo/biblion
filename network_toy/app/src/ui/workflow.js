@@ -614,3 +614,40 @@ export function deleteStep(id) {
 export function clearWorkflow() {
   update({ workflow: { steps: {}, rootId: null, selected: null } });
 }
+
+/**
+ * Install a workflow tree wholesale (project load). Sets state.workflow
+ * to the supplied tree and advances the module-local serial counter past
+ * the highest serial embedded in the loaded step ids — otherwise a
+ * post-load createStep would re-issue an id already present in the
+ * restored tree and silently overwrite a card.
+ *
+ * @param {{steps: object, rootId: string|null, selected: string|null}} workflow
+ * @returns {void}
+ */
+export function importWorkflow(workflow) {
+  const wf = workflow && typeof workflow === "object"
+    ? workflow
+    : { steps: {}, rootId: null, selected: null };
+  const steps = wf.steps || {};
+  let maxSerial = 0;
+  for (const id of Object.keys(steps)) {
+    // id shape: step-<type>-<serial>-<suffix>. The serial is the numeric
+    // segment; type may itself contain hyphens, so scan all numeric parts
+    // and take the largest rather than assuming a fixed index.
+    for (const part of id.split("-")) {
+      if (/^\d+$/.test(part)) {
+        const n = Number(part);
+        if (n > maxSerial) maxSerial = n;
+      }
+    }
+  }
+  if (maxSerial >= nextSerial) nextSerial = maxSerial + 1;
+  update({
+    workflow: {
+      steps,
+      rootId:   wf.rootId ?? null,
+      selected: wf.selected ?? null,
+    },
+  });
+}
