@@ -156,6 +156,21 @@
     <div class="panel-tabs"></div>
     <div class="panel-content"></div>
   </section>
+
+  <!-- J10 dynamic-layout dividers + rail-collapse toggles. These are
+       absolutely-positioned overlays sitting on the grid boundaries;
+       layout-splitters.js places them off the live --*-w / --bottom-h
+       vars and drives drag + collapse. The toggle buttons nest inside
+       their splitter so they ride along when the boundary moves. -->
+  <div id="split-left" class="layout-split layout-split-v" title="Drag to resize the left rail">
+    <button id="toggle-left-rail" class="rail-toggle" type="button"
+            title="Collapse / expand the left rail" aria-label="Collapse or expand the left rail"></button>
+  </div>
+  <div id="split-right" class="layout-split layout-split-v" title="Drag to resize the right rail">
+    <button id="toggle-right-rail" class="rail-toggle" type="button"
+            title="Collapse / expand the right rail" aria-label="Collapse or expand the right rail"></button>
+  </div>
+  <div id="split-bottom" class="layout-split layout-split-h" title="Drag to resize the bottom row"></div>
 </div>
 
 <div id="modal-root">
