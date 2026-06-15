@@ -31,11 +31,16 @@ import { paramRow } from "../widgets.js";
 // initial working state and restored by the Reset control. Params are
 // left empty here; renderForAlgo() seeds them from each algorithm's
 // slot-specific defaults (PCA-100 noise, UMAP-50/50/0 compression,
-// UMAP-3/15/0.1 viz, etc.) when the method is applied. Fusion defaults
-// to identity because toy data sources don't supply citation edges.
+// UMAP-3/15/0.1 viz, etc.) when the method is applied.
+//
+// Fusion defaults to graph-diffusion: the app is real-data only and every
+// biblion corpus carries citation edges, so citation-aware fusion is the
+// intended default — it produces the pre/post-fusion fork (and the comparison
+// slider). It safely falls through to identity (no fork) when a source has no
+// edges, so this is harmless for edge-less data.
 const DEFAULT_PRESET = {
   noise:       "pca",
-  fusion:      "identity",
+  fusion:      "graph-diffusion",
   compression: "umap",
   viz:         "umap",
   viz2d:       "umap",
