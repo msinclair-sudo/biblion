@@ -40,10 +40,10 @@ def test_add_data_creates_only_data_card(clean_page):
 
 @pytest.mark.slow
 def test_add_real_data_creates_single_data_card(clean_page):
-    """Regression: adding the real BFS-5000 source must create a data
+    """Regression: adding the fallworm (sqlite) source must create a data
     card (it was reported sitting on the empty '+ Add data source' state).
     The card is created up front + bound to the ingest job, so it appears
-    immediately and lands 'done' with n=5000 once the load completes."""
+    immediately and lands 'done' with n=1638 once the load completes."""
     out = clean_page.evaluate(
         '''async () => {
             const ld = await import("/app/src/ui/modals/layer-descriptors.js");
@@ -52,7 +52,7 @@ def test_add_real_data_creates_single_data_card(clean_page):
             wf.clearWorkflow();
             const desc = ld.getLayerDescriptor("data");
             let err = null;
-            try { await desc.applyChange("real", { subset: "dev_subset_bfs_5000" }); }
+            try { await desc.applyChange("sqlite", { dataset: "fallworm" }); }
             catch (e) { err = String((e && (e.message || e)) || e); }
             const steps = wf.listSteps();
             const dataCard = steps.find(x => x.type === "data");
@@ -71,8 +71,8 @@ def test_add_real_data_creates_single_data_card(clean_page):
     assert out["count"] == 1
     assert out["types"] == ["data"]
     assert out["status"] == "done"
-    assert out["genN"] == 5000
-    assert out["cardN"] == 5000
+    assert out["genN"] == 1638
+    assert out["cardN"] == 1638
 
 
 def test_add_dimred_does_not_cascade_to_clustering(clean_page):

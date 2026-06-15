@@ -116,7 +116,7 @@ def test_smallest_sweep_completes_and_auto_saves(page):
     assert save_id["scoreVersion"] == 3
     assert save_id["branchId"] is None
     assert save_id["rankedLen"] > 0
-    assert save_id["dataSourceId"] == "real"
+    assert save_id["dataSourceId"] == "sqlite"
 
 
 def test_saved_run_panel_renders(page):
