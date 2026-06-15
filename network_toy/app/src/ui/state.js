@@ -605,6 +605,10 @@ export function setSelection(selection) {
 // purely-visual interaction-speed toggle.
 
 const DEFAULT_HIGHLIGHT_COLOUR = "#ffd23f";   // warm amber glow default
+// Monotonic add-order stamp on each highlight group. On overlap the resolver
+// (highlightColourFor) picks the highest seq, so the most recent highlight
+// action wins visually regardless of bySource key order.
+let _highlightSeq = 0;
 
 // Add (or replace) a highlight group for `source`. nodeIds is filtered to
 // integers. With additive=false (plain click) the source's set is replaced;
@@ -626,7 +630,11 @@ export function addHighlight(source, nodeIds, colour, additive = false) {
     clearHighlight(source);
     return;
   }
-  const group = { ids: nextIds, colour: colour || (prev && prev.colour) || DEFAULT_HIGHLIGHT_COLOUR };
+  const group = {
+    ids: nextIds,
+    colour: colour || (prev && prev.colour) || DEFAULT_HIGHLIGHT_COLOUR,
+    seq: ++_highlightSeq,    // recency stamp; latest add wins on overlap
+  };
   update({
     highlights: { bySource: { ...state.highlights.bySource, [source]: group } },
   });

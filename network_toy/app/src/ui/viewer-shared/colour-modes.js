@@ -228,17 +228,24 @@ export function nodeMatchesSelection(node, state, sel) {
 // Highlight glow (J25). Resolve a node's glow colour from the general
 // multi-source highlight channel (state.highlights.bySource). Returns the
 // group colour when the node is in any source's id set, else null (no glow).
-// Multiple groups can match; first-source-wins on colour (order = insertion).
+// Multiple groups can match; the MOST RECENTLY added/updated group wins (by
+// group.seq), so the user's latest highlight action takes visual precedence
+// over older ones — more intuitive than arbitrary key-insertion order.
 // This is the ADDITIVE layer composed ON TOP of the base/dim colour by
 // nodeColourFor — a glow, not a recolour of the underlying mode.
 export function highlightColourFor(node, state) {
   const hs = state.highlights;
   if (!hs || !hs.bySource) return null;
+  let best = null;
+  let bestSeq = -Infinity;
   for (const source in hs.bySource) {
     const g = hs.bySource[source];
-    if (g && g.ids && g.ids.has(node.id)) return g.colour || "#ffd23f";
+    if (g && g.ids && g.ids.has(node.id)) {
+      const seq = g.seq ?? 0;
+      if (seq >= bestSeq) { bestSeq = seq; best = g.colour || "#ffd23f"; }
+    }
   }
-  return null;
+  return best;
 }
 
 // Cheap fingerprint of the highlight channel — each viewer caches the prior

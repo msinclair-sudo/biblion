@@ -725,34 +725,13 @@ html, body {
    (label | slider | readout = 70px 1fr 36px). Thin hairlines between
    sections instead of card borders. */
 
+/* #blend-control is now just the parking home for the fusion-blend slider.
+   viewer-3d adopts #fusion-blend-row into a bottom-left overlay (J20) and
+   #edge-controls-host into its settings popup (J19); both park back here when
+   no 3D viewer is mounted. display:contents so the holder adds no chrome — no
+   empty "Blend" box in the left rail; only the (hidden-until-fusion) row shows. */
 #blend-control {
-  padding: 6px 10px 8px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-}
-
-#blend-control .lr-section {
-  display: flex;
-  flex-direction: column;
-  padding: 4px 0 5px;
-  border-top: 1px solid var(--border);
-}
-
-#blend-control .lr-section:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-#blend-control .lr-section-title {
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  margin-bottom: 3px;
+  display: contents;
 }
 
 #blend-control .lr-row {
@@ -777,28 +756,60 @@ html, body {
   min-width: 0;
 }
 
-/* label | checkbox — checkbox sits at the right edge under the readout
-   column so toggles align with slider knobs visually */
-#blend-control .lr-row-check {
-  grid-template-columns: 70px 1fr;
+#blend-control .lr-readout {
+  font-family: var(--font-mono);
+  color: var(--text);
+  font-size: 11px;
+  text-align: right;
+}
+
+/* Edge colour/toggle controls (J19). The host element #edge-controls-host is
+   adopted by viewer-3d into its settings popup, so these rules are scoped to
+   the id — it travels with the element wherever it's parked. (Moved here from
+   an inline <style> block in index.html.) */
+#edge-controls-host[hidden] { display: none; }
+
+#edge-controls-host .lr-section {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0 5px;
+  border-top: 1px solid var(--border);
+}
+#edge-controls-host .lr-section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+#edge-controls-host .lr-section-title {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+#edge-controls-host .lr-row {
+  display: grid;
+  align-items: center;
+  margin: 1px 0;
+}
+#edge-controls-host .lr-row label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+#edge-controls-host .lr-row-slider {
+  grid-template-columns: 70px 1fr 36px;
   gap: 6px;
 }
-
-#blend-control .lr-row-check input[type="checkbox"] {
-  margin: 0;
-  justify-self: start;
+#edge-controls-host .lr-row-slider input[type="range"] {
+  width: 100%;
+  min-width: 0;
 }
-
-/* Toggle row: a small colour swatch and one or two compact "☐ Label"
-   checkboxes, all left-aligned in a single flex line. */
-#blend-control .lr-row-toggles {
+#edge-controls-host .lr-row-toggles {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: nowrap;
 }
-
-#blend-control .lr-inline-check {
+#edge-controls-host .lr-inline-check {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -807,15 +818,10 @@ html, body {
   cursor: pointer;
   white-space: nowrap;
 }
-
-#blend-control .lr-inline-check input[type="checkbox"] {
+#edge-controls-host .lr-inline-check input[type="checkbox"] {
   margin: 0;
 }
-
-/* Small colour swatch: a flush rectangle that matches the visual
-   weight of the surrounding checkboxes. Native colour inputs come
-   with a chunky border + padding; we strip those. */
-#blend-control .lr-swatch {
+#edge-controls-host .lr-swatch {
   width: 22px;
   height: 14px;
   padding: 0;
@@ -825,26 +831,22 @@ html, body {
   cursor: pointer;
   flex: 0 0 auto;
 }
-
-#blend-control .lr-swatch::-webkit-color-swatch-wrapper {
-  padding: 0;
-}
-
-#blend-control .lr-swatch::-webkit-color-swatch {
-  border: none;
-  border-radius: 2px;
-}
-
-#blend-control .lr-swatch::-moz-color-swatch {
-  border: none;
-  border-radius: 2px;
-}
-
-#blend-control .lr-readout {
+#edge-controls-host .lr-swatch::-webkit-color-swatch-wrapper { padding: 0; }
+#edge-controls-host .lr-swatch::-webkit-color-swatch { border: none; border-radius: 2px; }
+#edge-controls-host .lr-swatch::-moz-color-swatch    { border: none; border-radius: 2px; }
+#edge-controls-host .lr-readout {
   font-family: var(--font-mono);
   color: var(--text);
   font-size: 11px;
   text-align: right;
+}
+
+/* When adopted into the viewer settings popup, sit below the camera rows
+   with a hairline separator and a little breathing room. */
+.viewer-3d-settings-popup #edge-controls-host {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
 }
 
 /* ── placeholder panel ──────────────────────────────────────────────── */
