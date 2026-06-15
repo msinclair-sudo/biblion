@@ -55,7 +55,10 @@ const PIPELINE = {
     fusion:      { method: "identity", params: {} },
     compression: { method: "umap",     params: { n_components: 50, n_neighbors: 30, min_dist: 0.0, metric: "cosine", random_state: 42 } },
     viz:         { method: "umap",     params: { n_components: 3, n_neighbors: 15, min_dist: 0.1, metric: "cosine", random_state: 43 } },
-    viz2d:       { method: "umap",     params: { n_components: 2, n_neighbors: 15, min_dist: 0.1, metric: "cosine", random_state: 44 } },
+    // viz2d identity: the 2-D viewer is opt-in (matches the dimred modal's
+    // 3-D-only default). The baseline fixture is therefore 3-D only, so
+    // rehydrating it doesn't auto-open the 2-D viewer in the test harness.
+    viz2d:       { method: "identity", params: {} },
   },
   hdbscan: {
     minSamples:       5,

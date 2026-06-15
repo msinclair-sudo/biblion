@@ -61,6 +61,26 @@ export function mountPanelSystem() {
       }
     }
   });
+
+  // Auto-open the 2D viewer when a 2-d reduction (viz2d) produces positions, so
+  // BOTH viewers show when both a 2-d and 3-d layout are calculated. The 2-d
+  // viewer is off by default (only the 3-d is, in `primary`). Tracked by the
+  // _basePos2d array identity: we open on each NEW 2-d layout, so a manual close
+  // sticks until the next 2-d reduction is computed.
+  let lastBasePos2d = null;
+  subscribe((state) => {
+    const bp2 = state._basePos2d;
+    if (!bp2) { lastBasePos2d = null; return; }
+    if (bp2 === lastBasePos2d) return;          // unchanged → respect a manual close
+    lastBasePos2d = bp2;
+    if (!isPanelOpen("viewer-2d")) addTab("secondary", "viewer-2d", {});
+  });
+}
+
+// True if a panel of `type` is currently open in any slot.
+function isPanelOpen(type) {
+  const panels = getState().panels;
+  return SLOTS.some((slot) => ((panels[slot] && panels[slot].tabs) || []).some((t) => t.type === type));
 }
 
 function initSlot(slot) {

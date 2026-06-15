@@ -43,7 +43,11 @@ const DEFAULT_PRESET = {
   fusion:      "graph-diffusion",
   compression: "umap",
   viz:         "umap",
-  viz2d:       "umap",
+  // The 2-D viewer is opt-in: viz2d defaults to identity, so a default
+  // dim-reduction computes ONLY the 3-D layout (state._basePos). Pick a 2-D
+  // reduction (UMAP-2) to also produce state._basePos2d — the 2-D viewer panel
+  // then auto-opens (panel-system) so both viewers show when both are computed.
+  viz2d:       "identity",
 };
 
 const SECTIONS = [
