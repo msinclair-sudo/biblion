@@ -253,7 +253,9 @@ def main():
     args = parser.parse_args()
     port = args.port
 
-    server = ThreadingHTTPServer(("", port), Handler)
+    # Bind to loopback only: the server does unauthenticated reads of the whole
+    # data tree and write/delete of saves, so it must not be reachable off-host.
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"network-toy serving {ROOT} at http://localhost:{port}/app/")
     print(f"  dataset API: http://localhost:{port}/api/datasets")
     try:

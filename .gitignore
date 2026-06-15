@@ -2,6 +2,12 @@
 .env
 .env.*
 
+# Local research data + media — never push to the public repo. Anchored to the
+# repo root so the tracked network_toy/data -> ../data symlink is unaffected.
+# (The data/**/* rules below stay as a belt-and-braces net for sub-artifacts.)
+/data/
+/media/
+
 # Local dev notes for AI coding agents (not for distribution)
 CLAUDE.md
 plans/
