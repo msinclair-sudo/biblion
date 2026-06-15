@@ -96,11 +96,11 @@ def test_dim_sweep_descriptor_creates_card_under_dimred(page):
 
     Uses a 2-dim × 1-seed sweep (the minimum runDimSweep accepts).
 
-    @slow: this recomputes a real dim-sweep (noise=PCA→compression=UMAP at
-    n=1638), which the default fast tier must not do. NOTE: the in-browser
-    umap-js@1.4.0 currently overflows its call stack on the fallworm fixture
-    (RangeError in umap-js `se`/`kt` recursion) — see the integration report;
-    flagged for the slow tier.
+    @slow: this recomputes a real dim-sweep (noise=PCA→compression=UMAP on the
+    embedded set, n=1405 for fallworm), which the default fast tier must not do.
+    (Previously overflowed umap-js's RP-tree because pickStage0Input mis-sized
+    the stage-0 buffer to genResult.nodes.length, feeding NaN ghost rows into
+    PCA — fixed in dim-sweep-runner.js.)
     """
     out = page.evaluate(
         '''async () => {

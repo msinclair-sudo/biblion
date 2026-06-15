@@ -124,12 +124,19 @@ export function buildDimSweepJob({ parentDimredStepId, settings }) {
 
 function pickStage0Input(s) {
   if (!s.genResult) return null;
-  const n = s.genResult.nodes.length;
-  if (s.embedding && s.embedding.data instanceof Float32Array) {
-    return { n, d: s.embedding.d, data: s.embedding.data };
+  // n MUST come from the input buffer, NOT genResult.nodes.length: with
+  // citations the graph carries ghost/stub nodes that have no embedding row,
+  // so genResult.nodes (e.g. 1638) is larger than the embedded set (e.g. 1405).
+  // Using the node count would make the noise stage read past the buffer end
+  // (-> NaN rows -> PCA poisons every row -> umap-js RP-tree overflow). The
+  // sweep evaluates the embedded set, which is exactly what dimred runs on.
+  if (s.embedding && s.embedding.data instanceof Float32Array && s.embedding.d > 0) {
+    const d = s.embedding.d;
+    const n = Math.floor(s.embedding.data.length / d);
+    return { n, d, data: s.embedding.data };
   }
   if (s._basePos instanceof Float32Array) {
-    return { n, d: 3, data: s._basePos };
+    return { n: Math.floor(s._basePos.length / 3), d: 3, data: s._basePos };
   }
   return null;
 }

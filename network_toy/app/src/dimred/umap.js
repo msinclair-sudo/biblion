@@ -96,6 +96,14 @@ export function computeUmap(input, params = {}) {
     X[i] = row;
   }
 
+  // umap-js builds a random-projection tree (makeTree — the se/kt recursion)
+  // that splits the point set until each leaf is small. A group of *identical*
+  // rows can never be split, so it recurses until the call stack overflows
+  // (RangeError). Real corpora trigger this via ghost/stub nodes that share a
+  // placeholder embedding. Break exact duplicates with a tiny seeded jitter,
+  // applied ONLY when duplicates exist so clean inputs stay bit-for-bit equal.
+  jitterDuplicateRows(X, inputD, seed);
+
   const umap = new UMAP({
     nComponents: K,
     nNeighbors:  nNeighbors,
@@ -121,6 +129,38 @@ export function computeUmap(input, params = {}) {
     d: K,
     data,
   };
+}
+
+// Defensive de-duplication for umap-js (see the call site in computeUmap): a
+// set of identical input rows makes the RP-tree split recurse forever. We add
+// a deterministic, negligible jitter to the *duplicate* occurrences only —
+// unique rows are untouched, so a clean input produces an identical embedding.
+function jitterDuplicateRows(X, d, seed) {
+  const seen = new Set();
+  const dups = [];
+  for (let i = 0; i < X.length; i++) {
+    const row = X[i];
+    for (let a = 0; a < d; a++) {
+      // Non-finite input is always an upstream bug (e.g. a stage-0 buffer read
+      // past its end). umap-js would respond with an opaque RP-tree stack
+      // overflow; fail loud and actionable instead.
+      if (!Number.isFinite(row[a])) {
+        throw new Error(`[umap] non-finite value at row ${i} col ${a} — upstream stage produced bad data`);
+      }
+    }
+    const key = row.join(",");
+    if (seen.has(key)) dups.push(i);
+    else seen.add(key);
+  }
+  if (!dups.length) return;
+  // Offset the seed from UMAP's own rng stream so we don't perturb its
+  // randomness. 1e-4 separates rows for the projection split while staying far
+  // below any meaningful change to the embedding.
+  const rng = mulberry32((seed ^ 0x9e3779b9) >>> 0);
+  for (const i of dups) {
+    const row = X[i];
+    for (let a = 0; a < d; a++) row[a] += (rng() - 0.5) * 1e-4;
+  }
 }
 
 function echoParams(params, n_components, n_neighbors, min_dist, metric, random_state) {
