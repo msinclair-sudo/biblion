@@ -52,24 +52,41 @@ test("in-degree log mode spreads the skewed low-degree tail", () => {
   assert.equal(JSON.stringify(raw), JSON.stringify(linear));      // raw/linear share the ramp
 });
 
-test("highlight glow (J25) composes additively over base + selection-dim", () => {
-  // Two nodes, single-selection on node 0 → node 1 dims. A "scoring" highlight
-  // group lights node 1 in its own colour, overriding the dim; node 0 keeps base.
-  const nodes = [{ id: 0, t: 0 }, { id: 1, t: 1 }];
+test("selection focus (J25): selected nodes keep colour-by, the rest grey", () => {
+  // A "scoring" highlight group selects node 1. With a selection active, the
+  // colour-by stays the primary colouring for selected nodes; everything not
+  // selected drops to grey. Node 0 is also pinned via the single selection, so
+  // it stays coloured even though it isn't in the highlight set.
+  const nodes = [{ id: 0, year: 1990 }, { id: 1, year: 2000 }, { id: 2, year: 2020 }];
   const state = {
     genResult: { nodes },
     clusterLevels: [],
     citationResult: null,
     selection: { type: "node", id: 0 },
-    highlights: { bySource: { scoring: { ids: new Set([1]), colour: "#ff00ff" } } },
+    highlights: { bySource: { scoring: { ids: new Set([1]), colour: "#ff00ff", seq: 1 } } },
   };
-  const c0 = cm.nodeColourFor(nodes[0], state, "year");   // selected, not highlighted
-  const c1 = cm.nodeColourFor(nodes[1], state, "year");   // dimmed by selection, but highlighted
+  const c0 = cm.nodeColourFor(nodes[0], state, "year");   // single-selected → base
+  const c1 = cm.nodeColourFor(nodes[1], state, "year");   // highlighted → base colour-by
+  const c2 = cm.nodeColourFor(nodes[2], state, "year");   // neither → grey
 
-  assert.notEqual(c0, cm.DIMMED_COLOUR);          // selected node keeps base
-  assert.equal(c1, "#ff00ff");                     // glow wins over selection-dim
-  assert.equal(cm.highlightColourFor(nodes[1], state), "#ff00ff");
-  assert.equal(cm.highlightColourFor(nodes[0], state), null);
+  assert.equal(c1, cm.baseColourFor(nodes[1], state, "year"));   // colour-by, NOT a glow hue
+  assert.notEqual(c1, "#ff00ff");
+  assert.equal(c0, cm.baseColourFor(nodes[0], state, "year"));   // single-sel match stays lit
+  assert.equal(c2, cm.DIMMED_COLOUR);                            // unselected greyed
+  assert.equal(cm.anyHighlightActive(state), true);
+  assert.equal(cm.isNodeHighlighted(nodes[1], state), true);
+  assert.equal(cm.isNodeHighlighted(nodes[0], state), false);
+});
+
+test("no selection → every node shows its colour-by colour", () => {
+  const nodes = [{ id: 0, year: 1990 }, { id: 1, year: 2020 }];
+  const state = {
+    genResult: { nodes }, clusterLevels: [], citationResult: null,
+    selection: { type: null, id: null }, highlights: { bySource: {} },
+  };
+  assert.equal(cm.anyHighlightActive(state), false);
+  assert.equal(cm.nodeColourFor(nodes[0], state, "year"), cm.baseColourFor(nodes[0], state, "year"));
+  assert.equal(cm.nodeColourFor(nodes[1], state, "year"), cm.baseColourFor(nodes[1], state, "year"));
 });
 
 test("highlight signature changes on add / clear / membership", () => {

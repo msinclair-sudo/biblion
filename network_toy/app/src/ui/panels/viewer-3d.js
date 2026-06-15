@@ -22,9 +22,10 @@
 
 import { makeBlendForce }                  from "../../blend/blend.js";
 import { buildBaseEdges }                   from "../../base-edges.js";
-import { getState, setTabConfig }          from "../state.js";
+import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
+  anyHighlightActive,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
@@ -142,6 +143,27 @@ export function mount(container, _state, config = {}, tabContext = null) {
     },
   });
   container.appendChild(colourOverlay.root);
+
+  // Deselect-all control (top-left, under the colour-mode dropdown). Clears the
+  // node selection — both the J25 highlight channel and the single
+  // state.selection — so the colour-by returns to colouring every node. Shown
+  // only while a selection is active (toggled in the reactive update loop).
+  const deselectBtn = document.createElement("button");
+  deselectBtn.className = "viewer-3d-deselect";
+  deselectBtn.type = "button";
+  deselectBtn.textContent = "Deselect all nodes";
+  deselectBtn.title = "Clear the node selection";
+  deselectBtn.style.display = "none";
+  deselectBtn.addEventListener("click", () => {
+    clearAllHighlights();
+    setSelection({ type: null, id: null });
+  });
+  container.appendChild(deselectBtn);
+  const syncDeselectBtn = (s) => {
+    const active = anyHighlightActive(s) || !!(s.selection && s.selection.type);
+    deselectBtn.style.display = active ? "" : "none";
+  };
+  syncDeselectBtn(getState());
 
   // J20: fusion-blend overlay (bottom-left, vertical). Adopts the global
   // #fusion-blend-row host so it sits over the layout it blends. main.js
@@ -410,6 +432,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
   return {
     update(s) {
+      // Toggle the deselect-all control whenever selection state changes
+      // (cheap; independent of the Graph being ready).
+      syncDeselectBtn(s);
       if (!Graph) return;
       // Rebuild on either: new engine output, or view-flag change
       // (citation/base/structure toggles, opacity, density, arrows).

@@ -235,9 +235,7 @@ def test_scoring_panel_renders_banded_labels_multiline(clean_page):
             sel.value = "cTfidfStratified";
             sel.dispatchEvent(new Event("change"));
             await new Promise(r => setTimeout(r, 40));
-            // expand every per-cluster show-more to reveal the per-band lines
-            for (const b of host.querySelectorAll(".scoring-label-showmore")) b.click();
-            await new Promise(r => setTimeout(r, 40));
+            // banded labels render all per-band lines immediately (no show-more)
             const bandLines = [...host.querySelectorAll(".scoring-label-band")].map(n => n.textContent);
             const hasDropdown = !!sel;
             inst.destroy();
@@ -245,7 +243,7 @@ def test_scoring_panel_renders_banded_labels_multiline(clean_page):
         }'''
     )
     assert out["hasDropdown"] is True
-    # five band lines per cluster, each band on its own line once expanded
+    # five band lines per cluster, each band on its own line
     assert any(t.startswith("anchor:") for t in out["bandLines"])
     assert any(t.startswith("broad:") for t in out["bandLines"])
     assert any(t.startswith("mid:") for t in out["bandLines"])

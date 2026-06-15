@@ -225,27 +225,34 @@ export function nodeMatchesSelection(node, state, sel) {
   return null;
 }
 
-// Highlight glow (J25). Resolve a node's glow colour from the general
-// multi-source highlight channel (state.highlights.bySource). Returns the
-// group colour when the node is in any source's id set, else null (no glow).
-// Multiple groups can match; the MOST RECENTLY added/updated group wins (by
-// group.seq), so the user's latest highlight action takes visual precedence
-// over older ones — more intuitive than arbitrary key-insertion order.
-// This is the ADDITIVE layer composed ON TOP of the base/dim colour by
-// nodeColourFor — a glow, not a recolour of the underlying mode.
-export function highlightColourFor(node, state) {
+// Selection focus (J25). The highlight channel (state.highlights.bySource) is
+// the multi-source node-SELECTION set — scoring-card picks, SQL-search hits,
+// viewer selections, etc. When ANY selection is active the viewers grey out
+// every non-selected node and render the selected ones at their normal
+// colour-by colour (see nodeColourFor): the colour-by stays the primary
+// colouring, selection only dims the rest. So we need membership predicates,
+// not a glow colour.
+
+// True when at least one highlight source has members → a selection is active.
+export function anyHighlightActive(state) {
   const hs = state.highlights;
-  if (!hs || !hs.bySource) return null;
-  let best = null;
-  let bestSeq = -Infinity;
+  if (!hs || !hs.bySource) return false;
   for (const source in hs.bySource) {
     const g = hs.bySource[source];
-    if (g && g.ids && g.ids.has(node.id)) {
-      const seq = g.seq ?? 0;
-      if (seq >= bestSeq) { bestSeq = seq; best = g.colour || "#ffd23f"; }
-    }
+    if (g && g.ids && g.ids.size > 0) return true;
   }
-  return best;
+  return false;
+}
+
+// True when this node is in any highlight source's id set (i.e. selected).
+export function isNodeHighlighted(node, state) {
+  const hs = state.highlights;
+  if (!hs || !hs.bySource) return false;
+  for (const source in hs.bySource) {
+    const g = hs.bySource[source];
+    if (g && g.ids && g.ids.has(node.id)) return true;
+  }
+  return false;
 }
 
 // Cheap fingerprint of the highlight channel — each viewer caches the prior
@@ -267,31 +274,28 @@ export function highlightSignature(state) {
   return parts.join("|");
 }
 
-// Final node colour = base ± selection dim, with the highlight glow composed
-// ADDITIVELY on top. The single function each viewer calls per node per frame.
+// Final node colour. The active colour mode is the PRIMARY colouring; node
+// selection only dims the rest. The single function each viewer calls per node
+// per frame.
 //
-// Composition order (J25):
+// Composition:
 //   1. base colour for the active mode;
-//   2. selection-dim — non-matching nodes drop to DIMMED_COLOUR (the existing
-//      single-selection mechanism). Search is NO LONGER a dedicated dim branch;
-//      it's a highlight SOURCE now (state.highlights "search" group).
-//   3. highlight glow — if the node is in any highlight group, its glow colour
-//      WINS over the base/dim colour, so a highlighted node lights up even when
-//      it would otherwise be dimmed. Highlights do NOT dim non-highlighted
-//      nodes (that's selection's job); they only brighten their own members.
-//
-// NOTE (open question flagged in J25): the viewers render a single per-node
-// colour (3d-force-graph spheres / force-graph canvas dots), and the cheap
-// no-rebuild path is the nodeColor accessor — so the "glow" is implemented as
-// a colour override on the highlighted node rather than a separate emissive
-// halo mesh (which would require geometry rebuild, forbidden here). It
-// composes with selection-dim by overriding it: a highlighted dimmed node
-// shows its glow colour; non-highlighted nodes keep whatever the
-// selection-dim produced.
+//   2. selection focus — when any nodes are selected (via the J25 highlight
+//      channel and/or the single state.selection), every NON-selected node
+//      drops to DIMMED_COLOUR (grey) while selected nodes keep their base
+//      colour-by colour. With nothing selected, every node shows its base
+//      colour. This replaces the old per-source "glow" recolour: selection
+//      reads as colour-by-on-grey, not a flat highlight hue.
 export function nodeColourFor(node, state, mode) {
   const base = baseColourFor(node, state, mode);
-  const matched = nodeMatchesSelection(node, state, state.selection);
-  const dimmed = (matched === null) ? base : (matched ? base : DIMMED_COLOUR);
-  const glow = highlightColourFor(node, state);
-  return glow || dimmed;
+  const matched = nodeMatchesSelection(node, state, state.selection);   // true | false | null
+  if (anyHighlightActive(state)) {
+    // Focus on the highlight selection set; also keep a single-selection match
+    // visible when both mechanisms are in play.
+    return (isNodeHighlighted(node, state) || matched === true) ? base : DIMMED_COLOUR;
+  }
+  // No highlight set → fall back to the single-selection dim (cluster / origin
+  // / node picks from the tables). null = this selection type doesn't dim.
+  if (matched === null) return base;
+  return matched ? base : DIMMED_COLOUR;
 }

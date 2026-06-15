@@ -55,8 +55,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // Board-wide cluster-block sort (persisted on the tab). Defaults to the
   // existing eligibility/bridge order.
   let sortMode = (config && config.sortMode) || "default";
-  // Per-cluster "show all band terms" expansion (panel-local; keyed levelUid:clusterId).
-  const expanded = new Set();
 
   function persistMethod(id) {
     labelMethod = id;
@@ -338,6 +336,27 @@ export function mount(container, _state, config = {}, tabContext = null) {
     return ids;
   }
 
+  // Is this cluster currently selected? Mirrors the viewer: a cluster reads as
+  // selected when ALL of its nodes sit within the active node-selection (the
+  // J25 highlight channel, any source) — so a selection made by clicking this
+  // block, or from the viewer / another card, lights up the owning block.
+  // "All" (not "any") is deliberate: a bridge cluster straddling two coarse
+  // parents shouldn't highlight when only one parent is selected.
+  function isClusterSelected(cr, cl) {
+    const sources = getState().highlights && getState().highlights.bySource;
+    if (!sources) return false;
+    const ids = nodeIdsForCluster(cr, cl);
+    if (ids.length === 0) return false;
+    const inAny = (id) => {
+      for (const k in sources) {
+        const g = sources[k];
+        if (g && g.ids && g.ids.has(id)) return true;
+      }
+      return false;
+    };
+    return ids.every(inAny);
+  }
+
   // Gather a cluster's REAL (non-ghost) papers for the cart. Cluster membership
   // is the authoritative node-index → cluster-id map (cr.nodeCluster); ghosts
   // carry citation edges but no paper we'd put in a subset, so they're skipped.
@@ -364,10 +383,11 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // "scoring" group instead of replacing it (multi-select).
   function clusterBlock(card, layerIdx, levelUid, cr, cl, labels, levelScores, metric, eligible) {
     const block = document.createElement("div");
-    block.className = "scoring-cluster" + (eligible ? "" : " ineligible");
+    block.className = "scoring-cluster" + (eligible ? "" : " ineligible")
+      + (isClusterSelected(cr, cl) ? " selected" : "");
     block.addEventListener("click", (e) => {
-      // Score buttons / show-more stopPropagation, so a block click here is a
-      // genuine "select this cluster" gesture. Glow in the cluster's own colour.
+      // Score buttons stopPropagation, so a block click here is a genuine
+      // "select this cluster" gesture. Glow in the cluster's own colour.
       const additive = e.ctrlKey || e.metaKey;
       addHighlight("scoring", nodeIdsForCluster(cr, cl), cl.colour || "#ffd23f", additive);
     });
@@ -424,7 +444,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
     labHead.textContent = "label:";
     labWrap.appendChild(labHead);
     const byMethod = (info && info.byMethod) || {};
-    const expandKey = `${levelUid}:${cl.id}`;
 
     if (labelMethod === COMBINED) {
       const li = document.createElement("div");
@@ -439,8 +458,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
     } else {
       const v = byMethod[labelMethod];
       const name = METHOD_LABEL[labelMethod] || labelMethod;
-      // banded (stratified) labels render one band per line for readability,
-      // behind a per-cluster show-more so they don't dominate the column.
+      // banded (stratified) labels render one band per line for readability.
       if (v && v.bands) {
         const wrap = document.createElement("div");
         wrap.className = "scoring-label-bullet stratified";
@@ -448,34 +466,15 @@ export function mount(container, _state, config = {}, tabContext = null) {
         head.className = "scoring-label-method";
         head.textContent = `• ${name}:`;
         wrap.appendChild(head);
-        const isOpen = expanded.has(expandKey);
-        if (isOpen) {
-          for (const b of ["anchor", "broad", "mid", "specific", "signature"]) {
-            const arr = v.bands[b];
-            if (!arr || !arr.length) continue;
-            const line = document.createElement("div");
-            line.className = "scoring-label-band";
-            // full per-band terms (up to STRAT_PER_BAND, already computed).
-            line.textContent = `${b}: ${arr.slice(0, STRAT_PER_BAND).map(t => t.term).join(", ")}`;
-            wrap.appendChild(line);
-          }
-        } else {
-          // collapsed: the compact combined one-liner across the gradient.
+        for (const b of ["anchor", "broad", "mid", "specific", "signature"]) {
+          const arr = v.bands[b];
+          if (!arr || !arr.length) continue;
           const line = document.createElement("div");
-          line.className = "scoring-label-collapsed";
-          line.textContent = (info && info.combined) || (v.terms || []).slice(0, 3).join(" · ");
+          line.className = "scoring-label-band";
+          // full per-band terms (up to STRAT_PER_BAND, already computed).
+          line.textContent = `${b}: ${arr.slice(0, STRAT_PER_BAND).map(t => t.term).join(", ")}`;
           wrap.appendChild(line);
         }
-        const toggle = document.createElement("button");
-        toggle.type = "button";
-        toggle.className = "scoring-label-showmore";
-        toggle.textContent = isOpen ? "show less" : "show more";
-        toggle.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (isOpen) expanded.delete(expandKey); else expanded.add(expandKey);
-          render();
-        });
-        wrap.appendChild(toggle);
         labWrap.appendChild(wrap);
       } else {
         const li = document.createElement("div");

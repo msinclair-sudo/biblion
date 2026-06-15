@@ -78,13 +78,16 @@ function renderDatasets(body, descriptor, handle) {
 
 function datasetRow(ds, onClick) {
   const row = document.createElement("button");
-  row.className = "datasource-modal-item";
+  row.className = "datasource-modal-item drill";
   row.type = "button";
+
+  const text = document.createElement("div");
+  text.className = "datasource-modal-item-text";
 
   const name = document.createElement("div");
   name.className = "datasource-modal-item-name";
   name.textContent = ds.label || ds.id;
-  row.appendChild(name);
+  text.appendChild(name);
 
   const stats = document.createElement("div");
   stats.className = "datasource-modal-item-stats";
@@ -94,7 +97,13 @@ function datasetRow(ds, onClick) {
   if (ds.domain) bits.push(ds.domain);
   bits.push(`${ds.savesCount || 0} save${(ds.savesCount || 0) === 1 ? "" : "s"}`);
   stats.textContent = bits.join(" · ");
-  row.appendChild(stats);
+  text.appendChild(stats);
+  row.appendChild(text);
+
+  const chevron = document.createElement("span");
+  chevron.className = "datasource-modal-item-chevron";
+  chevron.textContent = "›";
+  row.appendChild(chevron);
 
   row.addEventListener("click", onClick);
   return row;
@@ -118,20 +127,26 @@ function renderSaves(body, descriptor, handle, ds) {
   body.appendChild(heading);
 
   // Create new — fresh ingest of this dataset (and any of its subsets).
+  const createHead = document.createElement("div");
+  createHead.className = "datasource-modal-section";
+  createHead.textContent = "Start a new analysis";
+  body.appendChild(createHead);
+
   const createWrap = document.createElement("div");
   createWrap.className = "datasource-modal-create";
-  createWrap.appendChild(createButton(ds.id, ds.label || ds.id, descriptor, handle));
+  // The full dataset is the primary call to action; subsets are secondary.
+  createWrap.appendChild(createButton(ds.id, ds.label || ds.id, descriptor, handle, true));
   // Subsets are selectable children: SQLITE_OPTIONS holds "<id>::<subset>".
   for (const opt of SQLITE_OPTIONS) {
     if (typeof opt.value === "string" && opt.value.startsWith(`${ds.id}::`)) {
-      createWrap.appendChild(createButton(opt.value, opt.label, descriptor, handle));
+      createWrap.appendChild(createButton(opt.value, opt.label, descriptor, handle, false));
     }
   }
   body.appendChild(createWrap);
 
   const savesHead = document.createElement("div");
-  savesHead.className = "datasource-modal-hint";
-  savesHead.textContent = "Or resume a saved project:";
+  savesHead.className = "datasource-modal-section";
+  savesHead.textContent = "Resume a saved project";
   body.appendChild(savesHead);
 
   const list = document.createElement("div");
@@ -164,9 +179,9 @@ function renderSaves(body, descriptor, handle, ds) {
   });
 }
 
-function createButton(datasetValue, label, descriptor, handle) {
+function createButton(datasetValue, label, descriptor, handle, primary = false) {
   const btn = document.createElement("button");
-  btn.className = "datasource-modal-action primary";
+  btn.className = "datasource-modal-action" + (primary ? " primary" : "");
   btn.type = "button";
   btn.textContent = `Create new (${label})`;
   btn.addEventListener("click", () => {

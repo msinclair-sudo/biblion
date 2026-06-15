@@ -84,13 +84,29 @@ const SECTIONS = [
 ];
 
 export function openDimredModal(descriptor) {
+  // Seed a stage's params from its algorithm's slot-specific defaults — the
+  // same source resetParams() draws on when a stage is focused. We do this
+  // EAGERLY for every stage (not lazily on first focus), so a user who opens
+  // the modal and clicks Apply without visiting each stage still commits real
+  // params. Otherwise unvisited UMAP stages commit empty params and fall back
+  // to computeUmap's generic n_components=2 — the viz stage then produces a 2-D
+  // layout, redimred never adopts _basePos (it requires a 3-D viz), and the 3-D
+  // viewer is stuck on the "pick a 3-d reduction" empty state.
+  const seedParamsFor = (section, method) => {
+    const algo = descriptor.listAlgos(section.family).find(a => a.id === method);
+    if (!algo) return {};
+    const fresh = (typeof algo.defaultParamsForSlot === "function")
+      ? algo.defaultParamsForSlot(section.family)
+      : algo.defaultParams();
+    return { ...fresh };
+  };
+
   // Working copy — committed only on Apply. Each stage keeps its own
-  // (method, params) cursor. We seed from the default preset so every
-  // stage opens with a sensible selection; params start empty and are
-  // filled by renderForAlgo() from each algorithm's slot defaults.
+  // (method, params) cursor, seeded from the default preset + slot defaults.
   const working = {};
   for (const section of SECTIONS) {
-    working[section.key] = { method: DEFAULT_PRESET[section.key], params: {} };
+    const method = DEFAULT_PRESET[section.key];
+    working[section.key] = { method, params: seedParamsFor(section, method) };
   }
 
   const body = document.createElement("div");
@@ -129,7 +145,8 @@ export function openDimredModal(descriptor) {
   // pickers' selected options, and re-renders the focused detail.
   function applyPreset() {
     for (const section of SECTIONS) {
-      working[section.key] = { method: DEFAULT_PRESET[section.key], params: {} };
+      const method = DEFAULT_PRESET[section.key];
+      working[section.key] = { method, params: seedParamsFor(section, method) };
     }
     for (const row of pickers.children) {
       const sel = row.querySelector("select");

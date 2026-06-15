@@ -16,9 +16,10 @@
 // viewer just paints _basePos2d.
 
 import ForceGraph from "force-graph";
-import { getState, setTabConfig }      from "../state.js";
+import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
+  anyHighlightActive,
 } from "../viewer-shared/colour-modes.js";
 
 export const ID = "viewer-2d";
@@ -74,6 +75,26 @@ export function mount(container, _state, config = {}, tabContext = null) {
     },
   });
   container.appendChild(colourOverlay.root);
+
+  // Deselect-all control — mirrors viewer-3d. Clears the J25 highlight channel
+  // and the single state.selection, so the colour-by colours every node again.
+  // Shown only while a selection is active (toggled in the update loop).
+  const deselectBtn = document.createElement("button");
+  deselectBtn.className = "viewer-3d-deselect";   // reuse 3D's styling
+  deselectBtn.type = "button";
+  deselectBtn.textContent = "Deselect all nodes";
+  deselectBtn.title = "Clear the node selection";
+  deselectBtn.style.display = "none";
+  deselectBtn.addEventListener("click", () => {
+    clearAllHighlights();
+    setSelection({ type: null, id: null });
+  });
+  container.appendChild(deselectBtn);
+  const syncDeselectBtn = (s) => {
+    const active = anyHighlightActive(s) || !!(s.selection && s.selection.type);
+    deselectBtn.style.display = active ? "" : "none";
+  };
+  syncDeselectBtn(getState());
 
   function init() {
     const rect = graphDiv.getBoundingClientRect();
@@ -169,6 +190,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
   return {
     update(s) {
+      syncDeselectBtn(s);
       if (!Graph) return;
       if (s.engineRevision !== lastDataRevision) {
         rebuildData();

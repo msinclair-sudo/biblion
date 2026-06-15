@@ -918,6 +918,12 @@ html, body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 .scoring-cluster.ineligible { opacity: 0.45; }
+/* Selected — its nodes are in the active selection. Accent rail + tint so the
+   owning block stands out when a cluster is picked in the viewer or here. */
+.scoring-cluster.selected {
+  background: rgba(97, 175, 239, 0.12);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .scoring-cluster-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .scoring-cluster-head { display: flex; align-items: center; gap: 6px; }
 .scoring-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
@@ -1370,6 +1376,25 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   background: var(--bg-2);
   color: var(--text);
 }
+
+/* Deselect-all control — sits just under the colour-mode dropdown (top-left).
+   Shown only while a node selection is active. */
+.viewer-3d-deselect {
+  position: absolute;
+  top: 44px;
+  left: 8px;
+  z-index: 10;
+  background: rgba(40, 44, 52, 0.85);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: var(--font-ui);
+  padding: 4px 9px;
+  cursor: pointer;
+  user-select: none;
+}
+.viewer-3d-deselect:hover { border-color: var(--accent); color: var(--accent); }
 
 /* ── viewer-3d settings overlay (camera speeds etc.) ───────────────── */
 
@@ -2258,6 +2283,146 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   font-size: 11px;
   color: var(--text-faint);
   font-style: italic;
+}
+
+/* ── dataset / save picker (the "open project" flow) ───────────────── */
+
+/* small uppercase section header separating "start fresh" from "resume" */
+.datasource-modal-section {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+  margin: 2px 0 -2px;
+}
+
+/* "← All datasets" — quiet text link, not a button-looking thing */
+.datasource-modal-back {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.datasource-modal-back:hover { color: var(--accent); }
+
+/* scrolling list of dataset / save cards */
+.datasource-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  /* room for the focus ring + scrollbar without clipping card borders */
+  padding: 1px;
+  margin: 0 -1px;
+}
+
+/* one clickable card: a dataset row, or a save's "open" affordance */
+.datasource-modal-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 9px 11px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.datasource-modal-item:hover {
+  border-color: var(--accent);
+  background: var(--bg-1);
+}
+.datasource-modal-item-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.datasource-modal-item-stats {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* dataset rows drill into their saves — lay name/stats beside a chevron */
+.datasource-modal-item.drill {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.datasource-modal-item-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.datasource-modal-item-chevron {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 17px;
+  line-height: 1;
+}
+.datasource-modal-item.drill:hover .datasource-modal-item-chevron { color: var(--accent); }
+
+/* "create new" buttons — wrap so subset variants flow onto a second row */
+.datasource-modal-create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.datasource-modal-action {
+  background: var(--bg-3);
+  border: 1px solid var(--border-light);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.datasource-modal-action:hover { border-color: var(--accent); color: var(--accent); }
+.datasource-modal-action.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+  color: white;
+}
+.datasource-modal-action.primary:hover { background: var(--accent); border-color: var(--accent); }
+
+/* a save row: the open card grows, a delete button sits flush at the end */
+.datasource-modal-save-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+.datasource-modal-save-row .datasource-modal-item { flex: 1; min-width: 0; }
+.datasource-modal-delete {
+  flex: none;
+  width: 32px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.datasource-modal-delete:hover {
+  border-color: var(--err);
+  background: var(--err);
+  color: white;
 }
 
 /* Databases ▸ Make New — id field + the copy-paste biblion command block. */

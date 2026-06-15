@@ -595,20 +595,22 @@ export function setSelection(selection) {
 }
 
 // ── Node highlights (J25) ───────────────────────────────────────────
-// General multi-source highlight channel. Any caller lights up a group of
-// nodeIds under a `source` tag with a glow `colour`; the viewers compose the
-// glow additively over the colour mode via the shared resolver. update() alone
-// notifies subscribers — the viewers detect the highlight change via a cheap
+// General multi-source node-SELECTION channel. Any caller selects a group of
+// nodeIds under a `source` tag; the viewers treat the union of all sources as
+// the active selection and grey out every non-selected node, keeping selected
+// nodes at their colour-by colour (see colour-modes.js nodeColourFor). update()
+// alone notifies subscribers — the viewers detect the change via a cheap
 // signature and re-run only the nodeColor accessor (NO rebuildData / engine
-// recompute). We deliberately do NOT bump engineRevision: an engineRevision
-// bump forces the viewers down their rebuildData path, which J25 forbids for a
-// purely-visual interaction-speed toggle.
+// recompute). We deliberately do NOT bump engineRevision: that would force the
+// viewers down their rebuildData path, which J25 forbids for a purely-visual
+// interaction-speed toggle.
+//
+// `colour` / `seq` on each group are retained (callers still pass a colour, and
+// other surfaces may key off the source) but no longer drive the viewer colour
+// — selection now reads as colour-by-on-grey, not a flat glow hue.
 
-const DEFAULT_HIGHLIGHT_COLOUR = "#ffd23f";   // warm amber glow default
-// Monotonic add-order stamp on each highlight group. On overlap the resolver
-// (highlightColourFor) picks the highest seq, so the most recent highlight
-// action wins visually regardless of bySource key order.
-let _highlightSeq = 0;
+const DEFAULT_HIGHLIGHT_COLOUR = "#ffd23f";   // legacy default; see note above
+let _highlightSeq = 0;                          // monotonic add-order stamp
 
 // Add (or replace) a highlight group for `source`. nodeIds is filtered to
 // integers. With additive=false (plain click) the source's set is replaced;

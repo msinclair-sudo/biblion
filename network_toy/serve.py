@@ -30,6 +30,7 @@ sanitised (no '/', no '..', must end '.zip'). Everything else falls through to
 static file serving.
 """
 
+import argparse
 import json
 import os
 import re
@@ -41,7 +42,7 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
-PORT = int(os.environ.get("NETWORK_TOY_PORT", "8000"))
+_DEFAULT_PORT = int(os.environ.get("NETWORK_TOY_PORT", "8000"))
 
 # The four files that make a data/<id> dir a loadable dataset (see datasource/
 # sqlite.js — the snapshot DB, the .npy embedding, the row->id index, and the
@@ -246,9 +247,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("", PORT), Handler)
-    print(f"network-toy serving {ROOT} at http://localhost:{PORT}/app/")
-    print(f"  dataset API: http://localhost:{PORT}/api/datasets")
+    parser = argparse.ArgumentParser(description="network-toy dev server")
+    parser.add_argument("--port", type=int, default=_DEFAULT_PORT,
+                        help=f"port to listen on (default: {_DEFAULT_PORT})")
+    args = parser.parse_args()
+    port = args.port
+
+    server = ThreadingHTTPServer(("", port), Handler)
+    print(f"network-toy serving {ROOT} at http://localhost:{port}/app/")
+    print(f"  dataset API: http://localhost:{port}/api/datasets")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
