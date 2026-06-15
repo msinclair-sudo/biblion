@@ -486,13 +486,28 @@ export async function redimred({ cascade = true } = {}) {
       preFusionBasePos = r.vizPre.data;
     }
 
-    if (preFusionBasePos && nextBasePos && preFusionBasePos.length === nextBasePos.length) {
-      const alignRes = alignGlobal({
-        target: nextBasePos,
-        source: preFusionBasePos,
-        n,
-      });
-      preFusionBasePos = alignRes.aligned;
+    // The pre-fusion viz covers only the m EMBEDDED nodes — ghosts have no
+    // pre-fusion position (they're placed only at fusion). Align the embedded
+    // block to the post-fusion embedded block, and when the post layout carries
+    // ghosts (n > m), expand to full n with each ghost taking its post-fusion
+    // position. This keeps _basePosPreFusion the SAME length as _basePos, which
+    // the fusion-blend lerp (blend.js) and node-displacement both require — they
+    // were silently skipping / erroring ("layout mismatch") on ghost corpora.
+    // Ghosts then stay put (zero fusion motion, zero displacement), correct
+    // since they exist only after placement.
+    if (preFusionBasePos && nextBasePos) {
+      const mPre  = preFusionBasePos.length / 3;
+      const nPost = nextBasePos.length / 3;
+      if (mPre === nPost) {
+        preFusionBasePos = alignGlobal({ target: nextBasePos, source: preFusionBasePos, n: nPost }).aligned;
+      } else if (mPre > 0 && mPre < nPost) {
+        const targetEmbedded  = nextBasePos.slice(0, mPre * 3);
+        const alignedEmbedded = alignGlobal({ target: targetEmbedded, source: preFusionBasePos, n: mPre }).aligned;
+        const full = new Float32Array(nextBasePos.length);
+        full.set(alignedEmbedded, 0);
+        full.set(nextBasePos.subarray(mPre * 3), mPre * 3);   // ghosts ← post position
+        preFusionBasePos = full;
+      }
     }
   }
 
