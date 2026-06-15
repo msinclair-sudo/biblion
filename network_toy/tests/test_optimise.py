@@ -3,8 +3,9 @@ slice B): Run enqueues a typed job, modal closes immediately, result
 auto-saves as a ValidationRun, per-row Apply works from the saved-run
 panel.
 
-Tests run against BFS-5000 + locked-default dim-reduction + locked-
-default HDBSCAN (per conftest.py's bfs5000_page session fixture).
+Tests run against the rehydrated fallworm baseline + locked-default
+dim-reduction + locked-default HDBSCAN (per conftest.py's `page`
+session fixture).
 """
 
 
@@ -45,15 +46,11 @@ def test_run_enqueues_and_closes_modal(page):
     assert snapshot["runningId"] is not None
     assert snapshot["runningType"] == "optimise"
     assert snapshot["runningLabel"].startswith("Optimise · ")
-    # Cancel the job so the next test starts clean.
-    page.evaluate(
-        '''async () => {
-            const state = await import("/app/src/ui/state.js");
-            const q = await import("/app/src/ui/queue.js");
-            const runningId = state.getState().jobs.runningId;
-            if (runningId) q.cancelJob(runningId);
-        }'''
-    )
+    # No manual job cancel here: the `page` fixture's per-test reset
+    # (_reset_page in conftest) cancels any pending/running jobs and wipes
+    # state.jobs before the next test, on pass OR fail. An inline cancel
+    # would be skipped if an assert above threw, leaving a job on the
+    # shared session — so teardown is the fixture's job, not the test's.
 
 
 import pytest

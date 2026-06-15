@@ -2,67 +2,21 @@
 condensed tree, extract a coarse→fine partition ladder with bridge-
 producing absorption, and fan the distance matrix out across cores.
 
-Pure tree maths (discoverLayers/flattenFrontier) are tested via a synthetic
-tree; the engine lane + nested-worker fan-out are exercised on real data.
+Pure tree maths (discoverLayers/flattenFrontier/absorbViaMST) are tested
+in the Node tier (tests/unit/multilevel.test.mjs); the main-thread worker
+fan-out, engine lane, and nested-worker fan-out are exercised here on the
+browser fixture.
 """
 
 import pytest
 
 
-# ── Pure tree maths (no clustering run needed) ──────────────────────────
-def test_discover_and_flatten_synthetic(clean_page):
-    """A hand-built balanced tree must yield 2→3→4-cluster layers and the
-    frontier cuts must match by hand."""
-    out = clean_page.evaluate(r'''async () => {
-        const m = await import("/app/src/clustering-multilevel.js");
-        const tree = {
-            numNodes: 7, n: 8, root: 0,
-            parent:      Int32Array.from([-1,0,0,1,1,2,2]),
-            birthLambda: Float64Array.from([0,1,1,3,3,6,6]),
-            stability:   Float64Array.from([0,2,2,1,1,1,1]),
-            size:        Int32Array.from([8,4,4,2,2,2,2]),
-            leafHome:    Int32Array.from([3,3,4,4,5,5,6,6]),
-            leafLambda:  Float64Array.from([8,8,8,8,8,8,8,8]),
-        };
-        const layers = m.discoverLayers(tree);
-        const cut = (lam) => {
-            const f = m.flattenFrontier(tree, lam);
-            return Array.from(m.relabelFrontier(f, 8).labels).join("");
-        };
-        return {
-            counts: layers.map(l => l.clusterCount),
-            ordered: layers.every((l, i) => i === 0 || l.clusterCount > layers[i-1].clusterCount),
-            cut2: cut(layers[0].lambda),
-            cut3: cut(layers[1].lambda),
-            cut4: cut(layers[2].lambda),
-        };
-    }''')
-    assert out["counts"] == [2, 3, 4]
-    assert out["ordered"] is True
-    assert out["cut2"] == "00001111"          # A | B
-    assert out["cut3"] == "00112222"          # A1 | A2 | B
-    assert out["cut4"] == "00112233"          # A1 | A2 | B1 | B2
-
-
-def test_absorb_via_mst_crosses_branches(clean_page):
-    """Stripped points are absorbed into the nearest cluster over the MST —
-    and can attach to a different branch than their tree home (the bridge
-    mechanism)."""
-    out = clean_page.evaluate(r'''async () => {
-        const m = await import("/app/src/clustering-multilevel.js");
-        // path graph 0-1-2-3-4-5-6-7, unit weights
-        const mst = [0,1,2,3,4,5,6].map(i => ({ i, j: i+1, w: 1 }));
-        const adj = m.buildMstAdjacency(mst, 8);
-        const labels = Int32Array.from([0,0,0,-1,-1,1,1,1]);
-        m.absorbViaMST(labels, adj, 8);
-        return { labels: Array.from(labels) };
-    }''')
-    # the two stripped middle points split to opposite clusters by MST distance
-    assert -1 not in out["labels"]
-    assert out["labels"] == [0, 0, 0, 0, 1, 1, 1, 1]
-
-
 # ── Parallel distance fan-out correctness (main-thread spawn) ───────────
+# Pure tree maths (discoverLayers / flattenFrontier / absorbViaMST) are
+# covered in the Node tier: tests/unit/multilevel.test.mjs. This browser
+# test stays because it exercises the real Web Worker fan-out (n > the
+# parallel threshold), which Node cannot run — under plain Node `Worker`
+# is undefined and pairwiseDistancesParallel takes its sync fallback.
 def test_parallel_distance_matches_sync(clean_page):
     """The cross-core distance matrix must equal the single-thread one. Use
     n=1500 (> PARALLEL_MIN_N) so the fan-out actually runs."""

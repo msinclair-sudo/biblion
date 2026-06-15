@@ -43,6 +43,27 @@ const URL = `http://localhost:${PORT}/app/`;
 // app/src/datasource/sqlite.js DATASETS.fallworm).
 const DATASET = "fallworm";
 
+// Bump whenever this generator changes in a way that affects fixture
+// CONTENT — pipeline params, dataset, or the generation logic below. Each
+// fixture records this in its manifest.fixtureStamp; the fast freshness
+// guard (tests/test_fixture_freshness.py) fails if a committed fixture's
+// stamp predates the current generator, catching a "changed the generator,
+// forgot to regenerate" drift that the schema version alone misses.
+export const GENERATOR_VERSION = 1;
+
+// Provenance stamp embedded in each fixture's manifest. The determinism
+// guard reads pipeline back from here (single source of truth — no second
+// hand-maintained copy to drift), and the freshness guard checks the
+// generatorVersion. clean has no data; data_only ingests but runs no
+// dim-red/clustering, so only the baseline carries a pipeline.
+function stampFor(name) {
+  return {
+    generatorVersion: GENERATOR_VERSION,
+    dataset:          name === "clean" ? null : DATASET,
+    pipeline:         name === "fallworm_baseline" ? PIPELINE : null,
+  };
+}
+
 // Fixed seed + documented params. These are the production-shaped locked
 // defaults run at the fallworm node count (n=1405) — small enough that the
 // full PCA->UMAP->UMAP-viz->HDBSCAN cascade completes in reasonable time
@@ -143,17 +164,17 @@ async function selectFallworm(page, pipeline) {
 }
 
 // Serialise the current page state to a zip and write it out.
-async function writeFixture(page, name) {
-  const b64 = await page.evaluate(async () => {
+async function writeFixture(page, name, stamp) {
+  const b64 = await page.evaluate(async (fixtureStamp) => {
     const state = await import("/app/src/ui/state.js");
     const { serialiseState } = await import("/app/src/persistence/serialise.js");
-    const blob = serialiseState(state.getState());
+    const blob = serialiseState(state.getState(), { fixtureStamp });
     const buf = new Uint8Array(await blob.arrayBuffer());
     // Base64 over the bridge — Playwright can't return a Blob/Buffer.
     let s = "";
     for (let i = 0; i < buf.length; i++) s += String.fromCharCode(buf[i]);
     return btoa(s);
-  });
+  }, stamp);
   const out = resolve(FIXTURE_DIR, `${name}.zip`);
   await writeFile(out, Buffer.from(b64, "base64"));
   console.log(`wrote ${out}`);
@@ -173,7 +194,7 @@ async function main() {
       wf.clearWorkflow();
       state.clearValidationRuns();
     });
-    await writeFixture(page, "clean");
+    await writeFixture(page, "clean", stampFor("clean"));
 
     // 2. data_only — fallworm ingested, no dim-red / clustering.
     await selectFallworm(page, PIPELINE);
@@ -181,7 +202,7 @@ async function main() {
       const engine = await import("/app/src/ui/engine.js");
       await engine.ingestDataOnly();
     });
-    await writeFixture(page, "data_only");
+    await writeFixture(page, "data_only", stampFor("data_only"));
 
     // 3. fallworm_baseline — full cascade from the same selection.
     await page.evaluate(async () => {
@@ -202,7 +223,7 @@ async function main() {
       throw new Error(`baseline pipeline produced an empty result: ${JSON.stringify(stats)}`);
     }
     console.log(`baseline: ${JSON.stringify(stats)}`);
-    await writeFixture(page, "fallworm_baseline");
+    await writeFixture(page, "fallworm_baseline", stampFor("fallworm_baseline"));
   } finally {
     await browser.close();
     await server.stop();

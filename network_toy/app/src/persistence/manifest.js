@@ -18,8 +18,8 @@ export const SCHEMA_VERSION = 4;
 // Build the manifest header written into the zip. Caller fills in
 // the contents list (paths inside the archive) since it has the
 // inventory after serialisation.
-export function buildManifest({ projectName, contents }) {
-  return {
+export function buildManifest({ projectName, contents, fixtureStamp }) {
+  const manifest = {
     schemaVersion: SCHEMA_VERSION,
     appName:       "network-toy",
     appVersion:    "v3-dev",
@@ -27,6 +27,13 @@ export function buildManifest({ projectName, contents }) {
     projectName:   projectName || null,
     contents,                                 // [string] — relative paths in the zip
   };
+  // Fixture provenance — ONLY present in generated test fixtures (written by
+  // scripts/make-fixtures.mjs), never in ordinary user saves. Records the
+  // generator version + the pipeline params that produced the fixture so the
+  // freshness/determinism guards can detect a committed fixture that has
+  // drifted from its generator. See network_toy/tests/test_fixture_*.py.
+  if (fixtureStamp) manifest.fixtureStamp = fixtureStamp;
+  return manifest;
 }
 
 export function validateManifest(manifest) {

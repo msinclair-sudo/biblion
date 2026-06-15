@@ -250,11 +250,16 @@ def _rehydrate(page, fixture_url):
 
 def _snapshot_pristine_slots(page):
     """Snapshot the pristine real-data geometry slots so the per-test reset
-    can restore them. References only — the arrays are never mutated in
-    place, only the slot is reassigned — so a test that clobbers
-    clusterLevels / dimredResult / _basePos (e.g. the projection tests,
-    which project synthetic length-2 cards into the legacy slots) can't
+    can restore them. These references are read-only: `_reset_page`
+    deep-clones each slot back into live state (never assigns the snapshot
+    itself), so the snapshot can't be mutated in place. A test that clobbers
+    clusterLevels / dimredResult / _basePos — whether by reassigning the
+    slot (the projection tests, which project synthetic length-2 cards into
+    the legacy slots) OR by mutating an array element in place — cannot
     corrupt the shared session for tests that run after it.
+
+    All these slots are plain data (plain objects/arrays + typed arrays,
+    per persistence/serialise.js), so structuredClone handles them.
     """
     page.evaluate(
         '''async () => {
@@ -286,8 +291,19 @@ def _reset_page(page):
             wf.clearWorkflow();
             state.clearValidationRuns();
             // Restore the pristine real-data geometry slots in case a prior
-            // test clobbered them (see _snapshot_pristine_slots).
-            if (window.__pristineSlots) state.update({ ...window.__pristineSlots });
+            // test clobbered them (see _snapshot_pristine_slots). Deep-clone
+            // each slot from the snapshot so a test that mutates a geometry
+            // array IN PLACE gets its own copy and can't corrupt the shared
+            // pristine snapshot for later tests (pytest documents that shared
+            // values are passed with no copy — the same no-copy hazard).
+            if (window.__pristineSlots) {
+                const ps = window.__pristineSlots;
+                const restored = {};
+                for (const k of Object.keys(ps)) {
+                    restored[k] = ps[k] == null ? ps[k] : structuredClone(ps[k]);
+                }
+                state.update(restored);
+            }
             // Clear in-flight jobs cleanly: cancel runnings, drop all.
             const cur = state.getState();
             const q = await import("/app/src/ui/queue.js");

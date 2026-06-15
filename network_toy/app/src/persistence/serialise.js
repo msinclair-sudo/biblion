@@ -45,7 +45,9 @@ const EXCLUDED_KEYS = new Set([
   // projectName — all handled explicitly below.
 ]);
 
-export function serialiseState(state) {
+// opts.fixtureStamp (optional): provenance metadata for generated test
+// fixtures, threaded into the manifest. Ordinary saves pass nothing.
+export function serialiseState(state, opts = {}) {
   const arrays = {};   // zip-relative path -> Uint8Array
   // Buffer-identity dedup: ArrayBuffer -> first zip path it was stashed
   // under. The same bytes can be referenced from two places (e.g. the
@@ -220,6 +222,7 @@ export function serialiseState(state) {
   const manifest = buildManifest({
     projectName: state.projectName || null,
     contents:    ["manifest.json", "state.json", ...Object.keys(arrays)],
+    fixtureStamp: opts.fixtureStamp || null,
   });
   const stateJson    = JSON.stringify(out, null, 0);     // compact
   const manifestJson = JSON.stringify(manifest, null, 2);

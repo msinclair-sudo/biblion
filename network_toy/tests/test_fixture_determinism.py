@@ -12,14 +12,26 @@ followed by a fixture regen.
 
 This is the ONLY fixture test that runs the engine for real, so it lives
 under @pytest.mark.slow and needs both a browser and the gitignored
-data/fallworm/ bundle. It skips cleanly when either the fixture zip or
-the raw data is absent.
+data/fallworm/ bundle.
 
-The fixed pipeline params MUST match scripts/make-fixtures.mjs — if you
-change them there, change them here (and regenerate the fixture).
+The pipeline params are NOT duplicated here: they are read back from the
+fixture's own manifest.fixtureStamp.pipeline (written by
+scripts/make-fixtures.mjs, the single source of truth). Recomputing with
+the exact params the fixture was built with is what makes this a true
+drift check, and it can't silently disagree with a second hand-kept copy.
+
+Skip policy: by default this skips cleanly when the fixture zip or the
+raw data is absent (most checkouts). On a machine that is SUPPOSED to
+have the data — the fixture-regeneration / CI-with-data box — export
+NETWORK_TOY_HAVE_FALLWORM=1 and a missing fixture or unreachable data
+becomes a hard FAILURE instead of a silent skip, so a misconfiguration
+can't quietly let drift through.
 """
 
+import json
+import os
 import socket
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -27,29 +39,34 @@ import pytest
 _HERE = Path(__file__).parent
 _FIXTURE = _HERE / "fixtures" / "fallworm_baseline.zip"
 
+# Set on a machine that genuinely has data/fallworm/ (regen / CI-with-data).
+# Flips "skip because absent" into "fail because absent" — the operator has
+# asserted the data is there, so absence means misconfiguration, not nothing.
+_HAVE_DATA = bool(os.environ.get("NETWORK_TOY_HAVE_FALLWORM"))
+
 # Coarse-shape tolerance. Node count + dim-red dimensionality are exact
 # (they're structural, not stochastic). Cluster count can wobble a little
 # across UMAP/HDBSCAN runs even at a fixed seed (BLAS thread nondeterminism,
 # library version drift), so it is checked within an absolute band.
 CLUSTER_COUNT_TOLERANCE = 3
 
-# Must mirror scripts/make-fixtures.mjs PIPELINE.
-PIPELINE = {
-    "dimred": {
-        "noise":       {"method": "pca",      "params": {"n_components": 100}},
-        "fusion":      {"method": "identity", "params": {}},
-        "compression": {"method": "umap",     "params": {"n_components": 50, "n_neighbors": 30, "min_dist": 0.0, "metric": "cosine", "random_state": 42}},
-        "viz":         {"method": "umap",     "params": {"n_components": 3, "n_neighbors": 15, "min_dist": 0.1, "metric": "cosine", "random_state": 43}},
-        "viz2d":       {"method": "umap",     "params": {"n_components": 2, "n_neighbors": 15, "min_dist": 0.1, "metric": "cosine", "random_state": 44}},
-    },
-    "hdbscan": {
-        "minSamples":       5,
-        "minClusterSize":   15,
-        "selectionMethod":  "eom",
-        "selectionEpsilon": 0,
-        "noiseMode":        "absorb",
-    },
-}
+
+def _skip_or_fail(msg):
+    """Skip by default; FAIL when NETWORK_TOY_HAVE_FALLWORM asserts the data
+    should be present (so absence is loud, not silent)."""
+    if _HAVE_DATA:
+        pytest.fail(f"{msg} — but NETWORK_TOY_HAVE_FALLWORM is set (data expected)")
+    pytest.skip(msg)
+
+
+def _fixture_pipeline():
+    """Read the pipeline params back from the fixture's own provenance stamp
+    (single source of truth — make-fixtures.mjs wrote it)."""
+    with zipfile.ZipFile(_FIXTURE) as zf:
+        with zf.open("manifest.json") as fh:
+            manifest = json.load(fh)
+    stamp = manifest.get("fixtureStamp") or {}
+    return stamp.get("pipeline")
 
 
 def _fallworm_data_present(base_url):
@@ -72,9 +89,15 @@ def _fallworm_data_present(base_url):
 def test_baseline_fixture_matches_live_pipeline(clean_page, dev_server):
     """Rehydrate the committed baseline, recompute it live, compare shape."""
     if not _FIXTURE.exists():
-        pytest.skip("fallworm_baseline.zip not generated yet — run `npm run make:fixtures`")
+        _skip_or_fail("fallworm_baseline.zip not generated yet — run `npm run make:fixtures`")
+    pipeline = _fixture_pipeline()
+    if not pipeline:
+        _skip_or_fail(
+            "baseline fixture has no pipeline stamp — regenerate with "
+            "`npm run make:fixtures` to record its provenance"
+        )
     if not _fallworm_data_present(dev_server):
-        pytest.skip("data/fallworm/ not present — cannot recompute baseline live")
+        _skip_or_fail("data/fallworm/ not present — cannot recompute baseline live")
 
     # 1. Rehydrate the committed fixture (fetched over the dev server, wrapped
     #    as a File, deserialised — the test_persistence.py mechanism).
@@ -129,7 +152,7 @@ def test_baseline_fixture_matches_live_pipeline(clean_page, dev_server):
                     ? s.clusterLevels[0].clusterResult.clusters.length : 0,
             };
         }''',
-        {"dimred": PIPELINE["dimred"], "hdbscan": PIPELINE["hdbscan"]},
+        {"dimred": pipeline["dimred"], "hdbscan": pipeline["hdbscan"]},
     )
 
     assert fixture["nNodes"] == live["nNodes"], (
