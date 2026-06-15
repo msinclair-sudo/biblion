@@ -13,11 +13,12 @@
 // their own scoring card); scores live ON the scoring card
 // (result.scores[levelUid][clusterId]) and travel with its branch.
 
-import { getState, subscribe }   from "../state.js";
+import { getState, subscribe, setTabConfig, addHighlight, addToCart } from "../state.js";
 import { getStep, getSelectedStep, getStepDescendants, getStepAncestors,
          findClusterLevels, setCardScore } from "../workflow.js";
+import { getIdByRow } from "../../datasource/sqlite.js";
 import { computeBridgeAnalysis } from "../bridge-analysis.js";
-import { listLabelMethods }      from "../../labelling/cluster-labels.js";
+import { listLabelMethods, STRAT_PER_BAND } from "../../labelling/cluster-labels.js";
 
 export const ID          = "scoring";
 export const LABEL       = "Scoring";
@@ -29,10 +30,45 @@ const TAU = 0.8;   // dominance cutoff: encapsulated vs bridge
 // Human label per method id (for the bullet prefixes).
 const METHOD_LABEL = Object.fromEntries(listLabelMethods().map(m => [m.id, m.label]));
 
-export function mount(container, _state, config = {}) {
+// Sentinel method id for the combined one-liner pick (combine()'s output),
+// shown by default instead of stacking every method per cluster.
+const COMBINED = "__combined__";
+
+// Board-wide sort for the cluster blocks WITHIN each column. "default" keeps the
+// existing eligibility/bridge ordering; the others re-order by the manual 1–5
+// score (result.scores[levelUid][clusterId]). "unscored" floats the not-yet-
+// scored blocks to the top so they're easy to find and clear.
+const SORT_OPTIONS = [
+  { id: "default",  label: "Default" },
+  { id: "scoreDesc", label: "Score desc" },
+  { id: "scoreAsc",  label: "Score asc" },
+  { id: "unscored",  label: "Un-scored first" },
+];
+
+export function mount(container, _state, config = {}, tabContext = null) {
   const fixedStepId = (config && config.stepId) || null;
   // Per-layer parent-score threshold (panel-local; survives re-renders).
   let thresholds = {};
+  // Which labelling method to display (persisted on the tab). Defaults to the
+  // combined pick; the header dropdown lets the user switch to any one method.
+  let labelMethod = (config && config.labelMethod) || COMBINED;
+  // Board-wide cluster-block sort (persisted on the tab). Defaults to the
+  // existing eligibility/bridge order.
+  let sortMode = (config && config.sortMode) || "default";
+  // Per-cluster "show all band terms" expansion (panel-local; keyed levelUid:clusterId).
+  const expanded = new Set();
+
+  function persistMethod(id) {
+    labelMethod = id;
+    if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { labelMethod: id });
+    render();
+  }
+
+  function persistSort(id) {
+    sortMode = id;
+    if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { sortMode: id });
+    render();
+  }
 
   function resolveCard() {
     if (fixedStepId) return getStep(fixedStepId);
@@ -86,10 +122,96 @@ export function mount(container, _state, config = {}) {
       return;
     }
 
+    // Panel header: pick which labelling method to display (combined by default).
+    container.appendChild(methodHeader(labelsByLevel));
+
     for (let i = 0; i < levels.length; i++) {
       root.appendChild(renderColumn(card, levels, labelsByLevel, scores, i));
     }
     container.appendChild(root);
+  }
+
+  // The labelling methods actually present in this card's stored labels, in
+  // registry order. Built from labels.methods (level-invariant), unioned across
+  // levels in case a level gated a method off.
+  function availableMethods(labelsByLevel) {
+    const seen = new Map();   // id → label
+    for (const lvl of Object.values(labelsByLevel)) {
+      for (const m of (lvl && lvl.methods) || []) {
+        if (m.available && !seen.has(m.id)) seen.set(m.id, m.label);
+      }
+    }
+    return [...seen.entries()].map(([id, label]) => ({ id, label }));
+  }
+
+  function methodHeader(labelsByLevel) {
+    const methods = availableMethods(labelsByLevel);
+    // If the persisted choice no longer exists, fall back to the combined pick.
+    if (labelMethod !== COMBINED && !methods.some(m => m.id === labelMethod)) {
+      labelMethod = COMBINED;
+    }
+    const head = document.createElement("div");
+    head.className = "scoring-board-head";
+    const lab = document.createElement("label");
+    lab.className = "scoring-method-label";
+    lab.textContent = "label method:";
+    head.appendChild(lab);
+    const sel = document.createElement("select");
+    sel.className = "scoring-method-select";
+    const opt = (value, text) => {
+      const o = document.createElement("option");
+      o.value = value; o.textContent = text;
+      if (value === labelMethod) o.selected = true;
+      sel.appendChild(o);
+    };
+    opt(COMBINED, "Combined (preferred)");
+    for (const m of methods) opt(m.id, m.label);
+    sel.addEventListener("change", () => persistMethod(sel.value));
+    head.appendChild(sel);
+
+    // Board-wide sort control: re-orders cluster blocks within every column.
+    const sortLab = document.createElement("label");
+    sortLab.className = "scoring-method-label";
+    sortLab.textContent = "sort by:";
+    head.appendChild(sortLab);
+    const sortSel = document.createElement("select");
+    sortSel.className = "scoring-method-select";
+    for (const o of SORT_OPTIONS) {
+      const el = document.createElement("option");
+      el.value = o.id; el.textContent = o.label;
+      if (o.id === sortMode) el.selected = true;
+      sortSel.appendChild(el);
+    }
+    sortSel.addEventListener("change", () => persistSort(sortSel.value));
+    head.appendChild(sortSel);
+    return head;
+  }
+
+  // Order a list of {cl, metric, eligible} blocks by the active sort mode.
+  // "default" preserves the incoming (eligibility/bridge) order. The score-based
+  // modes read the manual 1–5 from levelScores; un-scored clusters are treated
+  // as the lowest for desc (so they sink) and surfaced first for "unscored".
+  function sortBlocks(arr, levelScores) {
+    if (sortMode === "default") return arr;
+    const scoreOf = (it) => {
+      const v = levelScores[it.cl.id];
+      return Number.isFinite(v) ? v : null;
+    };
+    // Stable sort: decorate with the original index so equal keys keep order.
+    const decorated = arr.map((it, idx) => ({ it, idx, score: scoreOf(it) }));
+    decorated.sort((a, b) => {
+      if (sortMode === "unscored") {
+        const au = a.score == null ? 0 : 1;
+        const bu = b.score == null ? 0 : 1;
+        if (au !== bu) return au - bu;
+        return a.idx - b.idx;
+      }
+      const av = a.score == null ? -Infinity : a.score;
+      const bv = b.score == null ? -Infinity : b.score;
+      if (av !== bv) return sortMode === "scoreAsc" ? av - bv : bv - av;
+      return a.idx - b.idx;
+    });
+    return decorated.map(d => d.it);
   }
 
   function renderColumn(card, levels, labelsByLevel, scores, i) {
@@ -122,8 +244,9 @@ export function mount(container, _state, config = {}) {
 
     if (i === 0) {
       // Top layer — every cluster scoreable, no parent gate, no bridge split.
-      for (const cl of cr.clusters) {
-        body.appendChild(clusterBlock(card, levelUid, cl, labels, levelScores, null, true));
+      const blocks = cr.clusters.map(cl => ({ cl, metric: null, eligible: true }));
+      for (const it of sortBlocks(blocks, levelScores)) {
+        body.appendChild(clusterBlock(card, i, levelUid, cr, it.cl, labels, levelScores, it.metric, it.eligible));
       }
       return col;
     }
@@ -159,8 +282,10 @@ export function mount(container, _state, config = {}) {
     }
 
     const addBlocks = (arr) => {
-      for (const it of arr) {
-        body.appendChild(clusterBlock(card, levelUid, it.cl, labels, levelScores, it.metric, it.eligible));
+      // Sort within each section (core/bridge, eligible/below-threshold) so the
+      // bridge/threshold grouping is preserved while blocks reorder inside it.
+      for (const it of sortBlocks(arr, levelScores)) {
+        body.appendChild(clusterBlock(card, i, levelUid, cr, it.cl, labels, levelScores, it.metric, it.eligible));
       }
     };
     const divider = (text, muted) => {
@@ -202,11 +327,50 @@ export function mount(container, _state, config = {}) {
     return wrap;
   }
 
+  // Collect the active-dataset nodeIds belonging to cluster `cl` in this level.
+  // nodeCluster is indexed by node id (same convention the viewers use:
+  // cr.nodeCluster[node.id]), so the index IS the node id.
+  function nodeIdsForCluster(cr, cl) {
+    const ids = [];
+    const nc = cr && cr.nodeCluster;
+    if (!nc) return ids;
+    for (let id = 0; id < nc.length; id++) if (nc[id] === cl.id) ids.push(id);
+    return ids;
+  }
+
+  // Gather a cluster's REAL (non-ghost) papers for the cart. Cluster membership
+  // is the authoritative node-index → cluster-id map (cr.nodeCluster); ghosts
+  // carry citation edges but no paper we'd put in a subset, so they're skipped.
+  // Each item matches the cart's { paperId, nodeId, source } shape.
+  function clusterCartItems(cr, layerIdx, clusterId) {
+    const nodes = (getState().genResult && getState().genResult.nodes) || [];
+    const nc = cr.nodeCluster;
+    // Provenance string mirrors the node-table's cart convention ("L2·c5").
+    const source = `L${layerIdx}·c${clusterId}`;
+    const items = [];
+    if (!nc) return items;
+    for (let nodeId = 0; nodeId < nc.length; nodeId++) {
+      if (nc[nodeId] !== clusterId) continue;
+      if (nodes[nodeId] && nodes[nodeId].isGhost) continue;
+      const paperId = getIdByRow(nodeId);
+      if (paperId != null) items.push({ paperId, nodeId, source });
+    }
+    return items;
+  }
+
   // One cluster block: swatch + id/count, label bullets, 1–5 (if eligible),
-  // and a metrics slot.
-  function clusterBlock(card, levelUid, cl, labels, levelScores, metric, eligible) {
+  // and a metrics slot. Clicking the block highlights its nodes in both viewers
+  // via the general highlight channel (J25); Ctrl/Cmd+click adds to the current
+  // "scoring" group instead of replacing it (multi-select).
+  function clusterBlock(card, layerIdx, levelUid, cr, cl, labels, levelScores, metric, eligible) {
     const block = document.createElement("div");
     block.className = "scoring-cluster" + (eligible ? "" : " ineligible");
+    block.addEventListener("click", (e) => {
+      // Score buttons / show-more stopPropagation, so a block click here is a
+      // genuine "select this cluster" gesture. Glow in the cluster's own colour.
+      const additive = e.ctrlKey || e.metaKey;
+      addHighlight("scoring", nodeIdsForCluster(cr, cl), cl.colour || "#ffd23f", additive);
+    });
 
     const left = document.createElement("div");
     left.className = "scoring-cluster-main";
@@ -219,12 +383,39 @@ export function mount(container, _state, config = {}) {
     headRow.appendChild(sw);
     const idLab = document.createElement("span");
     idLab.className = "scoring-cluster-id";
-    const count = (cl.members && cl.members.length) || cl.count || 0;
-    idLab.textContent = `Cluster ${cl.id} · ${count}`;
+    // Two counts can differ: cl.count/members is total membership (incl. ghost
+    // nodes that carry citation edges but no real paper); the cart only takes
+    // real papers. We show the real-paper count — it's what "Add to cart" pushes
+    // and is the more meaningful figure for scoring. Falls back to total when no
+    // corpus is loaded (cartItems empty → 0).
+    const cartItems = clusterCartItems(cr, layerIdx, cl.id);
+    const totalCount = (cl.members && cl.members.length) || cl.count || 0;
+    const papers = cartItems.length;
+    // No corpus loaded → getIdByRow yields nothing for every node; fall back to
+    // the total membership rather than a misleading "0 papers / N".
+    const noCorpus = papers === 0 && totalCount > 0;
+    idLab.textContent = (noCorpus || papers === totalCount)
+      ? `Cluster ${cl.id} · ${totalCount}`
+      : `Cluster ${cl.id} · ${papers} papers / ${totalCount}`;
     headRow.appendChild(idLab);
+
+    // Add-to-cart: push this cluster's real papers (no ghosts) via the shared
+    // cart helper, which dedupes by paperId across clusters.
+    const cartBtn = document.createElement("button");
+    cartBtn.type = "button";
+    cartBtn.className = "scoring-cart-add";
+    cartBtn.textContent = "+ cart";
+    cartBtn.title = `Add ${papers} paper${papers === 1 ? "" : "s"} from this cluster to the cart`;
+    cartBtn.disabled = papers === 0;
+    cartBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      addToCart(cartItems);
+    });
+    headRow.appendChild(cartBtn);
     left.appendChild(headRow);
 
-    // label bullets — one per available method.
+    // label bullets — only the SELECTED method (combined by default), not every
+    // method stacked. The header dropdown switches which one shows here.
     const info = labels.perCluster && labels.perCluster[cl.id];
     const labWrap = document.createElement("div");
     labWrap.className = "scoring-cluster-labels";
@@ -233,39 +424,64 @@ export function mount(container, _state, config = {}) {
     labHead.textContent = "label:";
     labWrap.appendChild(labHead);
     const byMethod = (info && info.byMethod) || {};
-    const methodIds = Object.keys(byMethod);
-    if (methodIds.length === 0) {
+    const expandKey = `${levelUid}:${cl.id}`;
+
+    if (labelMethod === COMBINED) {
+      const li = document.createElement("div");
+      li.className = "scoring-label-bullet" + (info && info.combined ? "" : " none");
+      li.textContent = `• ${(info && info.combined) || "(unlabelled)"}`;
+      labWrap.appendChild(li);
+    } else if (!byMethod[labelMethod]) {
       const li = document.createElement("div");
       li.className = "scoring-label-bullet none";
-      li.textContent = "• (unlabelled)";
+      li.textContent = "• (no label for this method)";
       labWrap.appendChild(li);
     } else {
-      for (const mid of methodIds) {
-        const v = byMethod[mid];
-        const name = METHOD_LABEL[mid] || mid;
-        // banded (stratified) labels render one band per line for readability.
-        if (v && v.bands) {
-          const wrap = document.createElement("div");
-          wrap.className = "scoring-label-bullet stratified";
-          const head = document.createElement("div");
-          head.className = "scoring-label-method";
-          head.textContent = `• ${name}:`;
-          wrap.appendChild(head);
+      const v = byMethod[labelMethod];
+      const name = METHOD_LABEL[labelMethod] || labelMethod;
+      // banded (stratified) labels render one band per line for readability,
+      // behind a per-cluster show-more so they don't dominate the column.
+      if (v && v.bands) {
+        const wrap = document.createElement("div");
+        wrap.className = "scoring-label-bullet stratified";
+        const head = document.createElement("div");
+        head.className = "scoring-label-method";
+        head.textContent = `• ${name}:`;
+        wrap.appendChild(head);
+        const isOpen = expanded.has(expandKey);
+        if (isOpen) {
           for (const b of ["anchor", "broad", "mid", "specific", "signature"]) {
             const arr = v.bands[b];
             if (!arr || !arr.length) continue;
             const line = document.createElement("div");
             line.className = "scoring-label-band";
-            line.textContent = `${b}: ${arr.map(t => t.term).join(", ")}`;
+            // full per-band terms (up to STRAT_PER_BAND, already computed).
+            line.textContent = `${b}: ${arr.slice(0, STRAT_PER_BAND).map(t => t.term).join(", ")}`;
             wrap.appendChild(line);
           }
-          labWrap.appendChild(wrap);
         } else {
-          const li = document.createElement("div");
-          li.className = "scoring-label-bullet";
-          li.textContent = `• ${name}: ${formatLabel(v)}`;
-          labWrap.appendChild(li);
+          // collapsed: the compact combined one-liner across the gradient.
+          const line = document.createElement("div");
+          line.className = "scoring-label-collapsed";
+          line.textContent = (info && info.combined) || (v.terms || []).slice(0, 3).join(" · ");
+          wrap.appendChild(line);
         }
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "scoring-label-showmore";
+        toggle.textContent = isOpen ? "show less" : "show more";
+        toggle.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (isOpen) expanded.delete(expandKey); else expanded.add(expandKey);
+          render();
+        });
+        wrap.appendChild(toggle);
+        labWrap.appendChild(wrap);
+      } else {
+        const li = document.createElement("div");
+        li.className = "scoring-label-bullet";
+        li.textContent = `• ${name}: ${formatLabel(v)}`;
+        labWrap.appendChild(li);
       }
     }
     left.appendChild(labWrap);

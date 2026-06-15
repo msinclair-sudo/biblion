@@ -182,24 +182,6 @@ export function renderResults(host, outcome, scorer, onApplyRow, getLevels = nul
 
 // Columns specific to the active scorer.
 function scorerSpecificCols(scorer) {
-  if (scorer.id === "ari") {
-    return [{
-      // §6.18.10 B5 — show ARI alongside the % of Bayes-optimal ceiling
-      // when the toy datasource populated genResult.bayesOptimalAri.
-      key: "match", label: "Match", align: "right", sortable: true,
-      value: r => Number.isFinite(r.primary) ? r.primary : -Infinity,
-      render: r => {
-        const ari = r.primary;
-        const ceiling = r.extra && r.extra.ariCeiling;
-        if (!Number.isFinite(ari)) return "—";
-        if (Number.isFinite(ceiling) && ceiling > 0) {
-          const pct = Math.round((ari / ceiling) * 100);
-          return `${formatScalar(ari)} <span class="cm-cell-aux">(${pct}% of ${formatScalar(ceiling)})</span>`;
-        }
-        return formatScalar(ari);
-      },
-    }];
-  }
   if (scorer.id === "richness") {
     return [
       {

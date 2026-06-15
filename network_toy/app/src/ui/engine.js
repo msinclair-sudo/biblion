@@ -1,11 +1,10 @@
 // Engine orchestrator for the new shell.
 //
 // Mirrors the legacy main.js pipeline (regenerate → recluster →
-// reneighbour → retaste → resample → relayoutCitations) but
-// writes results into the new state container instead of a local
-// closure. Modules from app/src/ (generation, clustering*, citations*,
-// blend/align, citation-layout/) are unchanged — this is just the
-// new glue layer.
+// reneighbour → relayoutCitations) but writes results into the new
+// state container instead of a local closure. Modules from app/src/
+// (clustering*, citations/, blend/align, citation-layout/) are
+// unchanged — this is just the new glue layer.
 //
 // Each public function below = one re-run lane. Downstream functions
 // are called automatically so a parameter change at any layer
@@ -18,9 +17,6 @@ import { getAlgorithm as getDimredAlgorithm,
 import { validateDimredResult }                                  from "../dimred/contract.js";
 import { getAlgorithm as getClusteringAlgorithm,
          listAlgorithms as listClusteringAlgorithms }            from "../clustering-registry.js";
-import { inferNeighbourhoods, defaultNeighbourhoodParams }       from "../neighbourhoods.js";
-import { buildCitationTaste, defaultTasteParams }                from "../citation-taste.js";
-import { generateCitations, defaultCitationParams }              from "../citations.js";
 import { getAlgorithm as getCitationAlgorithm }                  from "../citations/registry.js";
 import { assertCitationResult }                                  from "../citations/contract.js";
 import { getAlgorithm as getCitationLayoutAlgorithm }            from "../citation-layout/registry.js";
@@ -81,18 +77,14 @@ function ensureLayerParams() {
     };
     dirty = true;
   }
-  if (!lp.neighbourhood) { next.neighbourhood = defaultNeighbourhoodParams(); dirty = true; }
-  if (!lp.taste)         { next.taste         = defaultTasteParams();         dirty = true; }
   if (!lp.citations) {
-    // Citation params are a flat bag (density / intraRate / …) for
-    // historical reasons + a `method` slot naming which algorithm in
-    // the citations registry to run. Method defaults to taste-network
-    // (the only generator we had until imported-edges landed); the
-    // data-source switch in reingest() overrides per source.
-    next.citations = { method: "taste-network", ...defaultCitationParams() };
+    // Citation params carry a `method` slot naming which algorithm in
+    // the citations registry to run. Real-data corpus edges load via
+    // imported-edges; that's the only citation source now.
+    next.citations = { method: "imported-edges" };
     dirty = true;
   } else if (!lp.citations.method) {
-    next.citations = { ...lp.citations, method: "taste-network" };
+    next.citations = { ...lp.citations, method: "imported-edges" };
     dirty = true;
   }
   if (!lp.clustering) {
@@ -127,7 +119,7 @@ function activeClusterAlgorithm() {
 
 function activeCitationAlgorithm() {
   const s = getState();
-  const id = (s.layerParams.citations && s.layerParams.citations.method) || "taste-network";
+  const id = (s.layerParams.citations && s.layerParams.citations.method) || "imported-edges";
   return getCitationAlgorithm(id);
 }
 
@@ -169,31 +161,19 @@ export async function ingestDataOnly() {
   ensureLayerParams();
   const s = getState();
 
-  const sourceId = s.activeAlgorithm.dataSource || "toy";
+  const sourceId = s.activeAlgorithm.dataSource;
   const source   = getDataSource(sourceId);
   const config   = (s.dataSource.configs && s.dataSource.configs[sourceId]) || source.defaultParams();
 
-  // Pick the citation algorithm appropriate for this source. Toy
-  // generates synthetic citations via taste-network; real loads them
-  // from disk via imported-edges. User can still flip the method
-  // afterward; this is just the sensible default at switch-time.
-  // Same lane also plumbs the toy's citation knobs (density / intra /
-  // cross) into Layer 3 params — they live under dataSource.configs.toy
-  // by historical convention (the data panel owns them UX-wise even
-  // though they're algorithmically Layer 3).
+  // Real-data corpus edges load from disk via imported-edges — the only
+  // citation source now. User can still flip the method afterward; this
+  // is just the sensible default at switch-time.
   {
     const cur = getState();
-    const desiredMethod = sourceId === "toy" ? "taste-network" : "imported-edges";
-    const nextCitations = { ...cur.layerParams.citations, method: desiredMethod };
-    if (sourceId === "toy") {
-      nextCitations.density   = config.density;
-      nextCitations.intraRate = config.intraRate;
-      nextCitations.crossRate = config.crossRate;
-    }
     update({
       layerParams: {
         ...cur.layerParams,
-        citations: nextCitations,
+        citations: { ...cur.layerParams.citations, method: "imported-edges" },
       },
     });
   }
@@ -245,8 +225,6 @@ export async function ingestDataOnly() {
     clusterLevels:          null,
     clusterResult:          null,
     bridgeAnalysis:         null,
-    neighbourhoodResult:    null,
-    tasteResult:            null,
     citationResult:         null,
     citationLayout:         null,
     alignedCitationLayout:  null,
@@ -1024,44 +1002,13 @@ function clampedBridgeConfig(cfg, levels) {
 // app/src/clustering-cascade.js so the clustering worker can run the
 // full pass without re-implementing the same logic.)
 
-// Entry to the Layer 3 lane after clustering. Dispatches on the
-// active citation algorithm's declared requirements:
-//   needsNeighbourhoods === false  → algorithm imports its own
-//                                     edges; skip directly to the
-//                                     resampleViaImport() lane.
-//   needsBasePos        === true   → algorithm needs a 3-d basePos
-//                                     (taste-network's Euclidean
-//                                     neighbourhood reasoning). Bail
-//                                     when basePos isn't materialised
-//                                     yet (real-data path before the
-//                                     viz sub-stage runs).
-// This replaces the previous `if (!_basePos) bail` hack with
-// declarative per-algorithm flags read off the registry entry.
+// Entry to the Layer 3 lane after clustering. The only citation source
+// now is imported-edges (real-data corpus edges), which imports its own
+// edges async — dispatch straight to the resampleViaImport() lane.
 export function reneighbour() {
   const s = getState();
   if (!s.genResult || !s.clusterResult) return;
-
-  const citAlgo = activeCitationAlgorithm();
-
-  // Import-style algorithms: short-circuit straight to a dedicated
-  // lane that calls the algorithm's async `infer` directly. The
-  // neighbourhood / taste lanes never run.
-  if (!citAlgo.needsNeighbourhoods) {
-    update({ neighbourhoodResult: null, tasteResult: null });
-    resampleViaImport();
-    return;
-  }
-
-  // Generation-style algorithms (taste-network): require basePos.
-  if (citAlgo.needsBasePos && !s._basePos) {
-    update({ neighbourhoodResult: null });
-    return;
-  }
-  const neighbourhoodResult = inferNeighbourhoods(
-    s.genResult, s.clusterResult, s.layerParams.neighbourhood,
-  );
-  update({ neighbourhoodResult });
-  retaste();
+  resampleViaImport();
 }
 
 // Layer 3 — import path. The algorithm's `infer` is async (importers
@@ -1072,7 +1019,7 @@ export function reneighbour() {
 export async function resampleViaImport() {
   const s = getState();
   const citAlgo = activeCitationAlgorithm();
-  const dsId = s.activeAlgorithm.dataSource || "toy";
+  const dsId = s.activeAlgorithm.dataSource;
   const dataSourceParams = (s.dataSource.configs && s.dataSource.configs[dsId]) || {};
 
   let citationResult;
@@ -1101,35 +1048,11 @@ export async function resampleViaImport() {
   markCitationLayoutStale();
 }
 
-// taste-network's internal stages 2 + 3.
-export function retaste() {
-  const s = getState();
-  if (!s.clusterResult || !s.neighbourhoodResult) return;
-  const tasteResult = buildCitationTaste(
-    s.clusterResult, s.neighbourhoodResult, s.layerParams.taste,
-  );
-  update({ tasteResult });
-  resample();
-}
-
-// Layer 3 final stage + cascade.
-export function resample() {
-  const s = getState();
-  if (!s.genResult || !s.clusterResult || !s.neighbourhoodResult || !s.tasteResult) return;
-  const citationResult = generateCitations(
-    s.genResult, s.clusterResult, s.neighbourhoodResult, s.tasteResult, s.layerParams.citations,
-  );
-  update({ citationResult });
-  setLayerState("citations", "fresh");
-  // Citation layout opt-in: see resampleViaImport — same rule.
-  markCitationLayoutStale();
-}
-
 // Mark layout / alignment / blend as stale and CLEAR cached layouts
 // so the existing-stale-blend doesn't keep rendering against a
-// citation-result that no longer matches it. Called from both the
-// import path (resampleViaImport) and the generation path (resample)
-// when citations change. Until the user explicitly applies a layout
+// citation-result that no longer matches it. Called from the import
+// path (resampleViaImport) when citations change. Until the user
+// explicitly applies a layout
 // algorithm, citationLayout / alignedCitationLayout stay null and
 // the per-frame blend hook falls back to basePos only (α=1 visually
 // snaps to basePos because alignedCitationPos is null → blend bails).

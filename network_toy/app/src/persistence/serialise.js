@@ -31,23 +31,28 @@ const PASS_THROUGH_KEYS = [
   "selection",
   "cart",
   "filter",
-  "blend",
   "fusionBlend",
   "bridgeConfig",
+  "view",          // viewer-3d edge toggles + colours
 ];
 
 // Slot keys that are excluded from the save entirely.
 const EXCLUDED_KEYS = new Set([
   "engineRevision",
   // genResult, _basePos, embedding, dimredResult, clusterLevels,
-  // clusterResult, bridgeAnalysis, neighbourhoodResult, tasteResult,
-  // citationResult, citationLayout, alignedCitationLayout,
-  // alignmentCorrelation, evalResults, projectName — all handled
-  // explicitly below.
+  // clusterResult, bridgeAnalysis, citationResult, citationLayout,
+  // alignedCitationLayout, alignmentCorrelation, evalResults,
+  // projectName — all handled explicitly below.
 ]);
 
 export function serialiseState(state) {
   const arrays = {};   // zip-relative path -> Uint8Array
+  // Buffer-identity dedup: ArrayBuffer -> first zip path it was stashed
+  // under. The same bytes can be referenced from two places (e.g. the
+  // dimred card's result.data and the flat dimredResult slot share one
+  // Float32Array buffer) — without this the n x 768 embedding and every
+  // heavy array would be written into the zip twice, ~doubling its size.
+  const dedup = new Map();
   const out = {};
 
   // 1. Pass-through slots (plain JSON).
@@ -63,26 +68,26 @@ export function serialiseState(state) {
 
   // 3. _basePos — flat Float32Array(n*3). Binary.
   if (state._basePos instanceof Float32Array) {
-    out._basePos = stashBinary(arrays, "arrays/basePos.f32", state._basePos);
+    out._basePos = stashBinary(arrays, "arrays/basePos.f32", state._basePos, dedup);
   }
   // 3aa. _basePosPreFusion — flat Float32Array(n*3) for the fusion
   //      comparison slider's α=0 endpoint. Present only when a fusion
   //      run has produced a parallel pre-fusion viz output.
   if (state._basePosPreFusion instanceof Float32Array) {
-    out._basePosPreFusion = stashBinary(arrays, "arrays/basePosPreFusion.f32", state._basePosPreFusion);
+    out._basePosPreFusion = stashBinary(arrays, "arrays/basePosPreFusion.f32", state._basePosPreFusion, dedup);
   }
 
   // 3a. _basePos2d — flat Float32Array(n*2) for the 2D viewer. Null
   //     when viz2d hasn't produced a 2-d output yet.
   if (state._basePos2d instanceof Float32Array) {
-    out._basePos2d = stashBinary(arrays, "arrays/basePos2d.f32", state._basePos2d);
+    out._basePos2d = stashBinary(arrays, "arrays/basePos2d.f32", state._basePos2d, dedup);
   }
 
   // 4. embedding — {d, data: Float32Array(n*d)}.
   if (state.embedding && state.embedding.data instanceof Float32Array) {
     out.embedding = {
       d:    state.embedding.d,
-      data: stashBinary(arrays, "arrays/embedding.f32", state.embedding.data),
+      data: stashBinary(arrays, "arrays/embedding.f32", state.embedding.data, dedup),
     };
   }
 
@@ -94,7 +99,7 @@ export function serialiseState(state) {
   // n=5000 is ~25 k entries (100 KB), small relative to the embedding.
   if (Array.isArray(state.rawCitationEdges) && state.rawCitationEdges.length > 0) {
     const flat = new Int32Array(state.rawCitationEdges);
-    out.rawCitationEdges = stashBinary(arrays, "arrays/rawCitationEdges.i32", flat);
+    out.rawCitationEdges = stashBinary(arrays, "arrays/rawCitationEdges.i32", flat, dedup);
   }
 
   // 5. dimredResult — {method, params, n, d, data: Float32Array(n*d)}.
@@ -104,7 +109,7 @@ export function serialiseState(state) {
       params: state.dimredResult.params,
       n:      state.dimredResult.n,
       d:      state.dimredResult.d,
-      data:   stashBinary(arrays, "arrays/dimredResult.f32", state.dimredResult.data),
+      data:   stashBinary(arrays, "arrays/dimredResult.f32", state.dimredResult.data, dedup),
     };
   }
 
@@ -116,7 +121,7 @@ export function serialiseState(state) {
       params: state.dimredResultPreFusion.params,
       n:      state.dimredResultPreFusion.n,
       d:      state.dimredResultPreFusion.d,
-      data:   stashBinary(arrays, "arrays/dimredResultPreFusion.f32", state.dimredResultPreFusion.data),
+      data:   stashBinary(arrays, "arrays/dimredResultPreFusion.f32", state.dimredResultPreFusion.data, dedup),
     };
   }
 
@@ -127,7 +132,7 @@ export function serialiseState(state) {
     out.clusterLevels = state.clusterLevels.map((lvl, idx) => ({
       uid:           lvl.uid,
       scope:         lvl.scope,
-      clusterResult: serialiseClusterResult(lvl.clusterResult, arrays, idx),
+      clusterResult: serialiseClusterResult(lvl.clusterResult, arrays, idx, dedup),
     }));
   }
   // (6a. clusterLevelsPreFusion removed — pre/post-fusion is now a workflow
@@ -145,22 +150,20 @@ export function serialiseState(state) {
       levels:      ba.levels,
       perCluster:  ba.perCluster,
       bridgeCount: ba.bridgeCount,
-      perNodeScore:    stashBinary(arrays, "arrays/bridge.perNodeScore.f32",    ba.perNodeScore),
-      perNodeIsBridge: stashBinary(arrays, "arrays/bridge.perNodeIsBridge.u8", ba.perNodeIsBridge),
+      perNodeScore:    stashBinary(arrays, "arrays/bridge.perNodeScore.f32",    ba.perNodeScore, dedup),
+      perNodeIsBridge: stashBinary(arrays, "arrays/bridge.perNodeIsBridge.u8", ba.perNodeIsBridge, dedup),
     };
   }
 
-  // 8. Toy citation pipeline outputs (only present in toy mode).
-  if (state.neighbourhoodResult) out.neighbourhoodResult = state.neighbourhoodResult;
-  if (state.tasteResult)         out.tasteResult         = state.tasteResult;
+  // 8. Citation pipeline output (Layer 3).
   if (state.citationResult)      out.citationResult      = state.citationResult;
 
   // 9. Citation layout / alignment.
   if (state.citationLayout instanceof Float32Array) {
-    out.citationLayout = stashBinary(arrays, "arrays/citationLayout.f32", state.citationLayout);
+    out.citationLayout = stashBinary(arrays, "arrays/citationLayout.f32", state.citationLayout, dedup);
   }
   if (state.alignedCitationLayout instanceof Float32Array) {
-    out.alignedCitationLayout = stashBinary(arrays, "arrays/alignedCitationLayout.f32", state.alignedCitationLayout);
+    out.alignedCitationLayout = stashBinary(arrays, "arrays/alignedCitationLayout.f32", state.alignedCitationLayout, dedup);
   }
   if (Number.isFinite(state.alignmentCorrelation)) {
     out.alignmentCorrelation = state.alignmentCorrelation;
@@ -182,8 +185,18 @@ export function serialiseState(state) {
   //      reviveBinaries walker reconstructs them automatically.
   if (Array.isArray(state.validationRuns) && state.validationRuns.length > 0) {
     out.validationRuns = state.validationRuns.map((run, i) =>
-      stashBinariesIn(run, arrays, `arrays/validationRuns/${i}`),
+      stashBinariesIn(run, arrays, `arrays/validationRuns/${i}`, dedup),
     );
+  }
+
+  // 10c. workflow — the canonical card tree (steps / rootId / selected).
+  //      Persisted alongside the flat projection slots so a load restores
+  //      the full branching DAG, not just the selected card's flat view.
+  //      Step results carry the same heavy TypedArrays as the flat slots
+  //      (they share buffers), so the generic stasher walks them and the
+  //      dedup Map keeps each buffer's bytes in the zip exactly once.
+  if (state.workflow) {
+    out.workflow = stashBinariesIn(state.workflow, arrays, "arrays/workflow", dedup);
   }
 
   // 10b. Tree scoring (MLC §5) — plain nested numbers keyed by level uid.
@@ -211,7 +224,7 @@ export function serialiseState(state) {
   return new Blob([zipped], { type: "application/zip" });
 }
 
-function serialiseClusterResult(cr, arrays, levelIdx) {
+function serialiseClusterResult(cr, arrays, levelIdx, dedup) {
   const out = {
     method:         cr.method,
     params:         cr.params,
@@ -223,6 +236,7 @@ function serialiseClusterResult(cr, arrays, levelIdx) {
       arrays,
       `arrays/clusterLevels/${levelIdx}.nodeCluster.i32`,
       cr.nodeCluster,
+      dedup,
     );
   }
   if (cr.noiseFlags instanceof Uint8Array) {
@@ -230,6 +244,7 @@ function serialiseClusterResult(cr, arrays, levelIdx) {
       arrays,
       `arrays/clusterLevels/${levelIdx}.noiseFlags.u8`,
       cr.noiseFlags,
+      dedup,
     );
   }
   // condensedTree (HDBSCAN / MLC-0) — a bag of node-parallel + per-leaf
@@ -240,6 +255,7 @@ function serialiseClusterResult(cr, arrays, levelIdx) {
       cr.condensedTree,
       arrays,
       `arrays/clusterLevels/${levelIdx}.condensedTree`,
+      dedup,
     );
   }
   return out;
@@ -247,10 +263,28 @@ function serialiseClusterResult(cr, arrays, levelIdx) {
 
 // Move a TypedArray into the arrays bag and return a descriptor
 // the loader can use to find it. Path becomes a key inside the zip.
-function stashBinary(arrays, path, typedArray) {
+//
+// When `dedup` is supplied and the typed array's underlying buffer was
+// already stashed, point the descriptor at the existing path instead of
+// writing the bytes again. Descriptors are full views (offset 0, whole
+// buffer) so dedup keys on buffer identity alone; reviveBinaries copies
+// per descriptor, so two descriptors sharing one path still yield
+// independent usable views on load.
+function stashBinary(arrays, path, typedArray, dedup) {
+  if (dedup) {
+    const existing = dedup.get(typedArray.buffer);
+    if (existing) {
+      return {
+        __binary: existing,
+        type:     typedArray.constructor.name,
+        length:   typedArray.length,
+      };
+    }
+  }
   // fflate expects Uint8Array per entry — view the same buffer.
   const bytes = new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
   arrays[path] = bytes;
+  if (dedup) dedup.set(typedArray.buffer, path);
   return {
     __binary: path,
     type:     typedArray.constructor.name,
@@ -268,7 +302,7 @@ function stashBinary(arrays, path, typedArray) {
 // serialise.js would mean per-type bespoke code. The deserialiser's
 // reviveBinaries walker is already generic, so a generic stasher on
 // this side closes the loop.
-function stashBinariesIn(node, arrays, pathPrefix, counter = { n: 0 }) {
+function stashBinariesIn(node, arrays, pathPrefix, dedup, counter = { n: 0 }) {
   if (node == null) return node;
   if (typeof node !== "object") return node;
 
@@ -277,16 +311,16 @@ function stashBinariesIn(node, arrays, pathPrefix, counter = { n: 0 }) {
   if (ArrayBuffer.isView(node) && !(node instanceof DataView)) {
     const ext  = extForTypedArray(node);
     const path = `${pathPrefix}/${counter.n++}.${ext}`;
-    return stashBinary(arrays, path, node);
+    return stashBinary(arrays, path, node, dedup);
   }
 
   if (Array.isArray(node)) {
-    return node.map(child => stashBinariesIn(child, arrays, pathPrefix, counter));
+    return node.map(child => stashBinariesIn(child, arrays, pathPrefix, dedup, counter));
   }
 
   const out = {};
   for (const [k, v] of Object.entries(node)) {
-    out[k] = stashBinariesIn(v, arrays, pathPrefix, counter);
+    out[k] = stashBinariesIn(v, arrays, pathPrefix, dedup, counter);
   }
   return out;
 }

@@ -32,9 +32,46 @@ export async function deserialiseFile(file) {
     throw new Error("[persistence] no state.json in archive");
   }
   const raw = JSON.parse(strFromU8(entries["state.json"]));
+  // (Back-compat shim entry point — additive normalisation of `raw` for
+  //  older schema versions goes here, before reviveBinaries.)
+  normaliseLegacyToy(raw);
   const patch = reviveBinaries(raw, entries);
 
+  // reviveBinaries handles nested descriptors recursively, including
+  // multiple descriptors that point at one shared arrays/ entry (the
+  // serialiser's buffer-identity dedup emits these): each descriptor
+  // gets its own copied buffer, so the revived views are independent
+  // and usable even when they share a source path.
   return { patch, manifest };
+}
+
+// Back-compat: the synthetic toy data path was retired. Old project
+// archives can still name registry entries that no longer exist —
+// rewrite them to their real-data equivalents in place so the rest of
+// the load (and engine boot) doesn't reference a missing registry key.
+//   citations.method "taste-network"        -> "imported-edges"
+//   evalResults.optimise scorer "ari"/"auto" -> "richness"
+function normaliseLegacyToy(raw) {
+  if (!raw || typeof raw !== "object") return;
+
+  // The topbar alpha/blend slider was retired (J14). Older archives may
+  // still carry a top-level `blend` value — drop it so it isn't merged
+  // back into live state as a stray key. The fusion-blend slider's
+  // `fusionBlend` is unrelated and kept.
+  if ("blend" in raw) delete raw.blend;
+
+  if (raw.citations && raw.citations.method === "taste-network") {
+    raw.citations.method = "imported-edges";
+  }
+
+  const opt = raw.evalResults && raw.evalResults.optimise;
+  if (opt) {
+    const sid = opt.scorerId || opt.scorer;
+    if (sid === "ari" || sid === "auto") {
+      if ("scorerId" in opt) opt.scorerId = "richness";
+      if ("scorer" in opt) opt.scorer = "richness";
+    }
+  }
 }
 
 // Recursively walk a JSON-deserialised object; whenever we see a

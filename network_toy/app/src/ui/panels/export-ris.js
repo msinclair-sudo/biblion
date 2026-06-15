@@ -17,6 +17,7 @@ import { getStep, getSelectedStep, getStepAncestors,
          findClusterLevels } from "../workflow.js";
 import { getNodeRecord, hasSqliteText } from "../../datasource/sqlite.js";
 import { selectNodes, buildRis, exportFilename, downloadText } from "../../export/cluster-export.js";
+import { select as kitSelect, numberInput as kitNumberInput } from "../widgets.js";
 
 export const ID          = "export-ris";
 export const LABEL       = "Export (RIS)";
@@ -166,30 +167,29 @@ function row(labelText) {
   r.appendChild(l);
   return r;
 }
+// Thin wrappers over the kit (widgets.js) that keep this panel's numeric
+// coercion + clamping and its `export-*` class names — same DOM/wiring as
+// the previous hand-rolled controls. Option values are numbers here, so
+// match against String(value) and coerce the change back with Number().
 function select(options, value, onChange) {
-  const s = document.createElement("select");
-  s.className = "export-select";
-  for (const o of options) {
-    const opt = document.createElement("option");
-    opt.value = String(o.value);
-    opt.textContent = o.label;
-    if (o.value === value) opt.selected = true;
-    s.appendChild(opt);
-  }
-  s.addEventListener("change", () => onChange(Number(s.value)));
-  return s;
+  return kitSelect(
+    options.map(o => ({ value: String(o.value), label: o.label })),
+    {
+      value: String(value),
+      className: "export-select",
+      onChange: (v) => onChange(Number(v)),
+    },
+  );
 }
 function numberInput(min, max, step, value, onChange) {
-  const i = document.createElement("input");
-  i.type = "number";
-  i.className = "export-number";
-  i.min = String(min); i.max = String(max); i.step = String(step);
-  i.value = String(value);
-  i.addEventListener("change", () => {
-    let v = parseInt(i.value, 10);
-    if (!Number.isFinite(v)) v = min;
-    v = Math.max(min, Math.min(max, v));
-    onChange(v);
+  const i = kitNumberInput({
+    min, max, step, value, className: "export-number",
+    onChange: () => {
+      let v = parseInt(i.value, 10);
+      if (!Number.isFinite(v)) v = min;
+      v = Math.max(min, Math.min(max, v));
+      onChange(v);
+    },
   });
   return i;
 }

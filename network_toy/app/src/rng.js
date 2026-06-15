@@ -20,7 +20,3 @@ export function gauss(rng) {
   while (v === 0) v = rng();
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
-
-export function gauss3(rng) {
-  return [gauss(rng), gauss(rng), gauss(rng)];
-}

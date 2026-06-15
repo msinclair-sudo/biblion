@@ -93,7 +93,8 @@ def test_scoring_in_next_steps_and_panel_registered(clean_page):
         }'''
     )
     assert "scoring" in out["labelling"]
-    assert out["scoringFollow"] == []      # scoring's only follow-on is re-run
+    # scoring's follow-ons: a re-run (no modal → None) + Export to RIS.
+    assert "export" in out["scoringFollow"]
     assert out["panelId"] == "scoring"
     assert out["panelLabel"] == "Scoring"
 

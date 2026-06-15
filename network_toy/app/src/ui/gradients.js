@@ -46,10 +46,23 @@ export const ARI_STOPS = [
   [1.00, [ 60, 140,  80]],    // identical partition (modulo label permutation)
 ];
 
+// 1–5 cluster-score palette (MLC §5 manual scores). Red (poor, 1) →
+// neutral (3) → green (excellent, 5); same diverging family as ARI so
+// "good" reads green across the app. scoreColour() takes the raw 1–5
+// integer (not a normalised t) since that's what callers carry.
+export const SCORE_STOPS = [
+  [0.00, [180,  68,  74]],    // 1 — poor
+  [0.50, [200, 180, 120]],    // 3 — neutral
+  [1.00, [ 60, 140,  80]],    // 5 — excellent
+];
+
 export function tGradient(t)              { return interp(T_STOPS, t); }
 export function inDegGradient(t)          { return interp(INDEG_STOPS, t); }
 export function boundaryScoreGradient(t)  { return interp(BOUNDARY_STOPS, t); }
 export function ariGradient(t)            { return interp(ARI_STOPS, t); }
+
+// Map a 1–5 cluster score onto SCORE_STOPS. Values outside [1,5] clamp.
+export function scoreColour(score)        { return interp(SCORE_STOPS, ((+score || 1) - 1) / 4); }
 
 /**
  * Generic helper: get the rgb(...) string for a value on a named or

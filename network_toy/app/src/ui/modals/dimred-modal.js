@@ -1,25 +1,45 @@
-// Dim-reduction modal — three stacked sections.
+// Dim-reduction modal — two-column layout.
 //
-// Layer 1.5 has three stages: noise reduction, dimension compression
-// (clustering input), and visualisation reduction (viewer / blend
-// input). Compression and viz are siblings — both fork off noise's
-// output. The modal renders one section per stage, each section
-// listing only registry entries whose family matches the slot (plus
+// Layer 1.5 has five stages: noise reduction, citation-aware fusion,
+// dimension compression (clustering input), 3D visualisation reduction,
+// and 2D visualisation reduction. The modal lays the stages out in two
+// columns: a LEFT column of algorithm pickers (one per stage) and a
+// RIGHT column showing the focused stage's description + sliders/params.
+// Selecting (or clicking) a picker focuses that stage. Each picker
+// lists only registry entries whose family matches the slot (plus
 // identity, which is "any" = "skip this stage").
+//
+// The modal opens on a sensible default preset (DEFAULT_PRESET) rather
+// than the previously-committed state; a "Reset to default" control
+// restores the preset at any time.
 //
 // Descriptor shape (from layer-descriptors.js):
 //   {
 //     label:       string,
 //     listAlgos:   (slot) => entries,
-//     getActive:   () => { noise:{method,params}, compression:{...}, viz:{...} },
-//     applyChange: ({ noise, compression, viz }) => void,
+//     applyChange: ({ noise, fusion, compression, viz, viz2d }) => void,
 //   }
 //
 // Apply triggers descriptor.applyChange, which writes layerParams.dimred
 // and re-runs engine.redimred(). Cancel discards the working copy.
 
 import { openModal } from "./modal.js";
+import { paramRow } from "../widgets.js";
 // enqueueBusy import removed 2026-05-27 (slice 2.5) — see Apply onClick.
+
+// Default preset — the "sensible starting point" applied as the modal's
+// initial working state and restored by the Reset control. Params are
+// left empty here; renderForAlgo() seeds them from each algorithm's
+// slot-specific defaults (PCA-100 noise, UMAP-50/50/0 compression,
+// UMAP-3/15/0.1 viz, etc.) when the method is applied. Fusion defaults
+// to identity because toy data sources don't supply citation edges.
+const DEFAULT_PRESET = {
+  noise:       "pca",
+  fusion:      "identity",
+  compression: "umap",
+  viz:         "umap",
+  viz2d:       "umap",
+};
 
 const SECTIONS = [
   {
@@ -55,27 +75,74 @@ const SECTIONS = [
 ];
 
 export function openDimredModal(descriptor) {
-  const active = descriptor.getActive();
-
-  // Working copy — committed only on Apply. Each section keeps its own
-  // (algoId, params) cursor.
-  // Fusion slot may be absent from older saves / pre-fusion state —
-  // synthesise an identity stub so the modal renders without choking.
-  const fusionActive = active.fusion || { method: "identity", params: {} };
-  const working = {
-    noise:       { method: active.noise.method,       params: { ...active.noise.params       } },
-    fusion:      { method: fusionActive.method,       params: { ...fusionActive.params       } },
-    compression: { method: active.compression.method, params: { ...active.compression.params } },
-    viz:         { method: active.viz.method,         params: { ...active.viz.params         } },
-    viz2d:       { method: active.viz2d.method,       params: { ...active.viz2d.params       } },
-  };
+  // Working copy — committed only on Apply. Each stage keeps its own
+  // (method, params) cursor. We seed from the default preset so every
+  // stage opens with a sensible selection; params start empty and are
+  // filled by renderForAlgo() from each algorithm's slot defaults.
+  const working = {};
+  for (const section of SECTIONS) {
+    working[section.key] = { method: DEFAULT_PRESET[section.key], params: {} };
+  }
 
   const body = document.createElement("div");
   body.className = "dimred-modal-body";
 
-  for (const section of SECTIONS) {
-    body.appendChild(renderSection(section, working, descriptor));
+  // Left column: one algorithm picker per stage. Right column: the
+  // focused stage's description + params. `focused` is the stage key
+  // whose detail the right column currently shows.
+  const pickers = document.createElement("div");
+  pickers.className = "dimred-modal-pickers";
+  const detail = document.createElement("div");
+  detail.className = "dimred-modal-detail";
+
+  let focused = SECTIONS[0].key;
+
+  // renderDetail rebuilds the right column for the focused stage. It is
+  // declared up front so picker callbacks can call it; the per-stage
+  // render closure is stored on each entry below.
+  const detailRenderers = new Map();
+  function renderDetail() {
+    detail.innerHTML = "";
+    const render = detailRenderers.get(focused);
+    if (render) render(detail);
   }
+
+  function setFocus(key) {
+    if (focused === key) return;
+    focused = key;
+    for (const row of pickers.children) {
+      row.classList.toggle("active", row.dataset.section === focused);
+    }
+    renderDetail();
+  }
+
+  // applyPreset resets working state to the default preset, rebuilds the
+  // pickers' selected options, and re-renders the focused detail.
+  function applyPreset() {
+    for (const section of SECTIONS) {
+      working[section.key] = { method: DEFAULT_PRESET[section.key], params: {} };
+    }
+    for (const row of pickers.children) {
+      const sel = row.querySelector("select");
+      if (sel) sel.value = DEFAULT_PRESET[row.dataset.section];
+    }
+    renderDetail();
+  }
+
+  for (const section of SECTIONS) {
+    pickers.appendChild(renderPicker(section, working, descriptor, {
+      setFocus,
+      renderDetail,
+      registerDetail: (fn) => detailRenderers.set(section.key, fn),
+    }));
+  }
+  pickers.appendChild(renderResetControl(applyPreset));
+
+  pickers.firstChild.classList.add("active");
+  renderDetail();
+
+  body.appendChild(pickers);
+  body.appendChild(detail);
 
   const modalHandle = openModal({
     title: descriptor.label,
@@ -100,31 +167,35 @@ export function openDimredModal(descriptor) {
   return modalHandle;
 }
 
-function renderSection(section, working, descriptor) {
-  const wrap = document.createElement("section");
-  wrap.className = "dimred-modal-section";
-  wrap.dataset.section = section.key;
+function renderResetControl(applyPreset) {
+  const row = document.createElement("div");
+  row.className = "dimred-modal-reset";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dimred-modal-reset-btn";
+  btn.textContent = "Reset to default";
+  btn.addEventListener("click", applyPreset);
+  row.appendChild(btn);
+  return row;
+}
 
-  const title = document.createElement("h4");
-  title.className = "dimred-modal-section-title";
-  title.textContent = section.title;
-  wrap.appendChild(title);
-
-  if (section.sub) {
-    const sub = document.createElement("div");
-    sub.className = "dimred-modal-section-sub";
-    sub.textContent = section.sub;
-    wrap.appendChild(sub);
-  }
-
+// Left-column picker for one stage: a small title + algorithm select.
+// Selecting an algorithm seeds its params (resetParams) and focuses the
+// stage so the right column shows its detail. `hooks` wires the picker
+// back into the modal: setFocus, renderDetail, registerDetail.
+function renderPicker(section, working, descriptor, hooks) {
   const algos = descriptor.listAlgos(section.family);
 
-  // Algorithm picker.
-  const algoRow = document.createElement("div");
-  algoRow.className = "dimred-modal-row";
-  const algoLabel = document.createElement("label");
-  algoLabel.textContent = "Algorithm";
-  algoRow.appendChild(algoLabel);
+  const wrap = document.createElement("div");
+  wrap.className = "dimred-modal-picker";
+  wrap.dataset.section = section.key;
+  // Clicking anywhere on the picker focuses this stage's detail.
+  wrap.addEventListener("click", () => hooks.setFocus(section.key));
+
+  const title = document.createElement("div");
+  title.className = "dimred-modal-picker-title";
+  title.textContent = section.title;
+  wrap.appendChild(title);
 
   const algoSelect = document.createElement("select");
   algoSelect.className = "dimred-modal-select";
@@ -135,135 +206,85 @@ function renderSection(section, working, descriptor) {
     if (a.id === working[section.key].method) opt.selected = true;
     algoSelect.appendChild(opt);
   }
-  algoRow.appendChild(algoSelect);
-  wrap.appendChild(algoRow);
+  wrap.appendChild(algoSelect);
 
-  // Description + params host (re-rendered on algo switch).
-  const desc = document.createElement("div");
-  desc.className = "dimred-modal-desc";
-  wrap.appendChild(desc);
-
-  const paramsHost = document.createElement("div");
-  paramsHost.className = "dimred-modal-params";
-  wrap.appendChild(paramsHost);
-
-  function renderForAlgo(algoId) {
+  // resetParams seeds working[stage].params from the algorithm's
+  // slot-specific defaults when the method changes, keeping current
+  // params on a no-op re-select. Prefer slot defaults (PCA-100 noise,
+  // UMAP-50/50/0 compression, UMAP-3/15/0.1 viz) when declared;
+  // defaultParams() is the generic toy-friendly fallback.
+  function resetParams(algoId) {
     const algo = algos.find(a => a.id === algoId);
     if (!algo) return;
-
-    // Reset params: keep current if same algo, else seed from defaults.
-    // Prefer slot-specific defaults when the algorithm declares them —
-    // PCA-100 in noise, UMAP-50/50/0 in compression, UMAP-3/15/0.1 in
-    // viz are sensible starting points; defaultParams() returns a
-    // generic toy-friendly value as fallback.
-    if (algoId === working[section.key].method) {
-      // unchanged — keep working[section.key].params as-is
-    } else {
-      working[section.key].method = algoId;
-      const fresh = (typeof algo.defaultParamsForSlot === "function")
-        ? algo.defaultParamsForSlot(section.family)
-        : algo.defaultParams();
-      working[section.key].params = { ...fresh };
+    if (algoId === working[section.key].method && Object.keys(working[section.key].params).length) {
+      return; // unchanged and already seeded — keep params as-is
     }
-
-    desc.textContent = algo.description || "";
-
-    paramsHost.innerHTML = "";
-    if (!algo.modalSchema || algo.modalSchema.length === 0) {
-      const none = document.createElement("div");
-      none.className = "dimred-modal-noparams";
-      none.textContent = "No tuneable parameters.";
-      paramsHost.appendChild(none);
-      return;
-    }
-    for (const field of algo.modalSchema) {
-      paramsHost.appendChild(renderField(field, working[section.key].params));
-    }
+    working[section.key].method = algoId;
+    const fresh = (typeof algo.defaultParamsForSlot === "function")
+      ? algo.defaultParamsForSlot(section.family)
+      : algo.defaultParams();
+    working[section.key].params = { ...fresh };
   }
 
-  // Don't mutate working.method here — renderForAlgo() compares the
-  // requested algoId against the current working.method to decide
-  // whether to reset params from defaults. Pre-setting method here
-  // makes the comparison always read "unchanged", which silently
-  // keeps the wrong params after a swap.
-  algoSelect.addEventListener("change", () => {
-    renderForAlgo(algoSelect.value);
+  // Detail renderer for this stage (right column). Registered with the
+  // modal so it can re-render on focus / reset.
+  hooks.registerDetail((host) => {
+    resetParams(working[section.key].method);
+    renderDetailFor(host, section, working, algos);
   });
 
-  renderForAlgo(working[section.key].method);
+  algoSelect.addEventListener("change", () => {
+    resetParams(algoSelect.value);
+    hooks.setFocus(section.key);
+    // setFocus is a no-op when already focused, so re-render explicitly
+    // to reflect the new algorithm's description + params.
+    hooks.renderDetail();
+  });
+
   return wrap;
 }
 
-function renderField(field, params) {
-  const row = document.createElement("div");
-  row.className = "dimred-modal-row";
+// Right-column detail for the focused stage: title, sub, description,
+// and params for the currently-selected algorithm. The detail host is
+// cleared by the caller before each render.
+function renderDetailFor(host, section, working, algos) {
+  const algo = algos.find(a => a.id === working[section.key].method);
 
-  const label = document.createElement("label");
-  label.textContent = field.label || field.key;
-  row.appendChild(label);
+  const title = document.createElement("h4");
+  title.className = "dimred-modal-section-title";
+  title.textContent = section.title;
+  host.appendChild(title);
 
-  let readout = null;
-  const input = buildInput(field, params, () => {
-    if (readout) readout.textContent = formatField(field, params[field.key]);
-  });
-  row.appendChild(input);
-
-  if (field.kind === "range" || field.kind === "int") {
-    readout = document.createElement("span");
-    readout.className = "dimred-modal-readout";
-    readout.textContent = formatField(field, params[field.key]);
-    row.appendChild(readout);
+  if (section.sub) {
+    const sub = document.createElement("div");
+    sub.className = "dimred-modal-section-sub";
+    sub.textContent = section.sub;
+    host.appendChild(sub);
   }
 
-  if (field.hint) {
-    const h = document.createElement("div");
-    h.className = "dimred-modal-hint";
-    h.textContent = field.hint;
-    row.appendChild(h);
-  }
-  return row;
-}
+  if (!algo) return;
 
-function buildInput(field, params, onChange) {
-  const cur = params[field.key];
-  if (field.kind === "select") {
-    const sel = document.createElement("select");
-    for (const opt of (field.options || [])) {
-      const o = document.createElement("option");
-      o.value = opt.value;
-      o.textContent = opt.label;
-      if (cur === opt.value) o.selected = true;
-      sel.appendChild(o);
-    }
-    sel.addEventListener("change", () => {
-      params[field.key] = sel.value;
-      onChange();
-    });
-    return sel;
-  }
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min   = String(field.min  ?? 0);
-  input.max   = String(field.max  ?? 100);
-  input.step  = String(field.step ?? 1);
-  input.value = String(cur ?? field.min ?? 0);
-  input.addEventListener("input", () => {
-    const v = field.kind === "int" ? parseInt(input.value, 10) : parseFloat(input.value);
-    params[field.key] = v;
-    onChange();
-  });
-  return input;
-}
+  const desc = document.createElement("div");
+  desc.className = "dimred-modal-desc";
+  desc.textContent = algo.description || "";
+  host.appendChild(desc);
 
-function formatField(field, value) {
-  if (field.format) {
-    try { return field.format(value); }
-    catch (_) { /* fall through */ }
+  const paramsHost = document.createElement("div");
+  paramsHost.className = "dimred-modal-params";
+  host.appendChild(paramsHost);
+
+  if (!algo.modalSchema || algo.modalSchema.length === 0) {
+    const none = document.createElement("div");
+    none.className = "kit-noparams";
+    none.textContent = "No tuneable parameters.";
+    paramsHost.appendChild(none);
+    return;
   }
-  if (field.kind === "int") return String(value);
-  const n = +value;
-  if (!Number.isFinite(n)) return "—";
-  if (Math.abs(n) >= 100) return n.toFixed(0);
-  if (Math.abs(n) >= 10)  return n.toFixed(1);
-  return n.toFixed(2);
+  for (const field of algo.modalSchema) {
+    // paramRow (widgets.js) reads/writes working[stage].params[field.key]
+    // and keeps its slider readout in sync — same wiring as the old
+    // inline renderField/buildInput/formatField this replaced. The
+    // left-column picker selects keep their bespoke .dimred-modal-select.
+    paramsHost.appendChild(paramRow(field, working[section.key].params));
+  }
 }

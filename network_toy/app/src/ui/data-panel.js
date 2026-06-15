@@ -3,12 +3,15 @@
 // Inline quick-edit + status surface for the active data source.
 // Source SELECTION lives in the workflow-chart's Data card → modal
 // (see modals/data-source-modal.js); this panel is just the
-// fast-iteration UI for whatever's currently active. For the toy
-// generator that means inline sliders + Generate ▶; for real data
-// it's read-only stats + Reload ▶ (hitting Reload re-runs reingest
-// against the same subset).
+// fast-iteration UI for whatever's currently active: read-only stats
+// + Reload ▶ (hitting Reload re-runs reingest against the same dataset).
+//
+// The only source today is the biblion `sqlite` corpus: the panel
+// names the actually-connected dataset (id from the active config,
+// stats from the last ingest's genResult.params) rather than a baked-in
+// label.
 
-import { getState, subscribe, setDataSourceConfig, setLayerState } from "./state.js";
+import { getState, subscribe, setLayerState } from "./state.js";
 import * as engine from "./engine.js";
 
 export function mountDataPanel() {
@@ -16,69 +19,63 @@ export function mountDataPanel() {
   if (!root) return;
   render(root);
 
+  // Re-render when the connected dataset changes (picker) OR when a
+  // pipeline run completes (engineRevision bump) so the stats drawn from
+  // genResult.params appear once an ingest has run.
   subscribe((state) => {
-    if (root.dataset.mode !== state.dataSource.mode) {
-      render(root);
-    }
+    if (root.dataset.sig !== panelSig(state)) render(root);
   });
+}
+
+// Signature of everything the panel renders from, so we only rebuild when
+// the displayed identity / stats actually change.
+function panelSig(state) {
+  const cfg = (state.dataSource.configs && state.dataSource.configs.sqlite) || {};
+  return `${state.dataSource.mode}|${cfg.dataset || ""}|${state.engineRevision}`;
 }
 
 function render(root) {
   const state = getState();
-  root.dataset.mode = state.dataSource.mode;
+  root.dataset.sig = panelSig(state);
   root.innerHTML = "";
 
-  if (state.dataSource.mode === "toy") {
-    root.appendChild(renderToyMode(state));
-  } else {
-    root.appendChild(renderRealMode(state));
-  }
+  root.appendChild(renderSqliteMode(state));
 }
 
-function renderToyMode(state) {
-  const cfg = state.dataSource.configs.toy;
-  const wrap = document.createElement("div");
-  wrap.appendChild(title("Toy data"));
+function renderSqliteMode(state) {
+  const cfg     = (state.dataSource.configs && state.dataSource.configs.sqlite) || {};
+  const gen     = state.genResult;
+  // Identity comes from the active config (set the moment a dataset is
+  // picked) and is enriched by the last ingest's params once it has run.
+  const params  = gen && gen.params;
+  const dataset = (params && params.dataset) || cfg.dataset || null;
+  const wrap    = document.createElement("div");
 
-  wrap.appendChild(numberRow("Seed",    "seed",       cfg.seed));
-  wrap.appendChild(numberRow("Nodes",   "nodeCount",  cfg.nodeCount));
-  wrap.appendChild(numberRow("Origins", "origins",    cfg.origins));
-  wrap.appendChild(rangeRow ("Spread",  "spread",     cfg.spread,    0.1, 3.0, 0.05));
-  wrap.appendChild(rangeRow ("Density", "density",    cfg.density,   0.0, 1.0, 0.01));
-  wrap.appendChild(rangeRow ("Intra",   "intraRate",  cfg.intraRate, 0.0, 1.0, 0.01));
-  wrap.appendChild(rangeRow ("Cross",   "crossRate",  cfg.crossRate, 0.0, 1.0, 0.01));
-
-  const actions = document.createElement("div");
-  actions.className = "data-panel-actions";
-
-  const genBtn = document.createElement("button");
-  genBtn.textContent = "Generate ▶";
-  genBtn.title = "Re-run Layer 1 (toy generator) and cascade.";
-  genBtn.addEventListener("click", fireReingest);
-  actions.appendChild(genBtn);
-
-  wrap.appendChild(actions);
-  return wrap;
-}
-
-function renderRealMode(state) {
-  const cfg   = state.dataSource.configs.real;
-  const wrap  = document.createElement("div");
-  wrap.appendChild(title("Real data"));
-
-  // Read-only summary. Subset is chosen + applied via the Data card
-  // modal in the workflow chart, not here.
-  wrap.appendChild(stat("Subset", cfg.subset || "—"));
+  // Title = the connected dataset id, not a hardcoded "Real data".
+  wrap.appendChild(title(dataset || "No dataset connected"));
 
   const emb   = state.embedding;
-  const nodes = state.genResult && state.genResult.nodes;
-  if (emb && nodes) {
+  const nodes = gen && gen.nodes;
+  if (dataset && emb && nodes) {
     wrap.appendChild(stat("Papers",    formatInt(nodes.length)));
     wrap.appendChild(stat("Embedding", emb.d ? `${emb.d}-d` : "—"));
+    if (params) {
+      if (Array.isArray(params.yearRange)) {
+        wrap.appendChild(stat("Years", `${params.yearRange[0]}–${params.yearRange[1]}`));
+      }
+      if (Number.isFinite(params.edgesKept)) {
+        wrap.appendChild(stat("Citations", formatInt(params.edgesKept)));
+      }
+      if (params.nGhost) {
+        wrap.appendChild(stat("Ghosts", formatInt(params.nGhost)));
+      }
+    }
   } else {
     const hint = document.createElement("div");
     hint.className = "data-panel-hint";
-    hint.textContent = "Open the Data card in the workflow chart to load a subset. Viewer stays empty until a 3-d viz reduction runs.";
+    hint.textContent = dataset
+      ? `Dataset "${dataset}" selected. Run the Data card in the workflow chart to ingest it; the viewer stays empty until a 3-d viz reduction runs.`
+      : "Open the Data card in the workflow chart to connect a biblion dataset. The viewer stays empty until a 3-d viz reduction runs.";
     wrap.appendChild(hint);
   }
 
@@ -86,7 +83,8 @@ function renderRealMode(state) {
   actions.className = "data-panel-actions";
   const reloadBtn = document.createElement("button");
   reloadBtn.textContent = "Reload ▶";
-  reloadBtn.title = "Re-run the pipeline against the currently-selected subset.";
+  reloadBtn.title = "Re-run the pipeline against the currently-connected dataset.";
+  reloadBtn.disabled = !dataset;
   reloadBtn.addEventListener("click", fireReingest);
   actions.appendChild(reloadBtn);
   wrap.appendChild(actions);
@@ -117,57 +115,6 @@ function title(text) {
   return el;
 }
 
-function numberRow(labelText, key, value) {
-  const row = document.createElement("div");
-  row.className = "data-panel-row";
-
-  const label = document.createElement("label");
-  label.textContent = labelText;
-  row.appendChild(label);
-
-  const input = document.createElement("input");
-  input.type = "number";
-  input.value = String(value);
-  input.addEventListener("change", (e) => {
-    const v = parseFloat(e.target.value);
-    if (Number.isFinite(v)) setDataSourceConfig(key, v);
-  });
-  row.appendChild(input);
-
-  return row;
-}
-
-function rangeRow(labelText, key, value, min, max, step) {
-  const row = document.createElement("div");
-  row.className = "data-panel-row";
-  row.style.gridTemplateColumns = "70px 1fr 36px";
-
-  const label = document.createElement("label");
-  label.textContent = labelText;
-  row.appendChild(label);
-
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step);
-  input.value = String(value);
-  row.appendChild(input);
-
-  const readout = document.createElement("span");
-  readout.className = "value-readout";
-  readout.textContent = formatNum(value);
-  row.appendChild(readout);
-
-  input.addEventListener("input", (e) => {
-    const v = parseFloat(e.target.value);
-    readout.textContent = formatNum(v);
-    setDataSourceConfig(key, v);
-  });
-
-  return row;
-}
-
 function stat(labelText, valueText) {
   const row = document.createElement("div");
   row.className = "data-panel-stat";
@@ -176,12 +123,6 @@ function stat(labelText, valueText) {
   row.appendChild(lab);
   row.appendChild(val);
   return row;
-}
-
-function formatNum(v) {
-  if (Math.abs(v) >= 100) return v.toFixed(0);
-  if (Math.abs(v) >= 10)  return v.toFixed(1);
-  return v.toFixed(2);
 }
 
 function formatInt(n) {

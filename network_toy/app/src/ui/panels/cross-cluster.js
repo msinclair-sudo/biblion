@@ -10,6 +10,7 @@
 import { getState, subscribe } from "../state.js";
 import { getStep, getSelectedStep, getStepAncestors } from "../workflow.js";
 import { renderHeatmap }       from "../charts/heatmap.js";
+import { select } from "../widgets.js";
 
 export const ID          = "cross-cluster";
 export const LABEL       = "Cross-cluster citations";
@@ -22,6 +23,11 @@ export function mount(container, _state, config = {}) {
   let seededFor = null;
 
   function resolveResult() {
+    // J16: cross-cluster citations is no longer a card. It auto-computes after
+    // the layer ladder commits and writes state.crossClusterCitations, which a
+    // singleton (no-stepId) panel reads directly — mirrors bridge analysis.
+    // The card-bound lookup below is kept only for legacy saved workflows that
+    // still carry a crossClusterCitations step; new runs hit the state path.
     let card = null;
     if (fixedStepId) card = getStep(fixedStepId);
     else {
@@ -32,7 +38,8 @@ export function mount(container, _state, config = {}) {
         card = anc.length ? anc[anc.length - 1] : null;
       }
     }
-    const cc = card && card.result && card.result.crossClusterCitations;
+    const cc = (card && card.result && card.result.crossClusterCitations)
+      || getState().crossClusterCitations;
     return { card, cc };
   }
 
@@ -49,8 +56,9 @@ export function mount(container, _state, config = {}) {
     const { cc } = resolveResult();
     if (!cc || !Array.isArray(cc.byLayer) || cc.byLayer.length === 0) {
       wrap.appendChild(empty(
-        "No cross-cluster citation run on this branch — add a “Cross-cluster " +
-        "citations” step from a layer-picker / clustering card’s “+”."));
+        "No cross-cluster citations yet — they auto-compute once a layer ladder " +
+        "is committed and the dataset carries citation edges. On toy data " +
+        "without citations, generate them first, then re-pick the layers."));
       container.appendChild(wrap);
       return;
     }
@@ -65,16 +73,16 @@ export function mount(container, _state, config = {}) {
     const lvlLab = document.createElement("label");
     lvlLab.textContent = "Level";
     ctrl.appendChild(lvlLab);
-    const lvlSel = document.createElement("select");
-    lvlSel.className = "xcc-select";
-    cc.byLayer.forEach((b, i) => {
-      const o = document.createElement("option");
-      o.value = String(i);
-      o.textContent = `L${b.layer} · ${b.k} clusters`;
-      if (i === ui.level) o.selected = true;
-      lvlSel.appendChild(o);
-    });
-    lvlSel.addEventListener("change", () => { ui.level = Number(lvlSel.value); render(); });
+    // kit select() (widgets.js) — same options/value/onChange wiring as the
+    // hand-rolled <select>; option values are still string indices.
+    const lvlSel = select(
+      cc.byLayer.map((b, i) => ({ value: String(i), label: `L${b.layer} · ${b.k} clusters` })),
+      {
+        value: String(ui.level),
+        className: "xcc-select",
+        onChange: (v) => { ui.level = Number(v); render(); },
+      },
+    );
     ctrl.appendChild(lvlSel);
 
     const normBtn = document.createElement("button");
@@ -96,15 +104,19 @@ export function mount(container, _state, config = {}) {
     const labels = L.clusterIds.map(id => `c${id}`);
     let matrix = L.matrix;
     let vmax = 1, fmt = (v) => v ? String(v) : "";
+    // Diagonal (i→i) holds intra-cluster citations, which dominate the colour
+    // scale; suppress it and rescale vmax over off-diagonal cells only.
     if (ui.normalised) {
-      matrix = L.matrix.map(row => {
-        const out = row.reduce((a, b) => a + b, 0) || 1;
+      matrix = L.matrix.map((row, r) => {
+        const out = row.reduce((a, b, c) => c === r ? a : a + b, 0) || 1;
         return row.map(v => v / out);
       });
       vmax = 1;
       fmt = (v) => v ? v.toFixed(2) : "";
     } else {
-      vmax = Math.max(1, ...L.matrix.flat());
+      const offDiag = [];
+      L.matrix.forEach((row, r) => row.forEach((v, c) => { if (r !== c) offDiag.push(v); }));
+      vmax = Math.max(1, ...offDiag);
     }
     const heatHost = document.createElement("div");
     heatHost.className = "xcc-heatmap";
@@ -112,6 +124,7 @@ export function mount(container, _state, config = {}) {
     renderHeatmap(heatHost, {
       matrix, rowLabels: labels, colLabels: labels,
       vmin: 0, vmax,
+      cellEnabled: (r, c) => r !== c,
       cellSize: Math.max(18, Math.min(40, Math.floor(360 / Math.max(1, L.k)))),
       legendLabel: ui.normalised ? "out-fraction" : "citations",
       formatCell: fmt,

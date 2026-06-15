@@ -8,6 +8,7 @@
 // and rerun via the chart's ↻ button.
 
 import { openModal } from "./modal.js";
+import { textInput, numberInput } from "../widgets.js";
 import { getAlgorithm as getDimredAlgo } from "../../dimred/registry.js";
 import { getAlgorithm as getClusteringAlgo } from "../../clustering-registry.js";
 import { estimateDimSweepCost } from "../runners/dim-sweep-runner.js";
@@ -144,6 +145,10 @@ function cloneAlgoConfig(algoId, slot) {
 
 // ── input helpers ─────────────────────────────────────────────────
 
+// These rows keep the bespoke `.dim-sweep-modal-row` grid (140px label)
+// and put the hint on the label's tooltip (title) rather than a hint div,
+// so they build the row inline but use the kit's input builders
+// (textInput / numberInput from widgets.js) for the controls.
 function textRow(labelText, init, hint, onInput) {
   const row = document.createElement("div");
   row.className = "dim-sweep-modal-row";
@@ -151,12 +156,7 @@ function textRow(labelText, init, hint, onInput) {
   lab.textContent = labelText;
   if (hint) lab.title = hint;
   row.appendChild(lab);
-  const inp = document.createElement("input");
-  inp.type = "text";
-  inp.value = init;
-  inp.style.width = "240px";
-  inp.addEventListener("input", () => onInput(inp.value));
-  row.appendChild(inp);
+  row.appendChild(textInput({ value: init, width: "240px", onInput }));
   return row;
 }
 
@@ -167,17 +167,15 @@ function numberRow(labelText, min, max, step, init, hint, onChange) {
   lab.textContent = labelText;
   if (hint) lab.title = hint;
   row.appendChild(lab);
-  const inp = document.createElement("input");
-  inp.type = "number";
-  inp.min = String(min); inp.max = String(max); inp.step = String(step);
-  inp.value = String(init);
-  inp.style.width = "80px";
-  inp.addEventListener("change", () => {
-    let v = parseFloat(inp.value);
-    if (!Number.isFinite(v)) v = init;
-    if (v < min) v = min; if (v > max) v = max;
-    inp.value = String(v);
-    onChange(v);
+  const inp = numberInput({
+    min, max, step, value: init, width: "80px",
+    onChange: () => {
+      let v = parseFloat(inp.value);
+      if (!Number.isFinite(v)) v = init;
+      if (v < min) v = min; if (v > max) v = max;
+      inp.value = String(v);
+      onChange(v);
+    },
   });
   row.appendChild(inp);
   return row;

@@ -110,11 +110,10 @@ export function buildBootstrapJob({ parentClusteringStepId, settings }) {
     // validationRuns in favour of cards.
     const algoTag  = algoId;
     const ds       = live.dataSource;
-    const mode     = (ds && ds.mode) || "toy";
+    const mode     = (ds && ds.mode) || "sqlite";
     const cfg      = (ds && ds.configs && ds.configs[mode]) || {};
-    const subsetTag = mode === "real"
-      ? (cfg.subset || "real")
-      : `toy n=${live.genResult ? live.genResult.nodes.length : "?"}`;
+    const subsetTag = cfg.dataset
+      || `n=${live.genResult ? live.genResult.nodes.length : "?"}`;
     const label    = `bootstrap ${algoTag} · ${subsetTag} · B=${settings.B}`;
     const cluster  = {
       label:     describeCluster(refCr, algoId),

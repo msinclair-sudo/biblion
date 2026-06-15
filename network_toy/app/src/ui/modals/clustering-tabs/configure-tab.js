@@ -4,6 +4,8 @@
 // a {render, getWorking} interface. The parent calls getWorking() at
 // Apply time to commit changes.
 
+import { paramRow } from "../../widgets.js";
+
 export function buildConfigureTab(host, descriptor) {
   const active = descriptor.getActive();
   const algos  = descriptor.listAlgos();
@@ -178,11 +180,14 @@ export function buildConfigureTab(host, descriptor) {
     paramsHost.className = "clustering-modal-level-params";
     if (algo.modalSchema && algo.modalSchema.length > 0) {
       for (const field of algo.modalSchema) {
-        paramsHost.appendChild(renderField(field, lvl.params));
+        // paramRow (widgets.js) reads/writes lvl.params[field.key] and
+        // keeps its slider readout in sync — same wiring as the old inline
+        // renderField/buildInput/formatField this replaced.
+        paramsHost.appendChild(paramRow(field, lvl.params));
       }
     } else {
       const none = document.createElement("div");
-      none.className = "algorithm-modal-noparams";
+      none.className = "kit-noparams";
       none.textContent = "No tuneable parameters.";
       paramsHost.appendChild(none);
     }
@@ -208,80 +213,6 @@ export function buildConfigureTab(host, descriptor) {
     span.textContent = label;
     lab.appendChild(span);
     return lab;
-  }
-
-  function renderField(field, params) {
-    const row = document.createElement("div");
-    row.className = "algorithm-modal-row";
-
-    const label = document.createElement("label");
-    label.textContent = field.label || field.key;
-    row.appendChild(label);
-
-    let readout = null;
-    const input = buildInput(field, params, () => {
-      if (readout) readout.textContent = formatField(field, params[field.key]);
-    });
-    row.appendChild(input);
-
-    if (field.kind === "range" || field.kind === "int") {
-      readout = document.createElement("span");
-      readout.className = "algorithm-modal-readout";
-      readout.textContent = formatField(field, params[field.key]);
-      row.appendChild(readout);
-    }
-
-    if (field.hint) {
-      const h = document.createElement("div");
-      h.className = "algorithm-modal-hint";
-      h.textContent = field.hint;
-      row.appendChild(h);
-    }
-    return row;
-  }
-
-  function buildInput(field, params, onChange) {
-    const cur = params[field.key];
-    if (field.kind === "select") {
-      const sel = document.createElement("select");
-      for (const opt of (field.options || [])) {
-        const o = document.createElement("option");
-        o.value = opt.value;
-        o.textContent = opt.label;
-        if (cur === opt.value) o.selected = true;
-        sel.appendChild(o);
-      }
-      sel.addEventListener("change", () => {
-        params[field.key] = sel.value;
-        onChange();
-      });
-      return sel;
-    }
-    const input = document.createElement("input");
-    input.type = "range";
-    input.min  = String(field.min  ?? 0);
-    input.max  = String(field.max  ?? 100);
-    input.step = String(field.step ?? 1);
-    input.value = String(cur ?? field.min ?? 0);
-    input.addEventListener("input", () => {
-      const v = field.kind === "int" ? parseInt(input.value, 10) : parseFloat(input.value);
-      params[field.key] = v;
-      onChange();
-    });
-    return input;
-  }
-
-  function formatField(field, value) {
-    if (field.format) {
-      try { return field.format(value); }
-      catch (_) {}
-    }
-    if (field.kind === "int") return String(value);
-    const n = +value;
-    if (!Number.isFinite(n)) return "—";
-    if (Math.abs(n) >= 100) return n.toFixed(0);
-    if (Math.abs(n) >= 10)  return n.toFixed(1);
-    return n.toFixed(2);
   }
 
   algoSelect.addEventListener("change", () => {

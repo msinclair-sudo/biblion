@@ -25,7 +25,9 @@ import { getState, subscribe }            from "./state.js";
 import {
   getRootStep, getStep, getSelectedStep, isStepStale,
   selectStep, deleteStep, getStepDescendants, STEP_STATUS,
+  findClusterLevels,
 } from "./workflow.js";
+import { scoreColour }                     from "./gradients.js";
 import { openModal }                       from "./modals/modal.js";
 import { migrateLegacyToWorkflowIfNeeded } from "./workflow-migration.js";
 import { projectStepIntoLegacyState }      from "./workflow-projection.js";
@@ -181,20 +183,36 @@ function computeLayout(rootStep) {
   // card to the referencing card (e.g. a fusionComparison card's two
   // source clusterings). Computed after placement since a refId can
   // point anywhere in the already-laid-out tree.
+  //
+  // Exception (J15): nodeDisplacement branches off BOTH fusion branches, so its
+  // ref-edge (the pre branch — the post branch is the parentId) is PROMOTED to a
+  // primary, solid lineage edge. It draws from the source card's bottom into the
+  // ND card's top so it reads like the parentId edge, giving two solid incoming
+  // edges rather than one solid + one dashed.
   const posById = new Map(positions.map(p => [p.step.id, p]));
   const refEdges = [];
   for (const p of positions) {
     const refIds = p.step.refIds || [];
+    const primary = p.step.type === "nodeDisplacement";
     for (const rid of refIds) {
       const src = posById.get(rid);
       if (!src) continue;
-      refEdges.push({
-        fromX:  src.x + NODE_W / 2,
-        fromY:  src.y + NODE_H / 2,
-        toX:    p.x + NODE_W / 2,
-        toY:    p.y + NODE_H / 2,
-        dashed: true,
-      });
+      if (primary) {
+        refEdges.push({
+          fromX: src.x + NODE_W / 2,
+          fromY: src.y + NODE_H,
+          toX:   p.x + NODE_W / 2,
+          toY:   p.y,
+        });
+      } else {
+        refEdges.push({
+          fromX:  src.x + NODE_W / 2,
+          fromY:  src.y + NODE_H / 2,
+          toX:    p.x + NODE_W / 2,
+          toY:    p.y + NODE_H / 2,
+          dashed: true,
+        });
+      }
     }
   }
 
@@ -393,6 +411,35 @@ function renderCard(step, x, y, w, h, selectedId, positionByStep) {
     g.appendChild(badge);
   }
 
+  // J17: node-weighted score distribution as a thin stacked bar down the
+  // right edge of a scoring card. One vertical bar; each segment's height
+  // = fraction of NODES whose cluster carries that score, coloured by the
+  // 1–5 score ramp. Starts below the top-right badge zone so it never
+  // collides with the queue badge / re-run button.
+  if (step.type === "scoring") {
+    const dist = scoreDistributionFor(step);
+    if (dist && dist.total > 0) {
+      const barW   = 4;
+      const barX   = w - barW;          // flush right edge
+      const barTop = 20;                // clear the top-right badge zone
+      const barH   = h - barTop - 4;
+      const barG   = svgEl("g", { class: "wf-score-bar" });
+      let yCursor = barTop;
+      // Draw high → low so stronger scores stack at the top of the bar.
+      for (let s = 5; s >= 1; s--) {
+        const frac = (dist.byScore[s] || 0) / dist.total;
+        if (frac <= 0) continue;
+        const segH = frac * barH;
+        barG.appendChild(svgEl("rect", {
+          x: barX, y: yCursor, width: barW, height: segH,
+          fill: scoreColour(s),
+        }));
+        yCursor += segH;
+      }
+      g.appendChild(barG);
+    }
+  }
+
   // Slice 2.6: re-run affordance on stale cards. Clickable ↻ glyph in
   // the top-right corner (offset left when a queue badge is also there).
   // Click → forkStep via rerunStep — creates a new sibling under the
@@ -559,6 +606,46 @@ function confirmDeleteCard(step) {
 
 // ── helpers ──────────────────────────────────────────────────────────
 
+// J17: node-weighted 1–5 score distribution for a scoring card's mini bar.
+//
+// Returns { byScore: {1..5: nodeCount}, total } over the SELECTED level
+// (resolved from state.colourMode, falling back to the finest level) —
+// consistent with how the card's other readouts project a single level.
+// DECISION (flagged for confirmation): selected level, not pooled across
+// all scored levels.
+//
+// Node-weighted: each cluster contributes its node COUNT to the score it
+// carries, so a score backed by a big cluster dominates the bar.
+function scoreDistributionFor(step) {
+  const scores = step.result && step.result.scores;
+  if (!scores) return null;
+  const { levels } = findClusterLevels(step.id);
+  if (!levels.length) return null;
+
+  // Selected level from the viewer colour mode ("cluster:N" / "cluster:finest").
+  const mode = getState().colourMode || "";
+  let idx = levels.length - 1;          // default: finest
+  if (mode.startsWith("cluster:")) {
+    const n = parseInt(mode.slice(8), 10);
+    if (Number.isFinite(n) && n >= 0 && n < levels.length) idx = n;
+  }
+  const lvl = levels[idx];
+  if (!lvl || !lvl.clusterResult) return null;
+
+  const levelScores = scores[lvl.uid] || {};
+  const byScore = {};
+  let total = 0;
+  for (const cl of lvl.clusterResult.clusters) {
+    const sc = levelScores[cl.id];
+    if (sc == null) continue;
+    const count = (cl.members && cl.members.length) || cl.count || 0;
+    if (count <= 0) continue;
+    byScore[sc] = (byScore[sc] || 0) + count;
+    total += count;
+  }
+  return { byScore, total };
+}
+
 function statusClass(status) {
   switch (status) {
     case STEP_STATUS.DONE:      return "fresh";
@@ -594,7 +681,6 @@ function subLabelFor(step) {
   }
   if (step.type === "citationLayout") return p.method || null;
   if (step.type === "alignment")      return "match-RMS";
-  if (step.type === "blend")          return `α = ${(p.alpha || 0).toFixed(2)}`;
   if (step.type === "bootstrapStability") {
     if (p.B != null) return `B=${p.B}`;
     return "bootstrap";

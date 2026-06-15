@@ -6,6 +6,95 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="styles/main.css">
 
+<!-- J19: the edge colour/toggle controls were styled in main.css under
+     `#blend-control .lr-*` while they lived in the left rail. They now
+     live under #edge-controls-host (relocated into the 3D viewer settings
+     popup). main.css is owned elsewhere, so re-scope the same rules to the
+     host id here — the id travels with the element wherever it's adopted. -->
+<style>
+  #edge-controls-host[hidden] { display: none; }
+
+  #edge-controls-host .lr-section {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 0 5px;
+    border-top: 1px solid var(--border);
+  }
+  #edge-controls-host .lr-section:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+  #edge-controls-host .lr-section-title {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 3px;
+  }
+  #edge-controls-host .lr-row {
+    display: grid;
+    align-items: center;
+    margin: 1px 0;
+  }
+  #edge-controls-host .lr-row label {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  #edge-controls-host .lr-row-slider {
+    grid-template-columns: 70px 1fr 36px;
+    gap: 6px;
+  }
+  #edge-controls-host .lr-row-slider input[type="range"] {
+    width: 100%;
+    min-width: 0;
+  }
+  #edge-controls-host .lr-row-toggles {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: nowrap;
+  }
+  #edge-controls-host .lr-inline-check {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #edge-controls-host .lr-inline-check input[type="checkbox"] {
+    margin: 0;
+  }
+  #edge-controls-host .lr-swatch {
+    width: 22px;
+    height: 14px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  #edge-controls-host .lr-swatch::-webkit-color-swatch-wrapper { padding: 0; }
+  #edge-controls-host .lr-swatch::-webkit-color-swatch { border: none; border-radius: 2px; }
+  #edge-controls-host .lr-swatch::-moz-color-swatch    { border: none; border-radius: 2px; }
+  #edge-controls-host .lr-readout {
+    font-family: var(--font-mono);
+    color: var(--text);
+    font-size: 11px;
+    text-align: right;
+  }
+
+  /* When adopted into the viewer settings popup, sit below the camera
+     rows with a hairline separator and a little breathing room. */
+  .viewer-3d-settings-popup #edge-controls-host {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-light);
+  }
+</style>
+
 <!-- THREE / 3d-force-graph load order: same trick as legacy.html.
      THREE r161+ removed the UMD build, but 3d-force-graph's UMD still
      reads window.THREE. So: import THREE as an ES module via importmap,
@@ -81,58 +170,16 @@
       <!-- workflow-chart.js -->
     </section>
     <section id="blend-control">
-      <!-- bottom of left rail: blend slider, then per-edge-kind groups.
-           Single-row entries — label | slider | readout, or one checkbox
-           per row. Thin hairlines separate groups; no boxed cards. -->
+      <!-- bottom of left rail: fusion-blend slider only. The per-edge-kind
+           colour/toggle controls moved into the 3D viewer's settings popup
+           (J19) — see #edge-controls-host below. -->
 
       <div class="lr-section">
         <div class="lr-section-title">Blend</div>
-        <div class="lr-row lr-row-slider">
-          <label title="0 = basePos (semantic similarity layout); 1 = citation-topology layout">α</label>
-          <input id="blend-slider" type="range" min="0" max="1" step="0.001" value="0">
-          <span id="blend-readout" class="lr-readout">0.00</span>
-        </div>
         <div class="lr-row lr-row-slider" id="fusion-blend-row" style="display:none">
           <label title="0 = pre-fusion semantic position; 1 = post-fusion (citation-aware) position. Only active when fusion is non-identity.">fusion</label>
           <input id="fusion-blend-slider" type="range" min="0" max="1" step="0.001" value="1">
           <span id="fusion-blend-readout" class="lr-readout">1.00</span>
-        </div>
-      </div>
-
-      <div class="lr-section">
-        <div class="lr-section-title">Citation edges</div>
-        <div class="lr-row lr-row-toggles">
-          <input type="color"    id="ec-cit-colour" class="lr-swatch" value="#8a8a8a" title="Citation edge colour">
-          <label class="lr-inline-check"><input type="checkbox" id="ec-citations"> Show</label>
-          <label class="lr-inline-check"><input type="checkbox" id="ec-cit-arrows"> Arrows</label>
-        </div>
-        <div class="lr-row lr-row-slider">
-          <label for="ec-cit-opacity">Opacity</label>
-          <input type="range" id="ec-cit-opacity"
-                 min="0.05" max="1" step="0.01" value="0.15">
-          <span id="ec-cit-opacity-readout" class="lr-readout">0.15</span>
-        </div>
-      </div>
-
-      <div class="lr-section">
-        <div class="lr-section-title">Base edges</div>
-        <div class="lr-row lr-row-toggles">
-          <input type="color"    id="ec-base-colour" class="lr-swatch" value="#5a6878" title="Base edge colour">
-          <label class="lr-inline-check"><input type="checkbox" id="ec-base"> Show</label>
-        </div>
-        <div class="lr-row lr-row-slider">
-          <label for="ec-base-density">Density</label>
-          <input type="range" id="ec-base-density"
-                 min="0" max="0.2" step="0.005" value="0.02">
-          <span id="ec-base-density-readout" class="lr-readout">0.020</span>
-        </div>
-      </div>
-
-      <div class="lr-section">
-        <div class="lr-section-title">Cluster skeleton</div>
-        <div class="lr-row lr-row-toggles">
-          <input type="color"    id="ec-structure-colour" class="lr-swatch" value="#5dd39e" title="Cluster skeleton colour">
-          <label class="lr-inline-check"><input type="checkbox" id="ec-structure"> Show</label>
         </div>
       </div>
     </section>
@@ -156,6 +203,65 @@
     <div class="panel-tabs"></div>
     <div class="panel-content"></div>
   </section>
+
+  <!-- J10 dynamic-layout dividers + rail-collapse toggles. These are
+       absolutely-positioned overlays sitting on the grid boundaries;
+       layout-splitters.js places them off the live --*-w / --bottom-h
+       vars and drives drag + collapse. The toggle buttons nest inside
+       their splitter so they ride along when the boundary moves. -->
+  <div id="split-left" class="layout-split layout-split-v" title="Drag to resize the left rail">
+    <button id="toggle-left-rail" class="rail-toggle" type="button"
+            title="Collapse / expand the left rail" aria-label="Collapse or expand the left rail"></button>
+  </div>
+  <div id="split-right" class="layout-split layout-split-v" title="Drag to resize the right rail">
+    <button id="toggle-right-rail" class="rail-toggle" type="button"
+            title="Collapse / expand the right rail" aria-label="Collapse or expand the right rail"></button>
+  </div>
+  <div id="split-bottom" class="layout-split layout-split-h" title="Drag to resize the bottom row"></div>
+</div>
+
+<!-- J19: edge colour/toggle controls. Parked here (hidden) when no 3D
+     viewer is mounted; viewer-3d.js adopts this host into its settings
+     popup on mount and returns it here on destroy. main.js's
+     mountEdgeControls wires the same ec-* ids regardless of where the
+     host currently lives. -->
+<div id="edge-controls-host" hidden>
+  <div class="lr-section">
+    <div class="lr-section-title">Citation edges</div>
+    <div class="lr-row lr-row-toggles">
+      <input type="color"    id="ec-cit-colour" class="lr-swatch" value="#8a8a8a" title="Citation edge colour">
+      <label class="lr-inline-check"><input type="checkbox" id="ec-citations"> Show</label>
+      <label class="lr-inline-check"><input type="checkbox" id="ec-cit-arrows"> Arrows</label>
+    </div>
+    <div class="lr-row lr-row-slider">
+      <label for="ec-cit-opacity">Opacity</label>
+      <input type="range" id="ec-cit-opacity"
+             min="0.05" max="1" step="0.01" value="0.15">
+      <span id="ec-cit-opacity-readout" class="lr-readout">0.15</span>
+    </div>
+  </div>
+
+  <div class="lr-section">
+    <div class="lr-section-title">Base edges</div>
+    <div class="lr-row lr-row-toggles">
+      <input type="color"    id="ec-base-colour" class="lr-swatch" value="#5a6878" title="Base edge colour">
+      <label class="lr-inline-check"><input type="checkbox" id="ec-base"> Show</label>
+    </div>
+    <div class="lr-row lr-row-slider">
+      <label for="ec-base-density">Density</label>
+      <input type="range" id="ec-base-density"
+             min="0" max="0.2" step="0.005" value="0.02">
+      <span id="ec-base-density-readout" class="lr-readout">0.020</span>
+    </div>
+  </div>
+
+  <div class="lr-section">
+    <div class="lr-section-title">Cluster skeleton</div>
+    <div class="lr-row lr-row-toggles">
+      <input type="color"    id="ec-structure-colour" class="lr-swatch" value="#5dd39e" title="Cluster skeleton colour">
+      <label class="lr-inline-check"><input type="checkbox" id="ec-structure"> Show</label>
+    </div>
+  </div>
 </div>
 
 <div id="modal-root">

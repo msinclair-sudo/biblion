@@ -13,8 +13,15 @@ import {
 } from "./state.js";
 import { serialiseState }   from "../persistence/serialise.js";
 import { deserialiseFile }  from "../persistence/deserialise.js";
+import { saveProject as apiSaveProject } from "../persistence/projects-api.js";
 import { enqueueJob }       from "./queue.js";
-import { createStep, getRootStep } from "./workflow.js";
+import { createStep, getRootStep, importWorkflow } from "./workflow.js";
+import { projectStepIntoLegacyState } from "./workflow-projection.js";
+import { getLayerDescriptor } from "./modals/layer-descriptors.js";
+import { openDataSourceModal } from "./modals/data-source-modal.js";
+import { openDatabasesConnectModal } from "./modals/databases-connect-modal.js";
+import { openDatabasesMakeModal }    from "./modals/databases-make-modal.js";
+import { openDatabasesManageModal }  from "./modals/databases-manage-modal.js";
 
 // Phase 2 slice 2.11.b — disabled stub items removed. The 7 dropped
 // were either subsumed by panels (ARI dim-sweep → Dim sweep panel /
@@ -29,15 +36,16 @@ const MENUS = [
     items: [
       { label: "Save",          action: () => saveProject({ promptForName: false }) },
       { label: "Save as…",      action: () => saveProject({ promptForName: true }) },
-      { label: "Load…",         action: () => loadProject() },
+      { label: "Open…",         action: () => openSave() },
+      { divider: true },
+      { label: "Import .zip…",  action: () => loadProject() },
     ],
   },
   {
     id: "data",
     label: "Data",
     items: [
-      { label: "New toy dataset…",     action: stub("data:new-toy") },
-      { label: "Citation source…",     action: stub("data:citation-source") },
+      { label: "Open dataset…",        action: () => openDataSourceModal(getLayerDescriptor("data")) },
     ],
   },
   {
@@ -61,6 +69,10 @@ export function mountTopbar() {
   if (!root) return;
   root.innerHTML = "";
 
+  // Databases dropdown sits at the top-LEFT (first menu) — the data-source /
+  // serve.py entry point, paired with the top-right cart precedent.
+  root.appendChild(renderMenu(databasesMenu()));
+
   for (const menu of MENUS) {
     root.appendChild(renderMenu(menu));
   }
@@ -69,6 +81,7 @@ export function mountTopbar() {
   spacer.className = "topbar-spacer";
   root.appendChild(spacer);
 
+  root.appendChild(renderSearch());
   root.appendChild(renderCart());
 
   // Click-outside handler closes any open menu.
@@ -127,6 +140,24 @@ function closeAllMenus() {
   });
 }
 
+// Databases dropdown (top-left): the three data-source actions, each opening
+// its modal wired to the data layer descriptor (applyChange → serve.py /
+// datasource flow). Built as a normal topbar menu so it shares the open/close
+// + click-outside behaviour with File/Data/etc.
+function databasesMenu() {
+  const dataDescriptor = () => getLayerDescriptor("data");
+  return {
+    id: "databases",
+    label: "Databases",
+    items: [
+      { label: "Connect New",        action: () => openDatabasesConnectModal(dataDescriptor()) },
+      { label: "Make New",           action: () => openDatabasesMakeModal(dataDescriptor()) },
+      { divider: true },
+      { label: "Manage Connections", action: () => openDatabasesManageModal(dataDescriptor()) },
+    ],
+  };
+}
+
 // Global cart button (top-right): opens the cart panel and shows a live count
 // badge of how many papers are currently in the cart.
 function renderCart() {
@@ -165,6 +196,27 @@ function openCartPanel() {
   addTab("bottom", "cart", {});
 }
 
+// Global search button (top-right): opens the SQL library-search panel (J09).
+function renderSearch() {
+  const btn = document.createElement("button");
+  btn.className = "topbar-search";
+  btn.title = "Open SQL library search";
+  btn.textContent = "Search";
+  btn.addEventListener("click", openSearchPanel);
+  return btn;
+}
+
+// Open the (singleton) search panel, or focus it if it's already open somewhere.
+function openSearchPanel() {
+  const s = getState();
+  for (const slot of Object.keys(s.panels)) {
+    const existing = s.panels[slot].tabs.find(t => t.type === "search-results");
+    if (existing) { setActiveTab(slot, existing.id); return; }
+  }
+  // Bottom slot — the editor + results table want the full width.
+  addTab("bottom", "search-results", {});
+}
+
 function stub(id) {
   return () => {
     console.log(`[topbar action stub] ${id}`);
@@ -174,11 +226,27 @@ function stub(id) {
 
 /* ── File menu actions ─────────────────────────────────────────────── */
 
-// "Save" reuses state.projectName (from the most-recent save / load).
-// First save in a session goes through "Save as" since there's no
-// remembered name yet.
+// The dataset a save belongs to: the dataset id stored under the active data
+// source's config (set by the data picker / engine ingest). Saves nest under
+// that dataset (data/<id>/saves/), so a save can't be written until a dataset
+// is loaded.
+export function getCurrentDatasetId() {
+  const ds = getState().dataSource;
+  if (!ds) return null;
+  const cfg = (ds.configs && ds.configs[ds.mode]) || {};
+  return cfg.dataset || null;
+}
+
+// "Save" writes in place to data/<datasetId>/saves/<projectName>.zip via the
+// dev server. state.projectName is the save name (from the most-recent save /
+// load / Save-as). First save in a session, or Save-as, prompts for a name.
 function saveProject({ promptForName }) {
   const state = getState();
+  const datasetId = getCurrentDatasetId();
+  if (!datasetId) {
+    window.alert("Load a dataset before saving (File ▸ Open dataset…).");
+    return;
+  }
   let name = state.projectName;
   if (promptForName || !name) {
     const suggestion = name || defaultProjectName(state);
@@ -222,10 +290,17 @@ function saveProject({ promptForName }) {
         window.alert("Save failed — see browser console.");
         throw e;
       }
-      triggerDownload(blob, `${name}.zip`);
+      try {
+        await apiSaveProject(datasetId, `${name}.zip`, blob);
+      } catch (e) {
+        console.error("[topbar] save POST failed:", e);
+        window.alert(`Save failed: ${e.message || e}\n(Is serve.py running?)`);
+        throw e;
+      }
       return {
         capturedAt: new Date().toISOString(),
         filename:   `${name}.zip`,
+        datasetId,
         sizeBytes:  blob.size,
         savedAt:    new Date().toISOString(),
       };
@@ -237,6 +312,94 @@ function saveProject({ promptForName }) {
   });
 }
 
+// "Open…" routes into the unified dataset → save picker. If a dataset is
+// already loaded, jump straight to its saves list; otherwise start at the
+// dataset list.
+function openSave() {
+  openDataSourceModal(getLayerDescriptor("data"), { openDatasetId: getCurrentDatasetId() });
+}
+
+// Rehydrate a saved project from a Blob (server save) or File (Import .zip).
+// Shared by loadProject() (file picker) and the dataset picker's "Load save".
+// Runs the deserialise → apply → re-project flow as a queue job; relies on the
+// J01 round-trip fix so state.workflow + flat slots restore exactly.
+export function rehydrateFromBlob(blobOrFile, { displayName, datasetId } = {}) {
+  const fileName = displayName || (blobOrFile && blobOrFile.name) || "save.zip";
+  const label = `Load "${fileName}"`;
+  const { promise } = enqueueJob({
+    type:  "load",
+    label,
+    stepId: null,    // can't bind: outgoing tree is about to be replaced
+    fn:    async () => {
+      let res;
+      try {
+        res = await deserialiseFile(blobOrFile);
+      } catch (e) {
+        console.error("[topbar] load failed:", e);
+        window.alert(`Load failed: ${e.message || e}`);
+        throw e;
+      }
+      // Apply the patch wholesale — engine cascade is intentionally
+      // skipped (we have all the results already; re-running would
+      // overwrite them and defeat the point of saving). This sets the
+      // flat projection slots AND state.workflow (the canonical tree)
+      // from the saved file.
+      const cur = getState();
+      update({
+        ...res.patch,
+        clusterResult:  res.patch.clusterLevels && res.patch.clusterLevels.length
+                         ? res.patch.clusterLevels[res.patch.clusterLevels.length - 1].clusterResult
+                         : null,
+        projectName:    res.patch.projectName || stripExtension(fileName),
+      });
+
+      // Re-install the tree through workflow.js so the module-local
+      // serial counter advances past the restored ids (a later
+      // createStep mustn't collide with a loaded id).
+      importWorkflow(res.patch.workflow ?? { steps: {}, rootId: null, selected: null });
+
+      // Reconcile the flat slots with the restored tree and force the
+      // viewer to repaint.
+      const selected = getState().workflow.selected;
+      if (selected) {
+        projectStepIntoLegacyState(selected, { bumpRevision: true });
+      } else {
+        update({ engineRevision: cur.engineRevision + 1 });
+      }
+      console.log(`[topbar] loaded project '${fileName}'${datasetId ? ` (dataset ${datasetId})` : ""} (saved ${res.manifest.savedAt})`);
+
+      // Attach a load-history card to the loaded tree, if it has a root.
+      // Best-effort — failure here doesn't undo the load.
+      const root = getRootStep();
+      if (root) {
+        try {
+          createStep({
+            type:    "load",
+            label,
+            params:  { filename: fileName },
+            parentId: root.id,
+          });
+        } catch (e) {
+          console.warn("[topbar] createStep(load) failed (continuing):", e);
+        }
+      }
+
+      return {
+        capturedAt:      new Date().toISOString(),
+        filename:        fileName,
+        datasetId:       datasetId || null,
+        savedAtOriginal: res.manifest && res.manifest.savedAt,
+        loadedAt:        new Date().toISOString(),
+      };
+    },
+  });
+  promise.catch((e) => {
+    if (e && e.name === "AbortError") return;
+    console.error("[topbar] load job failed:", e);
+  });
+  return promise;
+}
+
 function loadProject() {
   const input = document.createElement("input");
   input.type = "file";
@@ -246,90 +409,16 @@ function loadProject() {
     const file = input.files && input.files[0];
     input.remove();
     if (!file) return;
-    // Phase 2 slice 2.9.c — load runs as a job. Card creation happens
-    // AFTER deserialise + apply, because loading replaces state.workflow
-    // wholesale; creating a card pre-load on the OUTGOING tree would be
-    // wasted work. Post-load, we attach the load card to the LOADED
-    // tree's root so the user's history records the import.
-    const label = `Load "${file.name}"`;
-    const { promise } = enqueueJob({
-      type:  "load",
-      label,
-      stepId: null,    // can't bind: outgoing tree is about to be replaced
-      fn:    async () => {
-        let res;
-        try {
-          res = await deserialiseFile(file);
-        } catch (e) {
-          console.error("[topbar] load failed:", e);
-          window.alert(`Load failed: ${e.message || e}`);
-          throw e;
-        }
-        // Apply the patch wholesale — engine cascade is intentionally
-        // skipped (we have all the results already; re-running would
-        // overwrite them and defeat the point of saving). engineRevision
-        // bumps so panels rebuild from the loaded data.
-        const cur = getState();
-        update({
-          ...res.patch,
-          clusterResult:  res.patch.clusterLevels && res.patch.clusterLevels.length
-                           ? res.patch.clusterLevels[res.patch.clusterLevels.length - 1].clusterResult
-                           : null,
-          projectName:    res.patch.projectName || stripExtension(file.name),
-          engineRevision: cur.engineRevision + 1,
-        });
-        console.log(`[topbar] loaded project '${file.name}' (saved ${res.manifest.savedAt})`);
-
-        // Attach a load-history card to the loaded tree, if it has a
-        // root. Best-effort — failure here doesn't undo the load.
-        const root = getRootStep();
-        if (root) {
-          try {
-            createStep({
-              type:    "load",
-              label,
-              params:  { filename: file.name },
-              parentId: root.id,
-            });
-          } catch (e) {
-            console.warn("[topbar] createStep(load) failed (continuing):", e);
-          }
-        }
-
-        return {
-          capturedAt:      new Date().toISOString(),
-          filename:        file.name,
-          savedAtOriginal: res.manifest && res.manifest.savedAt,
-          loadedAt:        new Date().toISOString(),
-        };
-      },
-    });
-    promise.catch((e) => {
-      if (e && e.name === "AbortError") return;
-      console.error("[topbar] load job failed:", e);
-    });
+    rehydrateFromBlob(file, { displayName: file.name });
   });
   document.body.appendChild(input);
   input.click();
 }
 
-function triggerDownload(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, 0);
-}
-
 function defaultProjectName(state) {
-  const mode = state.dataSource && state.dataSource.mode;
+  const dsId = getCurrentDatasetId() || (state.dataSource && state.dataSource.mode);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  return `network-toy-${mode || "project"}-${stamp}`;
+  return `${dsId || "project"}-${stamp}`;
 }
 
 function sanitiseProjectName(s) {

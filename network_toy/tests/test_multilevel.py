@@ -89,16 +89,21 @@ def test_parallel_distance_matches_sync(clean_page):
     assert out["maxDiff"] < 1e-4
 
 
-# ── Engine lane (toy, fast) ─────────────────────────────────────────────
-def test_multilevel_sweep_then_commit_toy(toy_page):
+# ── Engine lane (real data) ─────────────────────────────────────────────
+@pytest.mark.slow
+def test_multilevel_sweep_then_commit(page):
     """The produce/picker split: recomputeMultiLevelSweep scores every
     candidate (state.multiLevelSweep, no clusterLevels yet); then
     commitMultiLevelLayers(pickedCounts) builds the coarse→fine ladder in
-    state.clusterLevels with bridge analysis."""
-    out = toy_page.evaluate(r'''async () => {
+    state.clusterLevels with bridge analysis.
+
+    @slow: recomputeMultiLevelSweep runs a real bootstrap HDBSCAN sweep
+    (B=5) over the fallworm fixture — a genuine full recompute the default
+    fast tier must not pay."""
+    out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const st = await import("/app/src/ui/state.js");
-        // toy_page pre-runs data→dimred→clustering, so clusterLevels is
+        // page pre-runs data→dimred→clustering, so clusterLevels is
         // already populated. Clear it so we can prove the SWEEP alone commits
         // nothing (it must not create clusterLevels — only the picker does).
         st.update({ clusterLevels: null, clusterResult: null });
@@ -183,20 +188,28 @@ def test_multilevel_sweep_then_commit_toy(toy_page):
     assert out["bppUpperOnly"] is True
 
 
-def test_multilevel_producer_picker_cards_toy(toy_page):
+@pytest.mark.slow
+def test_multilevel_producer_picker_cards(page):
     """The produce/picker card split: the multiLevel descriptor creates a
     SWEEP card under the dimred ancestor whose result holds the scored sweep
     (multiLevelSweep, no clusterLevels). A picker card auto-spawns under it;
     picking granularities + applyChange commits clusterLevels into the picker
-    card's result, and selecting the picker projects them into legacy state."""
-    out = toy_page.evaluate(r'''async () => {
+    card's result, and selecting the picker projects them into legacy state.
+
+    @slow: the multiLevel applyChange runs a real bootstrap HDBSCAN sweep over
+    the fallworm fixture (B=5) — a genuine full recompute, not a single op on
+    loaded geometry, so the default fast tier must not pay it."""
+    out = page.evaluate(r'''async () => {
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
         const wf = await import("/app/src/ui/workflow.js");
+        const mig = await import("/app/src/ui/workflow-migration.js");
         const proj = await import("/app/src/ui/workflow-projection.js");
         const st = await import("/app/src/ui/state.js");
 
-        // ensure a dimred card is in the selected lineage (toy_page yields
-        // data→dimred→clustering; select the clustering leaf).
+        // `page` resets the workflow tree but keeps the real-data cascade
+        // loaded; rebuild the data→dimred→clustering spine, then select
+        // the clustering leaf.
+        mig.migrateLegacyToWorkflowIfNeeded();
         const clust = wf.listSteps().filter(s => s.type === "clustering").pop();
         wf.selectStep(clust.id);
 
@@ -254,18 +267,23 @@ def test_multilevel_producer_picker_cards_toy(toy_page):
     assert out["projectedSweep"] is True            # producer ancestor projects the curve
 
 
-def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(toy_page):
-    """Pass 1c + Pass 2a: after the picker commits a ladder, bridgeAnalysis
-    is computed inline (no separate card — Pass 2a removed it) and surfaced
-    on state.bridgeAnalysis. crossClusterCitations auto-spawns ONLY when
-    citation edges are present in live state (gated to avoid a perma-failed
-    card on toy data). Toggling state.rawCitationEdges between two commits
-    proves the gate works."""
-    out = toy_page.evaluate(r'''async () => {
+@pytest.mark.slow
+def test_picker_commit_populates_bridges_and_auto_crosscite(page):
+    """Pass 1c + Pass 2a + J16: after the picker commits a ladder,
+    bridgeAnalysis is computed inline (no separate card — Pass 2a removed it)
+    and surfaced on state.bridgeAnalysis. Cross-cluster citations no longer
+    spawns a CARD (J16); instead the flow is computed and stashed on
+    state.crossClusterCitations ONLY when citation edges are present in live
+    state (gated to avoid running the throwing runner with no edges). Toggling
+    state.rawCitationEdges between two commits proves the gate works."""
+    out = page.evaluate(r'''async () => {
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
         const wf = await import("/app/src/ui/workflow.js");
+        const mig = await import("/app/src/ui/workflow-migration.js");
         const st = await import("/app/src/ui/state.js");
 
+        // `page` resets the workflow tree; rebuild the spine first.
+        mig.migrateLegacyToWorkflowIfNeeded();
         // Build producer → picker.
         const clust = wf.listSteps().filter(s => s.type === "clustering").pop();
         wf.selectStep(clust.id);
@@ -283,7 +301,7 @@ def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(toy_page):
         const picks = [...new Set(cands.map(c => c.count).sort((a,b)=>a-b))].slice(0, 2);
         const pdesc = ld.getLayerDescriptor("multiLevelPicker");
 
-        // ── Phase 1: no edges (toy default) — picker commits + bridges land
+        // ── Phase 1: no edges — picker commits + bridges land
         //    on state.bridgeAnalysis, but crossCluster is gated out.
         const edgesBefore = st.getState().rawCitationEdges;
         st.update({ rawCitationEdges: null });
@@ -298,44 +316,65 @@ def test_picker_commit_populates_bridges_and_auto_spawns_crosscite(toy_page):
         const phase1_hasBridge = !!phase1_state.bridgeAnalysis;
         // No separate bridgeAnalysis card should exist (Pass 2a deleted the type).
         const phase1_bridgeCards = wf.listSteps().filter(s => s.type === "bridgeAnalysis").length;
-        const xcc1 = wf.listSteps().filter(s => s.type === "crossClusterCitations" && s.parentId === picker.id);
+        // J16: cross-cluster never spawns a card. Gated out with no edges →
+        // no stash on state either.
+        const phase1_xccCards = wf.listSteps().filter(s => s.type === "crossClusterCitations").length;
+        const phase1_xccStash = !!phase1_state.crossClusterCitations;
 
-        // ── Phase 2: synthesise edges + re-pick — crossCluster should join.
-        st.update({ rawCitationEdges: [[0, 1], [1, 2], [2, 0]] });
+        // ── Phase 2: synthesise edges + re-pick — crossCluster flow should
+        //    compute and land on state.crossClusterCitations (no card).
+        st.update({ rawCitationEdges: [0, 1, 1, 2, 2, 0], crossClusterCitations: null });
         await pdesc.applyChange({ pickedCounts: picks });
-        for (let i = 0; i < 25; i++) {
+        let xcc2stash = null;
+        for (let i = 0; i < 50; i++) {
             await new Promise(r => setTimeout(r, 40));
-            const xcc = wf.listSteps().filter(s => s.type === "crossClusterCitations" && s.parentId === picker.id);
-            if (xcc.length && xcc[0].status === "done") break;
+            xcc2stash = st.getState().crossClusterCitations;
+            if (xcc2stash) break;
         }
-        const xcc2 = wf.listSteps().filter(s => s.type === "crossClusterCitations" && s.parentId === picker.id);
+        const phase2_xccCards = wf.listSteps().filter(s => s.type === "crossClusterCitations").length;
 
-        // Restore so we don't bleed into later tests.
-        st.update({ rawCitationEdges: edgesBefore });
+        // Restore so we don't bleed into later tests. J16's auto-fire opened a
+        // singleton cross-cluster panel in the secondary slot and stashed the
+        // flow on state — undo both so later `page` tests see the pristine
+        // panel layout (the viewer keep-alive test depends on it).
+        const sec = (st.getState().panels || {}).secondary;
+        if (sec && Array.isArray(sec.tabs)) {
+            for (const t of sec.tabs.filter(t => t.type === "cross-cluster")) {
+                st.closeTab("secondary", t.id);
+            }
+        }
+        st.update({ rawCitationEdges: edgesBefore, crossClusterCitations: null, bridgeAnalysis: null });
 
         return {
             phase1_hasBridge,
             phase1_bridgeCards,                      // expected: 0 (card type removed)
-            phase1_xccCount: xcc1.length,            // expected: 0 (gated out)
-            phase2_xccCount: xcc2.length,            // expected: 1 (auto-spawned)
-            phase2_xccStatus: xcc2[0] && xcc2[0].status,
+            phase1_xccCards,                         // expected: 0 (J16: no card)
+            phase1_xccStash,                         // expected: false (gated out)
+            phase2_xccCards,                         // expected: 0 (J16: no card)
+            phase2_xccStash: !!xcc2stash,            // expected: true (flow stashed)
         };
     }''')
     # Bridge computed inline + surfaced on state, no separate card.
     assert out["phase1_hasBridge"] is True
     assert out["phase1_bridgeCards"] == 0
-    # CrossCluster gated out when no edges.
-    assert out["phase1_xccCount"] == 0
-    # ...and auto-spawns when edges are present.
-    assert out["phase2_xccCount"] == 1
-    assert out["phase2_xccStatus"] == "done"
+    # CrossCluster: never a card (J16); gated out (no stash) when no edges.
+    assert out["phase1_xccCards"] == 0
+    assert out["phase1_xccStash"] is False
+    # ...and flow lands on state when edges are present.
+    assert out["phase2_xccCards"] == 0
+    assert out["phase2_xccStash"] is True
 
 
-def test_bridge_panel_sections_and_tau(toy_page):
+@pytest.mark.slow
+def test_bridge_panel_sections_and_tau(page):
     """After a multi-level run, the bridge panel renders Encapsulated +
     Bridges sections that together account for every fine cluster, and the
-    τ slider re-buckets without an engine recompute."""
-    out = toy_page.evaluate(r'''async () => {
+    τ slider re-buckets without an engine recompute.
+
+    @slow: the setup runs a real bootstrap HDBSCAN sweep (B=5) over the
+    fallworm fixture — a genuine full recompute the default fast tier must
+    not pay."""
+    out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const state = await import("/app/src/ui/state.js");
         // Sweep, then commit the two coarsest granularities so bridge
@@ -386,9 +425,10 @@ def test_bridge_panel_sections_and_tau(toy_page):
 
 @pytest.mark.slow
 def test_multilevel_engine_real(page):
-    """Real BFS-5000: the sweep's Phase-1 nested-worker distance fan-out runs
-    inside the clustering worker, Phase-2 bootstraps fan out across workers,
-    and a coarse→fine reproducible ladder lands."""
+    """Real data (rehydrated fallworm baseline, n=1638): the sweep's Phase-1
+    nested-worker distance fan-out runs inside the clustering worker, Phase-2
+    bootstraps fan out across workers, and a coarse→fine reproducible ladder
+    lands."""
     out = page.evaluate(r'''async () => {
         const engine = await import("/app/src/ui/engine.js");
         const st = await import("/app/src/ui/state.js");
@@ -415,7 +455,7 @@ def test_multilevel_engine_real(page):
             hasBridge: !!s.bridgeAnalysis,
         };
     }''')
-    assert out["n"] == 5000
+    assert out["n"] == 1638
     assert out["nLevels"] >= 2
     assert out["noNoise"] is True
     assert out["counts"] == sorted(out["counts"])

@@ -41,37 +41,58 @@ const NODE_SET_WHERE =
 const STRUCTURAL_WHERE =
   "is_rejected = 0 AND title IS NOT NULL AND (is_stub = 1 OR abstract IS NULL)";
 
-const DATASETS = {
-  // id → {label, sqlitePath, embeddingsPath, indexPath}. Paths are absolute
-  // fetch URLs (static server rooted at network_toy/, whose data/ symlinks to
-  // the repo-root data/). One entry per biblion project; the DB MUST be the
-  // snapshot copy (…_snapshot.db), not the live <name>.db. Add a project by
-  // copying a block and running `biblion advanced snapshot` for it.
-  biblion: {
-    label: "biblion test corpus",
-    sqlitePath: "/data/biblion/biblion_snapshot.db",
-    embeddingsPath: "/data/biblion/embeddings.npy",
-    indexPath: "/data/biblion/paper_index.json",
-  },
-  fallworm: {
-    label: "fallworm",
-    sqlitePath: "/data/fallworm/fallworm_snapshot.db",
-    embeddingsPath: "/data/fallworm/embeddings.npy",
-    indexPath: "/data/fallworm/paper_index.json",
-  },
-  microalgae: {
-    label: "microalgae",
-    sqlitePath: "/data/microalgae/microalgae_snapshot.db",
-    embeddingsPath: "/data/microalgae/embeddings.npy",
-    indexPath: "/data/microalgae/paper_index.json",
-  },
-  PhD_proposal: {
-    label: "PhD proposal",
-    sqlitePath: "/data/PhD_proposal/PhD_proposal_snapshot.db",
-    embeddingsPath: "/data/PhD_proposal/embeddings.npy",
-    indexPath: "/data/PhD_proposal/paper_index.json",
-  },
-};
+// id → {label, sqlitePath, embeddingsPath, indexPath}. No longer hardcoded:
+// the list is fetched from serve.py /api/datasets (which scans data/*/ for
+// loadable datasets), then this map is populated by datasetEntry()/loadDatasets().
+// Paths are derived from the id and resolved by the static server (rooted at
+// network_toy/, whose data/ symlinks to the repo-root data/). The DB is always
+// the snapshot copy (…_snapshot.db), never the live <name>.db.
+const DATASETS = {};
+
+// Build the per-dataset fetch URLs from its id. Centralised so the picker and
+// produceSqlite agree on layout. (Previously the literal paths in DATASETS;
+// kept identical — /data/<id>/<id>_snapshot.db etc.)
+function datasetEntry(id, label) {
+  return {
+    label: label || id,
+    sqlitePath: `/data/${id}/${id}_snapshot.db`,
+    embeddingsPath: `/data/${id}/embeddings.npy`,
+    indexPath: `/data/${id}/paper_index.json`,
+  };
+}
+
+// Fetch the loadable datasets from serve.py and (re)populate DATASETS +
+// SQLITE_OPTIONS. Returns the dataset list. Best-effort: a server without the
+// API (plain http.server) yields an empty list and the picker shows nothing.
+let _datasetsPromise = null;
+export function loadDatasets() {
+  if (_datasetsPromise) return _datasetsPromise;
+  _datasetsPromise = (async () => {
+    let list = [];
+    try {
+      const r = await fetch("/api/datasets");
+      if (r.ok) list = await r.json();
+    } catch { /* no API (static-only server) → empty */ }
+    for (const d of list) {
+      if (!DATASETS[d.id]) {
+        DATASETS[d.id] = datasetEntry(d.id, d.label);
+        SQLITE_OPTIONS.push({ value: d.id, label: DATASETS[d.id].label });
+      }
+    }
+    return list;
+  })();
+  return _datasetsPromise;
+}
+
+// Ensure DATASETS holds at least the requested id before produceSqlite reads
+// it. Pulls the live list if it's not loaded yet, then falls back to deriving
+// the entry from the id alone (so a save's stored dataset still loads even if
+// the API is briefly unavailable).
+async function ensureDataset(id) {
+  if (!DATASETS[id]) await loadDatasets();
+  if (!DATASETS[id]) DATASETS[id] = datasetEntry(id);
+  return DATASETS[id];
+}
 
 // Guard: only ever open a snapshot DB. A live project DB (…/<name>.db) in the
 // same data dir is mid-write and would corrupt the read / break alignment.
@@ -85,26 +106,23 @@ function assertSnapshotPath(sqlitePath) {
   }
 }
 
-export const DATASET_IDS = Object.keys(DATASETS);
-export const DATASET_LABELS = Object.fromEntries(
-  Object.entries(DATASETS).map(([id, ds]) => [id, ds.label])
-);
+// No fixed default dataset — the data/-driven picker (ui/modals/data-source-
+// modal.js) always passes an explicit {dataset} chosen from /api/datasets.
+// Empty default keeps produceSqlite honest: it must be told which dataset.
+export const defaultSqliteParams = () => ({ dataset: null });
 
-export const defaultSqliteParams = () => ({ dataset: "biblion" });
+// Flat option list for the data-source picker: every dataset, plus each
+// discovered subset addressed as "<project>::<subset>". Starts empty and is
+// populated by loadDatasets() (from /api/datasets) then discoverSubsets().
+// Mutated IN PLACE so the modal — which reads this array fresh each open —
+// reflects whatever was discovered.
+export const SQLITE_OPTIONS = [];
 
-// Flat option list for the data-source picker: every project, plus each
-// discovered subset addressed as "<project>::<subset>". Seeded with the
-// projects; subset entries are appended by discoverSubsets() (fired at module
-// load). Mutated IN PLACE so the modal — which reads this array fresh each time
-// it opens — reflects whatever subsets existed at page load.
-export const SQLITE_OPTIONS = DATASET_IDS.map(
-  (id) => ({ value: id, label: DATASETS[id].label })
-);
-
-// Best-effort: fetch each project's subsets/index.json and append its embedded
-// subsets to SQLITE_OPTIONS. A project with no subsets/ (404) is skipped.
+// Best-effort: fetch each dataset's subsets/index.json and append its embedded
+// subsets to SQLITE_OPTIONS. A dataset with no subsets/ (404) is skipped.
 export async function discoverSubsets() {
-  await Promise.all(DATASET_IDS.map(async (id) => {
+  await loadDatasets();   // need the dataset ids before we can probe subsets
+  await Promise.all(Object.keys(DATASETS).map(async (id) => {
     let idx;
     try {
       const r = await fetch(`/data/${id}/subsets/index.json`);
@@ -121,20 +139,9 @@ export async function discoverSubsets() {
   return SQLITE_OPTIONS;
 }
 
-// Fire discovery at load so subsets are usually present by the time the
-// data-source modal is opened. Fire-and-forget; failures are non-fatal.
+// Fire discovery at load so datasets + subsets are usually present by the time
+// the data-source modal is opened. Fire-and-forget; failures are non-fatal.
 discoverSubsets();
-
-export const sqliteModalSchema = {
-  fields: [
-    {
-      key: "dataset",
-      label: "Dataset",
-      type: "select",
-      options: DATASET_IDS.map((id) => ({ value: id, label: DATASETS[id].label })),
-    },
-  ],
-};
 
 // sql.js engine — initialised once, shared across produce() calls.
 let _sqlPromise = null;
@@ -157,11 +164,12 @@ export async function produceSqlite(params = {}) {
   // A subset is addressed as "<project>::<subset>"; a bare id is the full
   // project. A subset reuses the project's shared snapshot DB and supplies its
   // own paper_index + embeddings under subsets/<name>/.
-  const datasetId = params.dataset || "biblion";
+  const datasetId = params.dataset;
+  if (!datasetId) throw new Error(`[datasource:sqlite] no dataset selected (pick one from the picker)`);
   const sep = datasetId.indexOf("::");
   const projectId = sep === -1 ? datasetId : datasetId.slice(0, sep);
   const subsetName = sep === -1 ? null : datasetId.slice(sep + 2);
-  const base = DATASETS[projectId];
+  const base = await ensureDataset(projectId);
   if (!base) throw new Error(`[datasource:sqlite] unknown dataset "${projectId}"`);
   const ds = subsetName ? {
     label:          `${base.label} / ${subsetName}`,
@@ -317,7 +325,13 @@ export async function produceSqlite(params = {}) {
   if (_handle && _handle.db && _handle.db !== db) {
     try { _handle.db.close(); } catch { /* ignore */ }
   }
-  _handle = { dataset: datasetId, db, idByRow: paperIdByNode, textStmt: null };
+  // rowById (papers.id → node index) is the reverse of paperIdByNode; the SQL
+  // search panel needs it to map active-dataset hits back to graph nodes.
+  // Stash it on the handle (rowById is otherwise local to this function).
+  _handle = {
+    dataset: datasetId, db, idByRow: paperIdByNode, nodeByPaperId: rowById,
+    textStmt: null, attached: new Map(),
+  };
 
   return {
     method: "sqlite",
@@ -415,4 +429,114 @@ export function getNodeRecord(nodeId) {
 // produceSqlite().
 export function hasSqliteText() {
   return _handle != null;
+}
+
+// Drop the loaded corpus: close the DB handle and null the module state so
+// hasSqliteText() reads false again. The inverse of produceSqlite() — used
+// when switching away from the sqlite source (and by the test harness to
+// restore a data-free session, since _handle is module-global and survives a
+// state.update reset). Idempotent.
+export function clearSqliteCorpus() {
+  if (_handle && _handle.db) {
+    try { _handle.db.close(); } catch { /* already closed */ }
+  }
+  _handle = null;
+}
+
+// ── SQL library search support (J09) ────────────────────────────────────
+// The active dataset's snapshot DB already lives in the page (_handle.db). The
+// search panel runs read-only SELECTs against it directly, plus any number of
+// other snapshot DBs ATTACHed by alias. Everything below is the cross-DB plumbing
+// the panel needs; the SELECT-only guard and query building live in sql-search.js.
+
+// papers.id → graph node index (the reverse of the per-node paperId map), or
+// null when no corpus is loaded / the paper isn't a graph node. Active-dataset
+// hits use this to highlight in the viewer and to fill cart `nodeId`; hits from
+// ATTACHed non-active DBs have no node and return null (list-only).
+export function getNodeByPaperId(paperId) {
+  if (!_handle || !_handle.nodeByPaperId) return null;
+  const idx = _handle.nodeByPaperId.get(paperId);
+  return idx === undefined ? null : idx;
+}
+
+// The active dataset id (the one whose snapshot is the live _handle.db), or null.
+export function getActiveDatasetId() {
+  return _handle ? _handle.dataset : null;
+}
+
+// Alias under which a dataset id is ATTACHed in SQL. SQLite schema names must be
+// bare identifiers, so non-word chars (incl. the subset "::" separator) collapse
+// to "_". The active dataset is the unaliased `main` schema; callers that want a
+// symmetric alias for it can use this too.
+export function searchAlias(datasetId) {
+  return String(datasetId).replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+// Whether the sql.js build exposes an Emscripten FS (needed for ATTACH against a
+// file path). Determined off the live handle's SQL module. Currently the search
+// path requires FS; if a build lacks it, attachSnapshot throws and the panel
+// reports the failure rather than silently degrading.
+export async function searchFsAvailable() {
+  const SQL = await getSQL();
+  return !!(SQL && SQL.FS && typeof SQL.FS.writeFile === "function");
+}
+
+// ATTACH another dataset's *_snapshot.db onto the live handle under its alias so
+// the panel can run cross-DB SELECTs. Read-only: we only ever ATTACH a snapshot
+// copy and never issue DML/DDL against it (the SELECT-only guard enforces the
+// rest). Cached per alias — re-attaching is a no-op. Returns the alias.
+export async function attachSnapshot(datasetId) {
+  if (!_handle) throw new Error("[datasource:sqlite] no corpus loaded — cannot ATTACH");
+  const alias = searchAlias(datasetId);
+  if (_handle.attached.has(alias)) return alias;
+  const SQL = await getSQL();
+  if (!(SQL.FS && typeof SQL.FS.writeFile === "function")) {
+    throw new Error("[datasource:sqlite] sql.js build has no FS — cross-DB ATTACH unavailable");
+  }
+  const sep = datasetId.indexOf("::");
+  const projectId = sep === -1 ? datasetId : datasetId.slice(0, sep);
+  const base = await ensureDataset(projectId);
+  assertSnapshotPath(base.sqlitePath);   // never attach a live project DB
+  const r = await fetch(base.sqlitePath);
+  if (!r.ok) throw new Error(`[datasource:sqlite] ${base.sqlitePath}: HTTP ${r.status}`);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  const fsPath = `/${alias}.db`;
+  SQL.FS.writeFile(fsPath, bytes);
+  _handle.db.run(`ATTACH '${fsPath}' AS ${alias}`);
+  _handle.attached.set(alias, fsPath);
+  return alias;
+}
+
+// DETACH a previously-attached snapshot and drop its FS bytes. No-op if it isn't
+// attached. Driven by the scope selector on toggle-off.
+export async function detachSnapshot(datasetId) {
+  return detachSnapshotByAlias(searchAlias(datasetId));
+}
+
+// DETACH by the bare alias (the scope reconciler holds aliases, not ids).
+export async function detachSnapshotByAlias(alias) {
+  if (!_handle) return;
+  const fsPath = _handle.attached.get(alias);
+  if (!fsPath) return;
+  try { _handle.db.run(`DETACH ${alias}`); } catch { /* already gone */ }
+  const SQL = await getSQL();
+  try { SQL.FS.unlink(fsPath); } catch { /* best-effort */ }
+  _handle.attached.delete(alias);
+}
+
+// Currently-attached aliases (excludes the active dataset's `main` schema).
+export function attachedAliases() {
+  return _handle ? [..._handle.attached.keys()] : [];
+}
+
+// Run a read-only SELECT against the live handle (+ any ATTACHed snapshots).
+// Returns { columns, values } in sql.js exec shape, or { columns: [], values: [] }
+// for an empty result. The caller (sql-search.js) is responsible for the
+// SELECT-only guard and the LIMIT cap; this is the thin execution seam so the
+// panel never touches the module-private handle directly.
+export function runSearchQuery(sql) {
+  if (!_handle) throw new Error("[datasource:sqlite] no corpus loaded — cannot query");
+  const res = _handle.db.exec(sql);
+  if (!res.length) return { columns: [], values: [] };
+  return { columns: res[0].columns, values: res[0].values };
 }

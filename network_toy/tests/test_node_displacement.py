@@ -10,11 +10,13 @@ Playwright.
 
 
 def test_displacement_autospawns_after_fusion_fork(clean_page):
-    """Pass 1d: when the dimred descriptor's auto-fork creates the pre+post
-    fusion branches, a nodeDisplacement card auto-spawns under the dimred too
-    (it's a property of the fork itself, no clustering needed). Drives this
-    via the same code path the dimred descriptor uses: spawn the branches,
-    then verify nodeDisplacement appears alongside them.
+    """Pass 1d + J15: when the dimred descriptor's auto-fork creates the
+    pre+post fusion branches, a nodeDisplacement card auto-spawns. J15
+    re-parented it onto the two branch cards: the POST branch is the
+    structural parent and the PRE branch rides as a ref-edge (promoted to a
+    second solid edge by the chart). Drives this via the same code path the
+    dimred descriptor uses: spawn the branches, then verify nodeDisplacement
+    appears under the POST branch with a ref to the PRE branch.
 
     We can't easily run a real graph-diffusion dimred end-to-end (toy data
     doesn't ship citation edges by default), so this test exercises the
@@ -42,6 +44,7 @@ def test_displacement_autospawns_after_fusion_fork(clean_page):
         await fbd.applyChange({ endpoint: "pre",  parentId: dim });
         await fbd.applyChange({ endpoint: "post", parentId: dim });
         // Select POST as the auto-fork does.
+        const preB  = wf.listSteps({ type: "fusionBranch" }).find(b => b.params.endpoint === "pre");
         const postB = wf.listSteps({ type: "fusionBranch" }).find(b => b.params.endpoint === "post");
         wf.selectStep(postB.id);
 
@@ -51,9 +54,11 @@ def test_displacement_autospawns_after_fusion_fork(clean_page):
         // which the auto-spawn helper would call.
         await ld.getLayerDescriptor("nodeDisplacement").applyChange();
 
-        const ndCards = wf.listSteps({ type: "nodeDisplacement" }).filter(c => c.parentId === dim);
-        const ndUnderDimred = ndCards.length === 1;
-        const refsPreAndPost = ndCards[0] && ndCards[0].refIds && ndCards[0].refIds.length === 2;
+        // J15: parent is the POST branch; PRE branch rides as the single ref.
+        const ndCards = wf.listSteps({ type: "nodeDisplacement" }).filter(c => c.parentId === postB.id);
+        const ndUnderPost = ndCards.length === 1;
+        const refIsPre = ndCards[0] && ndCards[0].refIds
+            && ndCards[0].refIds.length === 1 && ndCards[0].refIds[0] === preB.id;
 
         // Confirm the fusionBranch's "+" menu NO LONGER offers nodeDisplacement
         // (since it auto-fires from the dimred now).
@@ -61,14 +66,14 @@ def test_displacement_autospawns_after_fusion_fork(clean_page):
         const fbRules = ns.addStepRulesFor("fusionBranch").map(r => r.modal);
 
         return {
-            ndUnderDimred,
-            refsPreAndPost,
+            ndUnderPost,
+            refIsPre,
             status: ndCards[0] && ndCards[0].status,
             fbOffersND: fbRules.includes("nodeDisplacement"),
         };
     }''')
-    assert out["ndUnderDimred"] is True
-    assert out["refsPreAndPost"] is True
+    assert out["ndUnderPost"] is True
+    assert out["refIsPre"] is True
     assert out["status"] == "done"
     # The fusionBranch's manual menu no longer offers nodeDisplacement
     # (Pass 1d removed it — auto-fires from dimred fork instead).
@@ -76,8 +81,10 @@ def test_displacement_autospawns_after_fusion_fork(clean_page):
 
 
 def test_displacement_card_wires_both_branches(clean_page):
-    """The node-displacement card references both fusion branches as refIds
-    and computes a result from the dimred card's pre/post basePos."""
+    """J15: the node-displacement card is parented on the POST fusion branch
+    and references the PRE branch as its single refId. It computes a result
+    from the dimred card's pre/post basePos (the job reads endpoints from the
+    explicit branch ids, not from parentId)."""
     out = clean_page.evaluate(r'''async () => {
         const wf = await import("/app/src/ui/workflow.js");
         const ld = await import("/app/src/ui/modals/layer-descriptors.js");
@@ -105,17 +112,16 @@ def test_displacement_card_wires_both_branches(clean_page):
         const nd = card.result && card.result.nodeDisplacement;
         return {
             status: card.status,
-            parentIsDimred: card.parentId === dim,
+            parentIsPostBranch: card.parentId === postB,
             refIds: card.refIds,
-            refPre: card.refIds && card.refIds[0] === preB,
-            refPost: card.refIds && card.refIds[1] === postB,
+            refIsPre: !!(card.refIds && card.refIds.length === 1 && card.refIds[0] === preB),
             topMover: nd && nd.topMovers[0].id,
             hasDist: !!(nd && nd.dist && nd.dist.length === n),
         };
     }''')
     assert out["status"] == "done"
-    assert out["parentIsDimred"] is True
-    assert out["refPre"] is True and out["refPost"] is True
+    assert out["parentIsPostBranch"] is True       # J15: parented on POST branch
+    assert out["refIsPre"] is True                  # PRE branch is the single ref
     assert out["topMover"] == 3                    # the moved node
     assert out["hasDist"] is True
 

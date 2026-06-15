@@ -20,19 +20,10 @@ const state = {
   // the data panel owns them UX-wise; the engine plumbs them into
   // Layer 3 params on reingest.
   dataSource: {
-    mode: "toy",           // "toy" | "real"; mirrors activeAlgorithm.dataSource
+    mode: "sqlite",        // "sqlite"; mirrors activeAlgorithm.dataSource
     configs: {
-      toy: {
-        seed:      42,
-        nodeCount: 400,
-        origins:   6,
-        spread:    1.0,
-        density:   0.3,
-        intraRate: 0.5,
-        crossRate: 0.2,
-      },
-      real: {
-        subset: "dev_subset_1000",
+      sqlite: {
+        dataset: null,     // chosen from /api/datasets via the data-source picker
       },
     },
   },
@@ -59,9 +50,9 @@ const state = {
                                   //   that can supply edges directly (today: real-data via
                                   //   produceReal()). Flat number[] of length 2|E| in [src, dst, src,
                                   //   dst, …] form. Read-only outside the data-source layer —
-                                  //   consumers: dimred fusion stage, Layer 3 imported-edges. Null in
-                                  //   toy mode (taste-network generates citations later in the
-                                  //   pipeline; fusion stage falls through as identity).
+                                  //   consumers: dimred fusion stage, Layer 3 imported-edges. Null
+                                  //   when the source supplies no edges (fusion stage falls through
+                                  //   as identity).
   dimredResult:          null,    // Layer 1.5 output: {method, params, n, d, data:Float32Array(n*d)}
                                   //   Layer 2 reads from this for distance computations.
   dimredResultPreFusion: null,    // Layer 1.5 *without* fusion applied — same shape as dimredResult.
@@ -83,8 +74,6 @@ const state = {
   //  clusterLevels. See projectFusionBranch.)
   clusterResult:         null,    // Backward-compat alias for the FINEST level's clusterResult
                                   //   (used by panels that aren't yet level-aware)
-  neighbourhoodResult:   null,    // taste-network internal: {neighbourhoods, nodeNeighbourhood}
-  tasteResult:           null,    // taste-network internal: {tasteByNeighbourhood, tasteByCluster}
   citationResult:        null,    // Layer 3 output: CitationResult contract
   citationLayout:        null,    // Layer 4 output: Float32Array(n × 3) raw layout positions
   alignedCitationLayout: null,    // Layer 5a output: Float32Array(n × 3) — blend force input
@@ -151,7 +140,6 @@ const state = {
                             //   Layer 1.5 has two sequential stages; the engine runs them
                             //   in order. Default is identity for both = pass-through.
     neighbourhood: null,
-    taste:         null,
     citations:     null,
     clustering:    null,    // { method, byAlgo: { algoId: params } }
     layout:        null,    // { method, params }
@@ -172,13 +160,13 @@ const state = {
   // ── active algorithm per pluggable layer ─────────────────────
   // populated as registries come online; placeholders for now
   activeAlgorithm: {
-    "dataSource": "toy",         // "toy" | "real"; selects which datasource registry entry runs
+    "dataSource": "sqlite",      // "sqlite"; selects which datasource registry entry runs
     // dimred has three stages now (noise + compression + viz); the workflow
     // chart reads layerParams.dimred directly to summarise. activeAlgorithm
     // here holds only the compression-side method as a single legacy label.
     "dimred":     "identity",
     "clustering": "hdbscan",    // existing
-    "citations":  "taste-network",   // toy default
+    "citations":  "imported-edges",  // real-data default (corpus edges)
     "layout":     "mds",         // existing
   },
 
@@ -211,6 +199,33 @@ const state = {
     },
   },
   selection: { type: null, id: null },
+  // ── node highlights (J25) ────────────────────────────────────
+  // General multi-source highlight channel: a coloured glow drawn ADDITIVELY
+  // over the active colour mode + selection-dim, in both viewers, driven by
+  // highlight *requests* from any source (scoring-card select, SQL search, …).
+  // Distinct from the single state.selection dim mechanism — several sources
+  // can glow concurrently, each with its own colour.
+  //
+  // Shape: { bySource: { [source]: { ids: Set<number>, colour: string } } }
+  //   source — provenance/group tag ("scoring", "search", …). One group per
+  //            source; re-highlighting a source replaces (or, additive, unions)
+  //            its set. Multiple sources coexist.
+  //   ids    — Set of ACTIVE-dataset nodeIds to glow.
+  //   colour — the glow hex for that group.
+  //
+  // PURELY VISUAL + in-memory only — never serialised into a project save
+  // (absent from serialise.js PASS_THROUGH_KEYS, so it's dropped on save).
+  // Mutated through addHighlight / clearHighlight / clearAllHighlights; those
+  // bump engineRevision so the viewers repaint via the cheap nodeColor accessor
+  // (no rebuildData / engine recompute).
+  highlights: { bySource: {} },
+  // ── search highlight (J09 → folded into J25) ──────────────────
+  // RETAINED as a back-compat shim only: the SQL search panel now routes its
+  // hits through the general highlight channel (addHighlight("search", …)).
+  // Kept as an always-empty Set so any straggler reader of state.searchMatches
+  // sees "no dedicated search dim" rather than crashing; the colour resolver no
+  // longer consults it. Safe to delete once nothing references it.
+  searchMatches: new Set(),
   // ── cart ─────────────────────────────────────────────────────
   // Papers collected (from clusters / selections) for export to a biblion
   // subset. Each item: { paperId, nodeId, source } (source = provenance, e.g.
@@ -219,7 +234,6 @@ const state = {
   // stored here. Persisted (SCHEMA_VERSION 3).
   cart: [],
   filter: null,
-  blend: 0.0,
   // Fusion-comparison slider (Layer 1.5 A/B). Interpolates basePos
   // between pre-fusion (semantic-only) and post-fusion (citation-aware)
   // positions. Inert when _basePosPreFusion is null — i.e. fusion is
@@ -292,7 +306,7 @@ const state = {
   //     label:        string,           // user-set or auto-generated
   //     timestamp:    string,           // ISO datetime
   //     inputs: {                        // snapshot at time-of-run
-  //       dataSourceId:       string,    // "real" / "toy"
+  //       dataSourceId:       string,    // "sqlite"
   //       dataSourceConfig:   object,    // subset, seed, etc.
   //       layerParamsSnapshot: object,   // dim/fusion/etc. active
   //     },
@@ -394,7 +408,32 @@ const state = {
   // shape. Slice 2.2 will migrate populated legacy slots into a baseline
   // linear tree on first load.
   workflow: { steps: {}, rootId: null, selected: null },
+
+  // ── UI prefs (J10 — dynamic layout) ──────────────────────────────────
+  // Per-browser layout preferences: the live rail/slot sizes that drive
+  // the #layout grid CSS vars, plus per-rail collapsed booleans. This is
+  // deliberately a SELF-CONTAINED slice that does NOT travel with the
+  // project save. Persistence is OPTION A from J10: a localStorage blob
+  // (key UI_PREFS_KEY below), written on every change and hydrated on
+  // boot — so persistence/serialise.js is untouched and layout is
+  // per-browser, not per-project.
+  //
+  //   leftRailW / rightRailW / bottomH — pixel sizes mirrored to the
+  //     --left-rail-w / --right-rail-w / --bottom-h vars on #layout.
+  //   leftCollapsed / rightCollapsed   — when true the rail width is
+  //     forced to 0 (a thin re-expand stub stays clickable); the prior
+  //     width is preserved in the *W field so expand restores it.
+  uiPrefs: {
+    leftRailW:      280,
+    rightRailW:     320,
+    bottomH:        220,
+    leftCollapsed:  false,
+    rightCollapsed: false,
+  },
 };
+
+// localStorage key for the OPTION A UI-prefs blob (see uiPrefs slice).
+export const UI_PREFS_KEY = "networkToy.uiPrefs.v1";
 
 const subscribers = new Set();
 
@@ -512,10 +551,6 @@ export function setActiveAlgorithm(layer, algoId) {
   });
 }
 
-export function setBlend(alpha) {
-  update({ blend: Math.max(0, Math.min(1, +alpha || 0)) });
-}
-
 export function setFusionBlend(alpha) {
   update({ fusionBlend: Math.max(0, Math.min(1, +alpha || 0)) });
 }
@@ -558,6 +593,71 @@ export function setLayerParams(layer, params) {
 export function setSelection(selection) {
   update({ selection: selection || { type: null, id: null } });
 }
+
+// ── Node highlights (J25) ───────────────────────────────────────────
+// General multi-source highlight channel. Any caller lights up a group of
+// nodeIds under a `source` tag with a glow `colour`; the viewers compose the
+// glow additively over the colour mode via the shared resolver. update() alone
+// notifies subscribers — the viewers detect the highlight change via a cheap
+// signature and re-run only the nodeColor accessor (NO rebuildData / engine
+// recompute). We deliberately do NOT bump engineRevision: an engineRevision
+// bump forces the viewers down their rebuildData path, which J25 forbids for a
+// purely-visual interaction-speed toggle.
+
+const DEFAULT_HIGHLIGHT_COLOUR = "#ffd23f";   // warm amber glow default
+
+// Add (or replace) a highlight group for `source`. nodeIds is filtered to
+// integers. With additive=false (plain click) the source's set is replaced;
+// with additive=true (Ctrl+click) the new ids are unioned onto the existing
+// set, and the colour is updated. Passing an empty/no nodeIds with
+// additive=false clears the source.
+export function addHighlight(source, nodeIds, colour, additive = false) {
+  if (!source) return;
+  const ids = (nodeIds || []).filter((n) => Number.isInteger(n));
+  const prev = state.highlights.bySource[source];
+  let nextIds;
+  if (additive && prev) {
+    nextIds = new Set(prev.ids);
+    for (const n of ids) nextIds.add(n);
+  } else {
+    nextIds = new Set(ids);
+  }
+  if (nextIds.size === 0) {            // additive=false with no ids = clear
+    clearHighlight(source);
+    return;
+  }
+  const group = { ids: nextIds, colour: colour || (prev && prev.colour) || DEFAULT_HIGHLIGHT_COLOUR };
+  update({
+    highlights: { bySource: { ...state.highlights.bySource, [source]: group } },
+  });
+}
+
+// Remove the highlight group for `source`. No-op when absent.
+export function clearHighlight(source) {
+  if (!source || !state.highlights.bySource[source]) return;
+  const next = { ...state.highlights.bySource };
+  delete next[source];
+  update({ highlights: { bySource: next } });
+}
+
+// Drop every highlight group across all sources.
+export function clearAllHighlights() {
+  if (Object.keys(state.highlights.bySource).length === 0) return;
+  update({ highlights: { bySource: {} } });
+}
+
+// ── Search highlight (J09 → folded into J25) ────────────────────────
+// Thin shims kept for the SQL search panel, now routing through the general
+// highlight channel under the "search" source so there's a single mechanism.
+export function setSearchMatches(nodeIds) {
+  addHighlight("search", nodeIds, SEARCH_HIGHLIGHT_COLOUR);
+}
+
+export function clearSearchMatches() {
+  clearHighlight("search");
+}
+
+export const SEARCH_HIGHLIGHT_COLOUR = "#4fc3f7";   // cool cyan for search hits
 
 export function setProjectName(name) {
   update({ projectName: name || null });
@@ -659,4 +759,51 @@ export function getClusterScore(levelUid, clusterId) {
 // next update() callback.
 export function setView(partial) {
   update({ view: { ...state.view, ...(partial || {}) } });
+}
+
+// ── UI prefs (J10) ──────────────────────────────────────────────────
+// Read the current layout prefs slice. Returned object is the live
+// reference; treat as read-only and mutate via setUiPrefs.
+export function getUiPrefs() {
+  return state.uiPrefs;
+}
+
+// Patch the layout prefs slice (partial). Persists the merged slice to
+// localStorage (OPTION A) so it survives reload; failures there are
+// swallowed — a missing/blocked Storage must not break the layout.
+export function setUiPrefs(partial) {
+  const next = { ...state.uiPrefs, ...(partial || {}) };
+  update({ uiPrefs: next });
+  try {
+    localStorage.setItem(UI_PREFS_KEY, JSON.stringify(next));
+  } catch (e) {
+    // Storage disabled / quota / private mode — layout still works in
+    // memory; we just lose persistence for this session.
+  }
+}
+
+// Hydrate the layout prefs slice from the localStorage blob on boot.
+// Only known numeric/boolean fields are copied across (defends against a
+// stale or hand-edited blob). Writes straight to state without a further
+// localStorage round-trip. Returns the active slice.
+export function hydrateUiPrefs() {
+  let stored = null;
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY);
+    if (raw) stored = JSON.parse(raw);
+  } catch (e) {
+    stored = null;
+  }
+  if (stored && typeof stored === "object") {
+    const cur = state.uiPrefs;
+    const merged = { ...cur };
+    for (const k of ["leftRailW", "rightRailW", "bottomH"]) {
+      if (Number.isFinite(stored[k])) merged[k] = stored[k];
+    }
+    for (const k of ["leftCollapsed", "rightCollapsed"]) {
+      if (typeof stored[k] === "boolean") merged[k] = stored[k];
+    }
+    update({ uiPrefs: merged });
+  }
+  return state.uiPrefs;
 }

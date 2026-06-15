@@ -24,13 +24,13 @@ import { makeBlendForce }                  from "../../blend/blend.js";
 import { buildBaseEdges }                   from "../../base-edges.js";
 import { getState, setTabConfig }          from "../state.js";
 import {
-  getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE,
+  getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
 // flags live here; runtime colour is read from state.view (the colour
-// pickers in the left rail write there), falling back to .colour as a
-// hard-coded backstop when the view-state colour is missing.
+// pickers in the viewer settings popup write there), falling back to
+// .colour as a hard-coded backstop when the view-state colour is missing.
 const EDGE_STYLE = {
   citation:        { colour: "#8a8a8a", width: 0.3, arrows: true  }, // arrows gated by state.view.citArrows
   base:            { colour: "#5a6878", width: 0.3, arrows: false },
@@ -119,7 +119,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let lastDataRevision = -1;
   let resizeObs = null;
   let lastSelection = null;
-  let lastBlend = null;
   let lastFusionBlend = null;
 
   // Settings overlay (gear button + popup with sliders).
@@ -144,6 +143,12 @@ export function mount(container, _state, config = {}, tabContext = null) {
   });
   container.appendChild(colourOverlay.root);
 
+  // J20: fusion-blend overlay (bottom-left, vertical). Adopts the global
+  // #fusion-blend-row host so it sits over the layout it blends. main.js
+  // wires + gates the host's inputs by id; we just relocate it here. The
+  // host stays in #blend-control when no viewer is mounted.
+  const fusionOverlay = buildFusionBlendOverlay(container);
+
   // (Graph / lastDataRevision / resizeObs / lastSelection hoisted above)
 
   function init() {
@@ -166,15 +171,15 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const link   = Graph.d3Force("link");   if (link   && link.strength)   link.strength(0);
     const center = Graph.d3Force("center"); if (center && center.strength) center.strength(0);
 
-    // Blend hook reads state through getters every tick. Two
-    // independent sliders feed it: (1) `blend` = basePos ↔ citation
-    // layout, and (2) `fusionBlend` = pre-fusion basePos ↔ post-fusion
-    // basePos (the citation-aware re-embedding endpoint).
+    // Blend hook reads state through getters every tick. The active
+    // slider is `fusionBlend` = pre-fusion basePos ↔ post-fusion basePos
+    // (the citation-aware re-embedding endpoint). The outer basePos ↔
+    // citation `blend` slider was removed (J14); makeBlendForce treats a
+    // missing getBlend as α = 0.
     Graph.d3Force("blend", makeBlendForce({
       getBasePos:            () => getState()._basePos,
       getBasePosPreFusion:   () => getState()._basePosPreFusion,
       getAlignedCitationPos: () => getState().alignedCitationLayout,
-      getBlend:              () => getState().blend,
       getFusionBlend:        () => getState().fusionBlend,
     }));
     Graph.d3VelocityDecay(1.0);
@@ -397,9 +402,11 @@ export function mount(container, _state, config = {}, tabContext = null) {
   init();
   if (Graph) rebuildData();
   lastDataRevision = getState().engineRevision;
-  lastBlend        = getState().blend;
   lastFusionBlend  = getState().fusionBlend;
   let lastViewSig  = viewSignature(getState().view);
+  // J25: highlight-channel fingerprint — a change here repaints colours via the
+  // cheap nodeColor accessor (no rebuildData / engine recompute).
+  let lastHlSig    = highlightSignature(getState());
 
   return {
     update(s) {
@@ -417,7 +424,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
         lastDataRevision = s.engineRevision;
         lastViewSig      = viewSig;
         lastSelection    = s.selection;
-        lastBlend        = s.blend;
         if (dataChanged) {
           // New engine output may have added/removed cluster levels —
           // refresh the dropdown options.
@@ -426,27 +432,30 @@ export function mount(container, _state, config = {}, tabContext = null) {
         return;
       }
 
-      // Blend-slider change: d3-force-3d's tick loop quiesces when the
+      // Fusion-slider change: d3-force-3d's tick loop quiesces when the
       // network looks settled (instantly true under deterministic
       // blending), so the blend hook stops firing and slider drags go
       // ignored. Reheat + resume so the tick loop runs again and the
-      // hook picks up the new α. Matches the legacy shell's behaviour
-      // (main.js:1270-1277). Same applies to the fusion-comparison
-      // slider — it feeds the same blend hook via getFusionBlend.
-      if (s.blend !== lastBlend || s.fusionBlend !== lastFusionBlend) {
-        lastBlend       = s.blend;
+      // hook picks up the new fusionBlend. Matches the legacy shell's
+      // behaviour (main.js:1270-1277).
+      if (s.fusionBlend !== lastFusionBlend) {
         lastFusionBlend = s.fusionBlend;
         try { Graph.d3ReheatSimulation(); }   catch (_) {}
         try { Graph.resumeAnimation();   }   catch (_) {}
       }
 
-      // Selection-only change: re-paint colours, no rebuild.
+      // Selection-only OR highlight-only change: re-paint colours, no rebuild.
+      // Both flow through the same cheap nodeColor accessor (repaintSelection),
+      // which the shared resolver now composes the highlight glow into.
       const selChanged =
         !lastSelection ||
         lastSelection.type !== s.selection.type ||
         lastSelection.id   !== s.selection.id;
-      if (selChanged) {
+      const hlSig = highlightSignature(s);
+      const hlChanged = hlSig !== lastHlSig;
+      if (selChanged || hlChanged) {
         lastSelection = s.selection;
+        lastHlSig     = hlSig;
         repaintSelection();
       }
     },
@@ -455,6 +464,25 @@ export function mount(container, _state, config = {}, tabContext = null) {
         try { resizeObs.disconnect(); } catch (_) {}
         resizeObs = null;
       }
+      // J19: re-park the relocated edge-controls host (hidden) back on the
+      // body before tearing the overlay down, so its ec-* inputs survive and
+      // a later viewer remount can re-adopt them.
+      const edgeHost = document.getElementById("edge-controls-host");
+      if (edgeHost) {
+        edgeHost.hidden = true;
+        document.body.appendChild(edgeHost);
+      }
+      // J20: re-park the relocated fusion-blend row (hidden) back on the body
+      // before tearing the overlay down, so its inputs + main.js wiring/gating
+      // survive and a later viewer remount can re-adopt them. Strip the
+      // overlay's vertical-orientation inline styling so a re-adopt starts clean.
+      const fusionRow = document.getElementById("fusion-blend-row");
+      if (fusionRow) {
+        fusionRow.removeAttribute("style");
+        fusionRow.style.display = "none";
+        document.body.appendChild(fusionRow);
+      }
+      if (fusionOverlay) fusionOverlay.remove();
       if (settingsRoot) settingsRoot.remove();
       if (colourOverlay && colourOverlay.root) colourOverlay.root.remove();
 
@@ -559,6 +587,61 @@ function buildColourModeOverlay({ initial, getOptions, onChange }) {
   };
 }
 
+/* ── fusion-blend overlay (bottom-left, vertical) ──────────────────────── */
+
+// Relocate the global #fusion-blend-row host into a bottom-left overlay and
+// orient its range input vertically. The host's inputs (#fusion-blend-slider
+// / #fusion-blend-readout) are wired + show/hide-gated by main.js by id, so
+// this function only handles placement + orientation, never wiring. Returns
+// the overlay root (or null if the host isn't present) so mount()/destroy()
+// can add + remove it. appendChild relocates the existing element, keeping
+// its wiring intact (same approach as the J19 edge-controls host).
+function buildFusionBlendOverlay(container) {
+  const fusionRow = document.getElementById("fusion-blend-row");
+  if (!fusionRow) return null;
+
+  const root = document.createElement("div");
+  root.className = "viewer-3d-fusion-blend";
+  // No CSS class is styled for this overlay (viewer-3d.css is owned
+  // elsewhere), so position + orient inline. z-index sits above the empty
+  // overlay (5) and level with the other corner overlays (10).
+  root.style.position = "absolute";
+  root.style.left = "8px";
+  root.style.bottom = "8px";
+  root.style.zIndex = "10";
+  root.style.display = "flex";
+  root.style.flexDirection = "column";
+  root.style.alignItems = "center";
+  root.style.gap = "6px";
+  root.style.padding = "8px 6px";
+  root.style.background = "rgba(40, 44, 52, 0.85)";
+  root.style.border = "1px solid var(--border-light)";
+  root.style.borderRadius = "3px";
+  root.style.userSelect = "none";
+
+  // Vertical orientation: a column flex with the range input flipped to run
+  // bottom→top. writing-mode is the standards-track way; the WebKit appearance
+  // hint covers older Chromium. The label sits above, the readout below.
+  fusionRow.style.display = "flex";
+  fusionRow.style.flexDirection = "column";
+  fusionRow.style.alignItems = "center";
+  fusionRow.style.gap = "6px";
+  fusionRow.style.margin = "0";
+
+  const slider = fusionRow.querySelector("#fusion-blend-slider");
+  if (slider) {
+    slider.style.writingMode = "vertical-lr";
+    slider.style.direction = "rtl";              // 0 at the bottom, 1 at the top
+    slider.style.webkitAppearance = "slider-vertical";
+    slider.style.width = "auto";
+    slider.style.height = "120px";
+  }
+
+  root.appendChild(fusionRow);
+  container.appendChild(root);
+  return root;
+}
+
 /* ── settings overlay ───────────────────────────────────────────────── */
 
 function buildSettingsOverlay(container, cam, onChange) {
@@ -597,6 +680,20 @@ function buildSettingsOverlay(container, cam, onChange) {
   hint.style.marginTop = "6px";
   hint.textContent = "0–1 fraction of native speed";
   popup.appendChild(hint);
+
+  // J19: adopt the relocated edge colour/toggle controls. The host
+  // (#edge-controls-host) is a global singleton in index.html — main.js's
+  // mountEdgeControls wires its ec-* inputs once at boot. We just move the
+  // host into this popup so the controls live with the viewer they drive.
+  // appendChild relocates the existing element (keeps wiring intact).
+  const edgeHost = document.getElementById("edge-controls-host");
+  if (edgeHost) {
+    const edgeHeading = document.createElement("h4");
+    edgeHeading.textContent = "Edges";
+    popup.appendChild(edgeHeading);
+    edgeHost.hidden = false;
+    popup.appendChild(edgeHost);
+  }
 
   root.appendChild(popup);
   container.appendChild(root);

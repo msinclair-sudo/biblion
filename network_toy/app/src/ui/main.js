@@ -8,21 +8,20 @@
 // not connected in this slice — see doc/ui.md §9 for the build phasing.
 // Modules below render placeholder content where the engine isn't yet
 // wired; the layout shell is fully functional.
-//
-// Legacy UI is preserved at app/legacy.html for comparison.
 
-import { mountTopbar }         from "./topbar.js";
-import { mountDataPanel }      from "./data-panel.js";
-import { mountWorkflowChart }  from "./workflow-chart.js";
-import { mountPanelSystem }    from "./panel-system.js";
-import { setBlend, setFusionBlend, setView, getState, subscribe } from "./state.js";
+import { mountTopbar }           from "./topbar.js";
+import { mountDataPanel }        from "./data-panel.js";
+import { mountWorkflowChart }    from "./workflow-chart.js";
+import { mountPanelSystem }      from "./panel-system.js";
+import { mountLayoutSplitters }  from "./layout-splitters.js";
+import { setFusionBlend, setView, getState, subscribe } from "./state.js";
 
 export function boot() {
   mountTopbar();
   mountDataPanel();
   mountWorkflowChart();
   mountPanelSystem();
-  mountBlendSlider();
+  mountLayoutSplitters();
   mountFusionBlendSlider();
   mountEdgeControls();
 
@@ -34,34 +33,17 @@ export function boot() {
   console.log("[ui] shell mounted; engine wired (idle — add a data source to begin).");
 }
 
-function mountBlendSlider() {
-  const input    = document.getElementById("blend-slider");
-  const readout  = document.getElementById("blend-readout");
-  if (!input || !readout) return;
-
-  input.value = String(getState().blend);
-  readout.textContent = (+input.value).toFixed(2);
-
-  input.addEventListener("input", (e) => {
-    const v = +e.target.value;
-    setBlend(v);
-    readout.textContent = v.toFixed(2);
-  });
-
-  // Keep in sync if state changes elsewhere.
-  subscribe((state) => {
-    if (Math.abs(+input.value - state.blend) > 1e-9) {
-      input.value = String(state.blend);
-      readout.textContent = state.blend.toFixed(2);
-    }
-  });
-}
-
 // Fusion-comparison slider — interpolates between pre-fusion and
 // post-fusion basePos via the same blend hook (nested lerp inside
 // makeBlendForce). Hidden when _basePosPreFusion is null (fusion is
 // identity or hasn't run); shown as soon as a fusion run produces a
 // pre-fusion endpoint to compare against.
+//
+// J20: the #fusion-blend-row host is relocated by viewer-3d into a
+// bottom-left vertical overlay (it owns the row's `display` layout there),
+// so wiring here is by id and stays valid regardless of where the host is
+// parked. Gating toggles the `hidden` attribute rather than `display`, so it
+// doesn't clobber the overlay's `display:flex` when it un-hides the row.
 function mountFusionBlendSlider() {
   const row     = document.getElementById("fusion-blend-row");
   const input   = document.getElementById("fusion-blend-slider");
@@ -71,7 +53,7 @@ function mountFusionBlendSlider() {
   const s0 = getState();
   input.value = String(s0.fusionBlend);
   readout.textContent = (+input.value).toFixed(2);
-  row.style.display = s0._basePosPreFusion ? "" : "none";
+  row.hidden = !s0._basePosPreFusion;
 
   input.addEventListener("input", (e) => {
     const v = +e.target.value;
@@ -85,18 +67,19 @@ function mountFusionBlendSlider() {
       readout.textContent = state.fusionBlend.toFixed(2);
     }
     const wantShown = !!state._basePosPreFusion;
-    const isShown   = row.style.display !== "none";
-    if (wantShown !== isShown) {
-      row.style.display = wantShown ? "" : "none";
+    if (wantShown === row.hidden) {
+      row.hidden = !wantShown;
     }
   });
 }
 
 // Edge-display controls (citations / base / structure / arrows + sliders
-// + colour pickers) at the bottom of the left rail. Writes state.view
-// via setView; viewer-3d reacts on its next update() callback. Each
-// slider/colour input gets a live numeric/hex readout so users can read
-// values without hovering.
+// + colour pickers). The ec-* inputs live in #edge-controls-host, which
+// viewer-3d adopts into its settings popup (J19) — this just wires them
+// by id, so it works regardless of where the host is currently parked.
+// Writes state.view via setView; viewer-3d reacts on its next update()
+// callback. Each slider/colour input gets a live numeric/hex readout so
+// users can read values without hovering.
 function mountEdgeControls() {
   const cite         = document.getElementById("ec-citations");
   const arrows       = document.getElementById("ec-cit-arrows");

@@ -186,7 +186,10 @@ def test_scoring_panel_renders_stored_labels(clean_page):
 
 def test_scoring_panel_renders_banded_labels_multiline(clean_page):
     """A banded (stratified) method renders one line per df band in the scoring
-    panel — anchor / broad / mid / specific / signature each on their own row."""
+    panel — anchor / broad / mid / specific / signature each on their own row.
+    The panel now shows ONE method (combined by default), so we select the
+    banded method via the header dropdown and expand its per-cluster show-more
+    before the band lines surface."""
     out = clean_page.evaluate(
         '''async () => {
             const st = await import("/app/src/ui/state.js");
@@ -212,10 +215,12 @@ def test_scoring_panel_renders_banded_labels_multiline(clean_page):
                             signature: [{term:"cassiopea"}] };
             const lb = wf.createStep({ type: "labelling", label: "labels", parentId: pk });
             wf.updateStepStatus(lb, "running");
-            wf.setStepResult(lb, { byLevel: { L0: { perCluster: [
-                { clusterId: 0, byMethod: { cTfidfStratified: { bands, terms: ["alga"] } }, combined: "alga · cassiopea" },
-                { clusterId: 1, byMethod: { cTfidfStratified: { bands, terms: ["alga"] } }, combined: "alga · cassiopea" },
-            ]}}});
+            wf.setStepResult(lb, { byLevel: { L0: {
+                methods: [{ id: "cTfidfStratified", label: "c-TF-IDF (banded)", available: true }],
+                perCluster: [
+                    { clusterId: 0, byMethod: { cTfidfStratified: { bands, terms: ["alga"] } }, combined: "alga · cassiopea" },
+                    { clusterId: 1, byMethod: { cTfidfStratified: { bands, terms: ["alga"] } }, combined: "alga · cassiopea" },
+                ]}}});
             const sc = wf.createStep({ type: "scoring", label: "scoring", parentId: lb });
             wf.updateStepStatus(sc, "running"); wf.setStepResult(sc, { scores: {} });
             wf.selectStep(sc);
@@ -225,12 +230,22 @@ def test_scoring_panel_renders_banded_labels_multiline(clean_page):
             document.body.appendChild(host);
             const inst = reg.getPanelType("scoring").mount(host, st.getState(), { stepId: sc });
             await new Promise(r => setTimeout(r, 40));
+            // pick the banded method from the header dropdown
+            const sel = host.querySelector(".scoring-method-select");
+            sel.value = "cTfidfStratified";
+            sel.dispatchEvent(new Event("change"));
+            await new Promise(r => setTimeout(r, 40));
+            // expand every per-cluster show-more to reveal the per-band lines
+            for (const b of host.querySelectorAll(".scoring-label-showmore")) b.click();
+            await new Promise(r => setTimeout(r, 40));
             const bandLines = [...host.querySelectorAll(".scoring-label-band")].map(n => n.textContent);
+            const hasDropdown = !!sel;
             inst.destroy();
-            return { bandLines };
+            return { bandLines, hasDropdown };
         }'''
     )
-    # five band lines per cluster × two clusters = ten; each band on its own line
+    assert out["hasDropdown"] is True
+    # five band lines per cluster, each band on its own line once expanded
     assert any(t.startswith("anchor:") for t in out["bandLines"])
     assert any(t.startswith("broad:") for t in out["bandLines"])
     assert any(t.startswith("mid:") for t in out["bandLines"])

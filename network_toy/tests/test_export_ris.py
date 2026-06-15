@@ -1,109 +1,11 @@
-"""RIS export — formatter, selection logic, and the export card/panel.
+"""Browser-only residue of the RIS export tests.
 
-The export feature: pick a level + score≥threshold (per-level scores) OR a
-single cluster, gather each member node's bibliographic record from the
-biblion corpus, and download a RIS file. Pure helpers (export/ris.js,
-export/cluster-export.js) are unit-tested with injected records; the
-card/panel wiring is exercised on a synthetic tree (clean_page).
+The pure helpers — ris.js (formatter) and cluster-export.js (selectNodes /
+buildRis / exportFilename) — moved to tests/unit/export-ris.test.mjs (run
+under `node --test`). What stays here needs a browser: the next-steps wiring
+case imports next-steps-rules (→ esm.sh engine), and the panel-render case
+mounts DOM and exercises live picker events.
 """
-
-
-def test_ris_formatter(clean_page):
-    """A record formats as a valid RIS entry: TY from pub_type, one AU per
-    author, TI/PY/JO/DO/AB, ER terminator; many records join cleanly."""
-    out = clean_page.evaluate(r'''async () => {
-        const ris = await import("/app/src/export/ris.js");
-        const rec = {
-            paperId: 1, title: "Soil microbial communities", year: 2021,
-            venue: "Soil Biology", doi: "10.1/abc", pubType: "journalarticle",
-            abstract: "We study\nsoil microbes.",
-            authors: ["Smith, J.", "Doe, A."],
-        };
-        const one = ris.formatRisRecord(rec);
-        const many = ris.formatRis([rec, { ...rec, title: "Second", authors: [] }]);
-        return {
-            ty: ris.risTypeFor("journalarticle"),
-            tyConf: ris.risTypeFor("conferencepaper"),
-            tyUnknown: ris.risTypeFor("weirdtype"),
-            tyNull: ris.risTypeFor(null),
-            one,
-            nAU: (one.match(/^AU  - /gm) || []).length,
-            endsER: /ER  - $/m.test(one),
-            absSingleLine: !/AB  - We study\n/.test(one),   // newline collapsed
-            manyRecords: (many.match(/^TY  - /gm) || []).length,
-        };
-    }''')
-    assert out["ty"] == "JOUR"
-    assert out["tyConf"] == "CONF"
-    assert out["tyUnknown"] == "GEN"
-    assert out["tyNull"] == "GEN"
-    assert out["nAU"] == 2
-    assert out["endsER"] is True
-    assert out["absSingleLine"] is True
-    assert "TI  - Soil microbial communities" in out["one"]
-    assert "PY  - 2021" in out["one"]
-    assert "DO  - 10.1/abc" in out["one"]
-    assert out["manyRecords"] == 2
-
-
-def test_selection_by_score_and_cluster(clean_page):
-    """selectNodes picks the right node set: by-score uses the chosen level's
-    per-level scores; single-cluster picks one cluster's members."""
-    out = clean_page.evaluate(r'''async () => {
-        const ex = await import("/app/src/export/cluster-export.js");
-        // L0: clusters {0,1}; L1: clusters {0,1,2}
-        const levels = [
-            { uid: "L0", clusterResult: { nodeCluster: Int32Array.from([0,0,0,1,1,1]),
-                clusters: [{id:0},{id:1}] } },
-            { uid: "L1", clusterResult: { nodeCluster: Int32Array.from([0,0,1,1,2,2]),
-                clusters: [{id:0},{id:1},{id:2}] } },
-        ];
-        // Scores are PER-LEVEL. At L0: cluster 0 → 5, cluster 1 → 2.
-        const scores = { L0: { 0: 5, 1: 2 }, L1: { 0: 4, 1: 1, 2: 5 } };
-
-        // by-score at L0, ≥3 → only cluster 0 (nodes 0,1,2).
-        const a = ex.selectNodes(levels, scores, { mode: "by-score", level: 0, minScore: 3 });
-        // by-score at L1, ≥4 → clusters 0 (nodes 0,1) and 2 (nodes 4,5).
-        const b = ex.selectNodes(levels, scores, { mode: "by-score", level: 1, minScore: 4 });
-        // single cluster: L1 cluster 1 → nodes 2,3.
-        const c = ex.selectNodes(levels, scores, { mode: "cluster", level: 1, clusterId: 1 });
-        return {
-            aNodes: [...a.nodeIds], aClusters: [...a.clusterIds].sort(),
-            bNodes: [...b.nodeIds].sort((x,y)=>x-y), bClusters: [...b.clusterIds].sort(),
-            cNodes: [...c.nodeIds],
-            fnameScore: ex.exportFilename({ mode: "by-score", level: 0, minScore: 3 }),
-            fnameCluster: ex.exportFilename({ mode: "cluster", level: 1, clusterId: 1 }),
-        };
-    }''')
-    assert out["aNodes"] == [0, 1, 2]
-    assert out["aClusters"] == [0]
-    assert out["bNodes"] == [0, 1, 4, 5]
-    assert out["bClusters"] == [0, 2]
-    assert out["cNodes"] == [2, 3]
-    assert out["fnameScore"] == "cluster-L0-score-ge-3.ris"
-    assert out["fnameCluster"] == "cluster-L1-c1.ris"
-
-
-def test_buildris_with_injected_records(clean_page):
-    """buildRis gathers records for the selection via an injected getRecord,
-    counts misses, and produces RIS text."""
-    out = clean_page.evaluate(r'''async () => {
-        const ex = await import("/app/src/export/cluster-export.js");
-        const levels = [ { uid: "L0", clusterResult: {
-            nodeCluster: Int32Array.from([0,0,0,1,1,1]), clusters: [{id:0},{id:1}] } } ];
-        const scores = { L0: { 0: 5 } };
-        // node 1 has no record (returns null) → counted as missing.
-        const getRecord = (id) => id === 1 ? null : ({
-            paperId: id, title: "Paper " + id, year: 2020, authors: ["A, B"],
-            venue: null, doi: null, pubType: "journalarticle", abstract: null });
-        const { ris, count, missing } = ex.buildRis(levels, scores,
-            { mode: "by-score", level: 0, minScore: 3 }, getRecord);
-        return { count, missing, hasTitle0: ris.includes("Paper 0"), records: (ris.match(/^TY  - /gm)||[]).length };
-    }''')
-    assert out["count"] == 2          # nodes 0 and 2 (node 1 missing)
-    assert out["missing"] == 1
-    assert out["hasTitle0"] is True
-    assert out["records"] == 2
 
 
 def test_export_card_in_next_steps_and_registered(clean_page):

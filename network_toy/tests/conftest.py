@@ -1,36 +1,44 @@
-"""Shared Playwright fixtures for the test suite.
+"""Shared Playwright fixtures for the browser test tier.
 
-Per the 2026-05-26 directive, tests run against the BFS-5000 real-data
-fixture by default (5000 papers, BFS-carved from 5 high-degree seeds —
-see doc/plan.md §6.4d). Loading the fixture is expensive (~30 s data
-fetch + ~30 s UMAP + ~10 s HDBSCAN), so we boot once per session,
-apply the locked-default analysis pipeline, then share that page
-across tests. Each test resets the lightweight slots
-(`state.workflow`, `state.validationRuns`, `state.jobs`) at the start
-so tree CRUD / queue / panel work runs against a clean slate without
-re-paying the data + UMAP cost.
+The browser tier no longer recomputes the real-data pipeline. Instead it
+**rehydrates** committed fixture zips under `tests/fixtures/` via the
+`deserialiseFile` load path (the same mechanism `test_persistence.py`
+exercises and `topbar.js loadProject` runs in the app). Loading a zip
+restores the full computed state — genResult, embedding, dim-red,
+clustering — in ~1-2 s with **zero** UMAP/HDBSCAN compute, versus the
+~60-90 s in-browser pipeline the old `bfs5000_page` session paid once and
+the `dev_subset_bfs_5000` dataset it depended on (now unneeded).
 
-Fixtures:
+Three rehydrated session pages, each booted once and reset per test:
 
-    dev_server          (session) — http.server on :8000
+    dev_server          (session) — http.server on the test port
     playwright_browser  (session) — Chromium headless
-    bfs5000_page        (session) — page loaded with BFS-5000 data +
-                                    default dim-reduction + default
-                                    HDBSCAN clustering. Used by `page`.
-    page                (function) — yields bfs5000_page after
-                                     resetting workflow / validationRuns
-                                     / jobs. The default fixture.
-    toy_page            (function) — separate page in toy mode for
-                                     tests that explicitly need the
-                                     taste-network citation path.
-    clean_page          (function) — separate page with NO data load;
-                                     for pure-module tests (queue.js,
-                                     workflow.js CRUD) that don't
-                                     need ingest.
+    _clean_session      (session) — empty workflow, no data
+    _data_only_session  (session) — genResult + embedding + citations,
+                                     no dim-red / clustering
+    _baseline_session   (session) — full fallworm pipeline
+                                     (data → dim-red → clustering)
 
-Console-error guard: every page tracks errors; the fixture asserts
-no relevant errors occurred during the test. (The 3d-force-graph
-teardown error is suppressed — known harmless.)
+    clean_page          (function) — _clean_session reset per test
+    data_only_page      (function) — _data_only_session reset per test
+    page                (function) — _baseline_session reset per test
+                                     (the default fixture; was bfs5000)
+
+Tests select the lightest variant they need. Each per-test wrapper resets
+the lightweight slots (`state.workflow`, `state.validationRuns`,
+`state.jobs`) and restores the pristine geometry slots so one shared page
+stays safe across tests — that discipline is what lets a single booted
+page serve a whole module.
+
+Console-error guard: every page tracks errors; the fixture asserts no
+relevant errors occurred during the test. (The 3d-force-graph teardown
+error is suppressed — known harmless.)
+
+Parallelism: per-fixture setup is now ~1-2 s, so the tier runs under
+`pytest-xdist` (`-n auto`, see pytest.ini). Each xdist worker boots its
+own browser + rehydrates its own pages from the committed zips; workers
+share the read-only static dev server (or bind per-worker ports via
+`NETWORK_TOY_TEST_PORT`).
 """
 
 import os
@@ -43,9 +51,34 @@ from playwright.sync_api import sync_playwright
 
 # Port is overridable so a session can keep :8000 for a live browser and run
 # the suite elsewhere (e.g. NETWORK_TOY_TEST_PORT=8002). Defaults to 8000.
-TEST_PORT = int(os.environ.get("NETWORK_TOY_TEST_PORT", "8000"))
+#
+# Under pytest-xdist each worker gets its OWN port (base + worker index) so it
+# owns its own dev-server lifecycle. Sharing one server across workers races:
+# the worker that started it tears it down on its session end while sibling
+# workers are still fetching fixtures ("Failed to fetch"). Per-worker ports
+# sidestep that entirely. An explicit NETWORK_TOY_TEST_PORT pins the base.
+_BASE_PORT = int(os.environ.get("NETWORK_TOY_TEST_PORT", "8000"))
+
+
+def _resolve_port():
+    worker = os.environ.get("PYTEST_XDIST_WORKER")  # e.g. "gw0", "gw3", or None
+    if worker and worker.startswith("gw"):
+        try:
+            return _BASE_PORT + int(worker[2:])
+        except ValueError:
+            pass
+    return _BASE_PORT
+
+
+TEST_PORT = _resolve_port()
 URL = f"http://localhost:{TEST_PORT}/app/"
 KNOWN_FG_TEARDOWN = "Cannot read properties of undefined (reading 'tick')"
+
+# Fixture zips, served over the dev server at /tests/fixtures/<name>.zip
+# (the dev server roots at the repo, so tests/ is reachable).
+FIXTURE_BASELINE  = "/tests/fixtures/fallworm_baseline.zip"
+FIXTURE_DATA_ONLY = "/tests/fixtures/data_only.zip"
+FIXTURE_CLEAN     = "/tests/fixtures/clean.zip"
 
 # Best-effort optional resources the app deliberately probes and gracefully
 # skips on 404 (e.g. a project's subsets/index.json — "no subsets" is a valid
@@ -56,35 +89,6 @@ KNOWN_FG_TEARDOWN = "Cannot read properties of undefined (reading 'tick')"
 OPTIONAL_RESOURCE_MARKERS = ("/subsets/index.json", "favicon.ico")
 _RESOURCE_LOAD_CONSOLE_ERR = "Failed to load resource"
 
-# Session-level analysis params — TUNED FOR TEST SPEED, not production
-# realism. The locked production defaults (PCA-100 noise → UMAP-100
-# compression → UMAP-3/2 viz, HDBSCAN minClusterSize=100) take ~60-90s
-# of session setup at n=5000. We trade fidelity for wall-clock:
-#
-#   Compression: UMAP-50 (was 100). ARI(50, 100) = 0.806 per the §6.9
-#     dim-sweep — partition shape is broadly similar.
-#   HDBSCAN: minClusterSize=15 produces 50-60 clusters at this dim,
-#     making the cluster signal useful for tests. (Production
-#     min_cluster_size=100 degenerates to 2-cluster partitions at
-#     n=5000 and is useless for the shape sanity tests need.)
-#
-# Tests that specifically depend on the production config should
-# override layerParams themselves.
-HDBSCAN_PARAMS_5000 = {
-    "minSamples":        5,
-    "minClusterSize":    15,
-    "selectionMethod":   "eom",
-    "selectionEpsilon":  0,
-    "noiseMode":         "absorb",
-}
-UMAP_COMPRESSION_5000_TEST = {
-    "n_components":  50,
-    "n_neighbors":   30,
-    "min_dist":      0.0,
-    "metric":        "cosine",
-    "random_state":  42,
-}
-
 
 def _port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -93,11 +97,11 @@ def _port_in_use(port):
 
 @pytest.fixture(scope="session")
 def dev_server():
-    """Start http.server on :8000 for the session, kill on teardown.
+    """Start http.server on the test port for the session, kill on teardown.
 
-    Skips spawning if something's already serving :8000 (e.g. the user
-    is running a dev server alongside the tests) — but in that case
-    DOES NOT terminate the foreign process.
+    Skips spawning if something's already serving the port (e.g. the user
+    is running a dev server alongside the tests, or another xdist worker
+    started it) — but in that case DOES NOT terminate the foreign process.
     """
     if _port_in_use(TEST_PORT):
         # Already serving; trust it. Don't tear down on session end.
@@ -105,9 +109,13 @@ def dev_server():
         return
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # serve.py (not plain http.server): the app fetches /api/datasets on boot,
+    # which only serve.py answers. It roots at network_toy/ and reads the port
+    # from NETWORK_TOY_PORT.
     proc = subprocess.Popen(
-        ["python", "-m", "http.server", str(TEST_PORT)],
+        ["python", "serve.py"],
         cwd=repo_root,
+        env={**os.environ, "NETWORK_TOY_PORT": str(TEST_PORT)},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -165,93 +173,89 @@ def relevant_errors(page):
 
 
 def _boot_page(playwright_browser):
-    """Open a fresh context+page, navigate, wait for boot."""
+    """Open a fresh context+page, navigate, wait for the app module to load.
+
+    Readiness is polled (state.js becomes importable and getState() works)
+    rather than a blanket sleep — boot is now the only place a page loads,
+    and rehydration follows immediately, so a deterministic wait keeps the
+    session honest without a fixed 2 s tax per page.
+    """
     ctx = playwright_browser.new_context(viewport={"width": 1400, "height": 900})
     ctx.set_default_timeout(180_000)
     page = ctx.new_page()
     _attach_error_tracker(page)
     page.goto(URL)
     page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(2000)
+    page.wait_for_function(
+        '''async () => {
+            try {
+                const s = await import("/app/src/ui/state.js");
+                return !!(s && s.getState && s.getState());
+            } catch (e) { return false; }
+        }'''
+    )
     boot_errs = relevant_errors(page)
     assert not boot_errs, f"boot errors: {boot_errs}"
     return ctx, page
 
 
-@pytest.fixture(scope="session")
-def bfs5000_page(playwright_browser):
-    """Session-shared page loaded with BFS-5000 real-data fixture +
-    default dim-reduction + default HDBSCAN clustering applied.
-
-    Setup is ~60-90 s one-shot.
+def _rehydrate(page, fixture_url):
+    """Load a committed fixture zip into the page via the deserialiseFile
+    path — the exact mechanism topbar.js loadProject runs, minus the file
+    picker. Fetches the zip over the dev server, wraps it as a File,
+    deserialises, applies the patch wholesale (engine cascade deliberately
+    skipped — the results are already in the zip), reinstalls the workflow
+    tree, and reconciles the flat projection slots. Returns nothing; the
+    page's state is now the saved state.
     """
-    ctx, page = _boot_page(playwright_browser)
-
     page.evaluate(
-        '''async ({ hdbscanParams, compressionParams }) => {
-            const state  = await import("/app/src/ui/state.js");
-            const engine = await import("/app/src/ui/engine.js");
+        '''async (fixtureUrl) => {
+            const { deserialiseFile } = await import("/app/src/persistence/deserialise.js");
+            const state = await import("/app/src/ui/state.js");
+            const wf    = await import("/app/src/ui/workflow.js");
+            const proj  = await import("/app/src/ui/workflow-projection.js");
+
+            const r = await fetch(fixtureUrl);
+            if (!r.ok) throw new Error(`fixture fetch ${r.status} for ${fixtureUrl}`);
+            const blob = await r.blob();
+            const name = fixtureUrl.split("/").pop();
+            const file = new File([blob], name, { type: "application/zip" });
+            const { patch } = await deserialiseFile(file);
+
+            // Apply the patch wholesale (mirrors topbar.js loadProject): the
+            // cascade is skipped because the zip already carries every result.
             const cur = state.getState();
             state.update({
-                activeAlgorithm: { ...cur.activeAlgorithm, dataSource: "real" },
-                dataSource: {
-                    ...cur.dataSource,
-                    mode: "real",
-                    configs: {
-                        ...cur.dataSource.configs,
-                        real: { subset: "dev_subset_bfs_5000" },
-                    },
-                },
-                layerParams: {
-                    ...cur.layerParams,
-                    dimred: {
-                        noise:       { method: "pca",      params: { n_components: 100 } },
-                        fusion:      { method: "identity", params: {} },
-                        compression: { method: "umap",     params: compressionParams },
-                        viz:         { method: "umap",     params: { n_components: 3, n_neighbors: 15, min_dist: 0.1, metric: "cosine", random_state: 43 } },
-                        viz2d:       { method: "umap",     params: { n_components: 2, n_neighbors: 15, min_dist: 0.1, metric: "cosine", random_state: 44 } },
-                    },
-                    clustering: {
-                        method: "hdbscan",
-                        levels: [{
-                            uid: Math.random().toString(36).slice(2, 10),
-                            params: hdbscanParams,
-                            scope: "global",
-                        }],
-                    },
-                },
+                ...patch,
+                clusterResult: patch.clusterLevels && patch.clusterLevels.length
+                    ? patch.clusterLevels[patch.clusterLevels.length - 1].clusterResult
+                    : null,
             });
-            await engine.reingest();
+
+            // Reinstall the tree through workflow.js so its serial counter
+            // advances past the restored ids.
+            wf.importWorkflow(patch.workflow ?? { steps: {}, rootId: null, selected: null });
+
+            // Reconcile flat slots with the restored tree / force a repaint.
+            const selected = state.getState().workflow.selected;
+            if (selected) {
+                proj.projectStepIntoLegacyState(selected, { bumpRevision: true });
+            } else {
+                state.update({ engineRevision: cur.engineRevision + 1 });
+            }
         }''',
-        { "hdbscanParams": HDBSCAN_PARAMS_5000, "compressionParams": UMAP_COMPRESSION_5000_TEST }
+        fixture_url,
     )
 
-    n = page.evaluate(
-        '''async () => {
-            const s = (await import("/app/src/ui/state.js")).getState();
-            return {
-                nNodes:        s.genResult ? s.genResult.nodes.length : 0,
-                nClusters:     s.clusterLevels && s.clusterLevels[0] ? s.clusterLevels[0].clusterResult.clusters.length : 0,
-                dimredDim:     s.dimredResult ? s.dimredResult.d : 0,
-                citationCount: s.rawCitationEdges ? s.rawCitationEdges.length / 2 : 0,
-            };
-        }'''
-    )
-    assert n["nNodes"] == 5000, f"expected 5000 papers, got {n['nNodes']}"
-    assert n["dimredDim"] >= 50, f"expected dimred d>=50 (UMAP-50 compression), got {n['dimredDim']}"
-    assert n["nClusters"] > 5, f"expected >5 clusters (HDBSCAN at minClusterSize=15), got {n['nClusters']}"
 
-    # Re-check errors after the long ingest+cascade.
-    setup_errs = relevant_errors(page)
-    assert not setup_errs, f"setup errors after bfs5000 cascade: {setup_errs}"
-
-    # Snapshot the pristine real-data geometry slots (references — the
-    # arrays themselves are never mutated in place, only the slot is
-    # reassigned). The per-test `page` reset restores them so a test
-    # that clobbers state.clusterLevels / dimredResult / _basePos (e.g.
-    # the projection tests, which project synthetic length-2 cards into
-    # the legacy slots) can't corrupt the shared session for tests that
-    # run after it.
+def _snapshot_pristine_slots(page):
+    """Snapshot the pristine real-data geometry slots so the per-test reset
+    can restore them. References only — the arrays are never mutated in
+    place, only the slot is reassigned — so a test that clobbers
+    clusterLevels / dimredResult / _basePos (e.g. the projection tests,
+    which project synthetic length-2 cards into the legacy slots) can't
+    corrupt the shared session for tests that run after it.
+    """
     page.evaluate(
         '''async () => {
             const s = (await import("/app/src/ui/state.js")).getState();
@@ -266,30 +270,23 @@ def bfs5000_page(playwright_browser):
             };
         }'''
     )
-    page.errors.clear()                                  # tests start with a clean slate
-
-    yield page
-
-    ctx.close()
 
 
-@pytest.fixture
-def page(bfs5000_page):
-    """Default per-test page. Resets workflow / validationRuns / jobs
-    before yielding so each test runs on a clean slate; the heavy
-    data + dim-reduction + clustering stays loaded.
-
-    Asserts no console errors occurred during the test.
+def _reset_page(page):
+    """Per-test reset shared by every booted page: clears workflow /
+    validationRuns / jobs and restores the pristine geometry slots so each
+    test starts from the freshly-rehydrated state without re-paying the
+    load. Mirrors the discipline the old `page` fixture enforced.
     """
-    bfs5000_page.errors.clear()
-    bfs5000_page.evaluate(
+    page.errors.clear()
+    page.evaluate(
         '''async () => {
             const state = await import("/app/src/ui/state.js");
             const wf    = await import("/app/src/ui/workflow.js");
             wf.clearWorkflow();
             state.clearValidationRuns();
-            // Restore the pristine real-data geometry slots in case a
-            // prior test clobbered them (see bfs5000_page snapshot).
+            // Restore the pristine real-data geometry slots in case a prior
+            // test clobbered them (see _snapshot_pristine_slots).
             if (window.__pristineSlots) state.update({ ...window.__pristineSlots });
             // Clear in-flight jobs cleanly: cancel runnings, drop all.
             const cur = state.getState();
@@ -305,62 +302,108 @@ def page(bfs5000_page):
             state.update({ jobs: { byId: {}, order: [], runningId: null } });
         }'''
     )
-    yield bfs5000_page
-    errs = relevant_errors(bfs5000_page)
+
+
+def _make_session_page(playwright_browser, fixture_url):
+    """Boot one page, rehydrate it from `fixture_url`, guard the boot +
+    rehydrate for console errors, snapshot the pristine slots, and yield.
+    Shared body for the three session-scoped page fixtures.
+    """
+    ctx, page = _boot_page(playwright_browser)
+    _rehydrate(page, fixture_url)
+
+    setup_errs = relevant_errors(page)
+    assert not setup_errs, f"setup errors after rehydrate ({fixture_url}): {setup_errs}"
+
+    _snapshot_pristine_slots(page)
+    page.errors.clear()                                  # tests start with a clean slate
+    try:
+        yield page
+    finally:
+        ctx.close()
+
+
+@pytest.fixture(scope="session")
+def _clean_session(playwright_browser):
+    """Session page rehydrated from clean.zip — empty workflow, no data."""
+    yield from _make_session_page(playwright_browser, FIXTURE_CLEAN)
+
+
+@pytest.fixture(scope="session")
+def _data_only_session(playwright_browser):
+    """Session page rehydrated from data_only.zip — genResult + embedding +
+    rawCitationEdges, no dim-red / clustering."""
+    yield from _make_session_page(playwright_browser, FIXTURE_DATA_ONLY)
+
+
+@pytest.fixture(scope="session")
+def _baseline_session(playwright_browser):
+    """Session page rehydrated from fallworm_baseline.zip — the full
+    pipeline (data → dim-red → clustering)."""
+    yield from _make_session_page(playwright_browser, FIXTURE_BASELINE)
+
+
+@pytest.fixture
+def page(_baseline_session):
+    """Default per-test page: the rehydrated fallworm baseline, reset before
+    each test (workflow / validationRuns / jobs cleared, pristine geometry
+    restored). Replaces the recompute-heavy bfs5000_page session.
+
+    Asserts no console errors occurred during the test.
+    """
+    _reset_page(_baseline_session)
+    yield _baseline_session
+    errs = relevant_errors(_baseline_session)
     assert not errs, f"console errors during test: {errs}"
 
 
 @pytest.fixture
-def toy_page(playwright_browser):
-    """Separate page in toy mode (n=400 Gaussian-mixture). Used by tests
-    that specifically need the taste-network citation generation path,
-    Bayes-optimal ARI ceiling, or other toy-only behaviour.
+def data_only_page(_data_only_session):
+    """Per-test page for tests that need ingested data (genResult, embedding,
+    citations) but NOT dim-red / clustering. Reset per test."""
+    _reset_page(_data_only_session)
+    yield _data_only_session
+    errs = relevant_errors(_data_only_session)
+    assert not errs, f"console errors during data_only_page test: {errs}"
 
-    Boots fresh per test (cheap — no ingest).
-    """
-    ctx, page = _boot_page(playwright_browser)
-    # UI #2: boot no longer auto-runs the pipeline, so toy-mode tests
-    # trigger it explicitly. regenerate() runs the full cascade; the
-    # chart's migration retry may build a partial (data-only) tree from
-    # the transient mid-cascade state, so we clear it and migrate once
-    # from the COMPLETE post-cascade state to get the full
-    # data→dimred→clustering(→citations) baseline tree.
+
+def _wipe_data_slots(page):
+    """Restore the clean session's data-free contract. Some clean_page tests
+    deliberately run a real ingest (granular build-out: data/dimred cards),
+    which leaves genResult / embedding / dimredResult / clusterLevels (and a
+    materialised-text source that flips c-TF-IDF availability) on the shared
+    _clean_session. Without this, a later clean_page test inherits that data
+    and mis-reports (e.g. labelling's availCTfidf). Mirrors a fresh clean.zip
+    rehydrate without re-paying the load."""
     page.evaluate(
         '''async () => {
-            const engine = await import("/app/src/ui/engine.js");
-            await engine.regenerate();
-            const wf  = await import("/app/src/ui/workflow.js");
-            const mig = await import("/app/src/ui/workflow-migration.js");
-            wf.clearWorkflow();
-            mig.migrateLegacyToWorkflowIfNeeded();
+            const st = await import("/app/src/ui/state.js");
+            const sq = await import("/app/src/datasource/sqlite.js");
+            // The loaded sqlite corpus lives in a module-global handle that a
+            // state reset can't touch; drop it so hasSqliteText() reads false
+            // (else c-TF-IDF labelling / RIS export stay "available").
+            sq.clearSqliteCorpus();
+            st.update({
+                genResult: null, embedding: null, rawCitationEdges: null,
+                dimredResult: null, dimredResultPreFusion: null,
+                _basePos: null, _basePos2d: null, _basePosPreFusion: null,
+                clusterLevels: null, clusterResult: null,
+                bridgeAnalysis: null, crossClusterCitations: null,
+                nodeDisplacement: null, fusionActive: false,
+                dataSource: { mode: "sqlite", configs: { sqlite: { dataset: "fallworm" } } },
+            });
         }'''
     )
-    yield page
-    errs = relevant_errors(page)
-    assert not errs, f"console errors during toy_page test: {errs}"
-    ctx.close()
 
 
 @pytest.fixture
-def clean_page(playwright_browser):
-    """Page with NO data loaded. For pure-module tests (queue.js,
+def clean_page(_clean_session):
+    """Per-test page with NO data loaded. For pure-module tests (queue.js,
     workflow.js CRUD) that don't need genResult / dimredResult / etc.
-
-    Boots fresh per test (cheap — toy boot still happens by default,
-    but tests using this fixture explicitly clear state.workflow +
-    don't depend on the legacy slots).
-    """
-    ctx, page = _boot_page(playwright_browser)
-    page.evaluate(
-        '''async () => {
-            const state = await import("/app/src/ui/state.js");
-            const wf    = await import("/app/src/ui/workflow.js");
-            wf.clearWorkflow();
-            state.clearValidationRuns();
-            state.update({ jobs: { byId: {}, order: [], runningId: null } });
-        }'''
-    )
-    yield page
-    errs = relevant_errors(page)
+    Reset per test off the shared rehydrated clean session — no per-test
+    boot, no ingest."""
+    _reset_page(_clean_session)
+    _wipe_data_slots(_clean_session)
+    yield _clean_session
+    errs = relevant_errors(_clean_session)
     assert not errs, f"console errors during clean_page test: {errs}"
-    ctx.close()

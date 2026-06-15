@@ -1,181 +1,237 @@
-// Data-source modal — pick the active source + edit its params.
+// Dataset picker — the unified two-step "dataset → save | create-new" flow.
 //
-// Same pattern as algorithm-modal but keyed off the data-source
-// registry (Layer 1) rather than a per-layer descriptor. The
-// workflow-chart's "Data" node opens this; clicking Apply runs
-// engine.reingest() against the chosen source, dropping every
-// downstream artifact.
+// Replaces the old toy/real/sqlite mode switcher. The workflow chart's "Data"
+// node (and File ▸ Open dataset… / Open…) open this. Datasets come live from
+// serve.py /api/datasets (data/*/ scan); selecting one reveals its saves
+// (resume a project) plus "Create new" (fresh ingest).
 //
-// Apply runs heavy work (real source fetches over the network +
-// runs the full pipeline cascade), so the button shows "Running…"
-// and the modal stays open until the work completes.
+//   Step 1: list datasets (label + stats + saves count).
+//   Step 2: that dataset's saves → Load; "Create new" → engine.reingest.
+//
+// Heavy work (ingest fetches over the network + the pipeline cascade) runs via
+// the descriptor's applyChange / the topbar's rehydrate job, so this modal just
+// kicks the work off and closes.
 
 import { openModal } from "./modal.js";
-// enqueueBusy removed (slice 2.9.c) — descriptor.applyChange runs the
-// engine cascade directly; nesting it in a busy job double-queues.
+import { listDatasets, listSaves, loadSave, deleteSave } from "../../persistence/projects-api.js";
+import { SQLITE_OPTIONS } from "../../datasource/sqlite.js";
+import { rehydrateFromBlob } from "../topbar.js";
 
-export function openDataSourceModal(descriptor) {
-  const active = descriptor.getActive();
-  const sources = descriptor.listSources();
-
-  // Working copy — committed only on Apply.
-  let chosenId     = active.method;
-  let chosenParams = { ...active.params };
-
+// descriptor: the data layer descriptor (applyChange(sourceId, params)).
+// opts.openDatasetId: jump straight to that dataset's saves (Step 2).
+export function openDataSourceModal(descriptor, opts = {}) {
   const body = document.createElement("div");
   body.className = "datasource-modal-body";
 
-  // Source switcher.
-  const sourceRow = document.createElement("div");
-  sourceRow.className = "datasource-modal-source-row";
-
-  const sourceLabel = document.createElement("label");
-  sourceLabel.textContent = "Source";
-  sourceRow.appendChild(sourceLabel);
-
-  const sourceSelect = document.createElement("select");
-  for (const s of sources) {
-    const opt = document.createElement("option");
-    opt.value = s.id;
-    opt.textContent = s.label || s.id;
-    if (s.id === chosenId) opt.selected = true;
-    sourceSelect.appendChild(opt);
-  }
-  sourceRow.appendChild(sourceSelect);
-  body.appendChild(sourceRow);
-
-  // Description + params.
-  const desc = document.createElement("div");
-  desc.className = "datasource-modal-desc";
-  body.appendChild(desc);
-
-  const paramsHost = document.createElement("div");
-  paramsHost.className = "datasource-modal-params";
-  body.appendChild(paramsHost);
-
-  function renderForSource(sourceId) {
-    const source = sources.find(s => s.id === sourceId);
-    if (!source) return;
-
-    if (sourceId === active.method) {
-      chosenParams = { ...active.params };
-    } else {
-      chosenParams = { ...source.defaultParams() };
-    }
-    chosenId = sourceId;
-
-    desc.textContent = source.description || "";
-
-    paramsHost.innerHTML = "";
-    if (!source.modalSchema || source.modalSchema.length === 0) {
-      const none = document.createElement("div");
-      none.className = "datasource-modal-noparams";
-      none.textContent = "No tuneable parameters.";
-      paramsHost.appendChild(none);
-      return;
-    }
-    for (const field of source.modalSchema) {
-      paramsHost.appendChild(renderField(field, chosenParams));
-    }
-  }
-
-  sourceSelect.addEventListener("change", () => {
-    renderForSource(sourceSelect.value);
-  });
-  renderForSource(chosenId);
-
-  const modalHandle = openModal({
-    title: descriptor.label,
+  const handle = openModal({
+    title: descriptor.label || "Open dataset",
     body,
-    actions: [
-      { label: "Cancel" },
-      {
-        label: "Apply",
-        primary: true,
-        onClick: () => {
-          // Apply commits the source choice + closes the modal. The
-          // descriptor's applyChange clears the workflow + runs the
-          // reingest cascade; cascade phases publish via setBusyPhase
-          // (engine.js) until slice 2.11 removes the busy bar entirely.
-          descriptor.applyChange(chosenId, chosenParams)
-            .catch(e => console.error("[datasource-modal] applyChange failed:", e));
-        },
-      },
-    ],
+    actions: [{ label: "Close" }],
   });
-  return modalHandle;
+
+  if (opts.openDatasetId) {
+    renderSaves(body, descriptor, handle, { id: opts.openDatasetId, label: opts.openDatasetId });
+  } else {
+    renderDatasets(body, descriptor, handle);
+  }
+  return handle;
 }
 
-function renderField(field, params) {
-  const row = document.createElement("div");
-  row.className = "datasource-modal-row";
+/* ── Step 1: dataset list ──────────────────────────────────────────── */
 
-  const label = document.createElement("label");
-  label.textContent = field.label || field.key;
-  row.appendChild(label);
+function renderDatasets(body, descriptor, handle) {
+  body.innerHTML = "";
+  const heading = document.createElement("div");
+  heading.className = "datasource-modal-desc";
+  heading.textContent = "Pick a dataset to resume a saved project or start fresh.";
+  body.appendChild(heading);
 
-  let readout = null;
-  const input = buildInput(field, params, () => {
-    if (readout) readout.textContent = formatField(field, params[field.key]);
+  const list = document.createElement("div");
+  list.className = "datasource-modal-list";
+  body.appendChild(list);
+
+  const loading = document.createElement("div");
+  loading.className = "datasource-modal-hint";
+  loading.textContent = "Loading datasets…";
+  list.appendChild(loading);
+
+  listDatasets().then((datasets) => {
+    list.innerHTML = "";
+    if (!datasets.length) {
+      const none = document.createElement("div");
+      none.className = "datasource-modal-hint";
+      none.textContent = "No datasets found under data/. (Is serve.py running, and have you built a dataset with `biblion advanced snapshot` + `embedding`?)";
+      list.appendChild(none);
+      return;
+    }
+    for (const ds of datasets) {
+      list.appendChild(datasetRow(ds, () => renderSaves(body, descriptor, handle, ds)));
+    }
+  }).catch((e) => {
+    list.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "datasource-modal-hint";
+    err.textContent = `Could not load datasets: ${e.message || e}`;
+    list.appendChild(err);
   });
-  row.appendChild(input);
+}
 
-  if (field.kind === "range" || field.kind === "int") {
-    readout = document.createElement("span");
-    readout.className = "datasource-modal-readout";
-    readout.textContent = formatField(field, params[field.key]);
-    row.appendChild(readout);
-  }
+function datasetRow(ds, onClick) {
+  const row = document.createElement("button");
+  row.className = "datasource-modal-item";
+  row.type = "button";
 
-  if (field.hint) {
-    const h = document.createElement("div");
-    h.className = "datasource-modal-hint";
-    h.textContent = field.hint;
-    row.appendChild(h);
-  }
+  const name = document.createElement("div");
+  name.className = "datasource-modal-item-name";
+  name.textContent = ds.label || ds.id;
+  row.appendChild(name);
+
+  const stats = document.createElement("div");
+  stats.className = "datasource-modal-item-stats";
+  const bits = [];
+  if (ds.nNodes != null) bits.push(`${ds.nNodes} nodes`);
+  if (ds.embeddingDim != null) bits.push(`${ds.embeddingDim}-d`);
+  if (ds.domain) bits.push(ds.domain);
+  bits.push(`${ds.savesCount || 0} save${(ds.savesCount || 0) === 1 ? "" : "s"}`);
+  stats.textContent = bits.join(" · ");
+  row.appendChild(stats);
+
+  row.addEventListener("click", onClick);
   return row;
 }
 
-function buildInput(field, params, onChange) {
-  const cur = params[field.key];
-  if (field.kind === "select") {
-    const sel = document.createElement("select");
-    for (const opt of (field.options || [])) {
-      const o = document.createElement("option");
-      o.value = opt.value;
-      o.textContent = opt.label;
-      if (cur === opt.value) o.selected = true;
-      sel.appendChild(o);
+/* ── Step 2: saves + create-new for one dataset ────────────────────── */
+
+function renderSaves(body, descriptor, handle, ds) {
+  body.innerHTML = "";
+
+  const back = document.createElement("button");
+  back.className = "datasource-modal-back";
+  back.type = "button";
+  back.textContent = "← All datasets";
+  back.addEventListener("click", () => renderDatasets(body, descriptor, handle));
+  body.appendChild(back);
+
+  const heading = document.createElement("div");
+  heading.className = "datasource-modal-desc";
+  heading.textContent = ds.label || ds.id;
+  body.appendChild(heading);
+
+  // Create new — fresh ingest of this dataset (and any of its subsets).
+  const createWrap = document.createElement("div");
+  createWrap.className = "datasource-modal-create";
+  createWrap.appendChild(createButton(ds.id, ds.label || ds.id, descriptor, handle));
+  // Subsets are selectable children: SQLITE_OPTIONS holds "<id>::<subset>".
+  for (const opt of SQLITE_OPTIONS) {
+    if (typeof opt.value === "string" && opt.value.startsWith(`${ds.id}::`)) {
+      createWrap.appendChild(createButton(opt.value, opt.label, descriptor, handle));
     }
-    sel.addEventListener("change", () => {
-      params[field.key] = sel.value;
-      onChange();
-    });
-    return sel;
   }
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min   = String(field.min  ?? 0);
-  input.max   = String(field.max  ?? 100);
-  input.step  = String(field.step ?? 1);
-  input.value = String(cur ?? field.min ?? 0);
-  input.addEventListener("input", () => {
-    const v = field.kind === "int" ? parseInt(input.value, 10) : parseFloat(input.value);
-    params[field.key] = v;
-    onChange();
+  body.appendChild(createWrap);
+
+  const savesHead = document.createElement("div");
+  savesHead.className = "datasource-modal-hint";
+  savesHead.textContent = "Or resume a saved project:";
+  body.appendChild(savesHead);
+
+  const list = document.createElement("div");
+  list.className = "datasource-modal-list";
+  body.appendChild(list);
+
+  const loading = document.createElement("div");
+  loading.className = "datasource-modal-hint";
+  loading.textContent = "Loading saves…";
+  list.appendChild(loading);
+
+  listSaves(ds.id).then((saves) => {
+    list.innerHTML = "";
+    if (!saves.length) {
+      const none = document.createElement("div");
+      none.className = "datasource-modal-hint";
+      none.textContent = "No saved projects yet.";
+      list.appendChild(none);
+      return;
+    }
+    for (const s of saves) {
+      list.appendChild(saveRow(ds, s, handle, () => renderSaves(body, descriptor, handle, ds)));
+    }
+  }).catch((e) => {
+    list.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "datasource-modal-hint";
+    err.textContent = `Could not load saves: ${e.message || e}`;
+    list.appendChild(err);
   });
-  return input;
 }
 
-function formatField(field, value) {
-  if (field.format) {
-    try { return field.format(value); }
-    catch (_) { /* fall through */ }
-  }
-  if (field.kind === "int") return String(value);
-  const n = +value;
-  if (!Number.isFinite(n)) return "—";
-  if (Math.abs(n) >= 100) return n.toFixed(0);
-  if (Math.abs(n) >= 10)  return n.toFixed(1);
-  return n.toFixed(2);
+function createButton(datasetValue, label, descriptor, handle) {
+  const btn = document.createElement("button");
+  btn.className = "datasource-modal-action primary";
+  btn.type = "button";
+  btn.textContent = `Create new (${label})`;
+  btn.addEventListener("click", () => {
+    descriptor.applyChange("sqlite", { dataset: datasetValue })
+      .catch((e) => console.error("[datasource-modal] create-new failed:", e));
+    handle.close();
+  });
+  return btn;
+}
+
+function saveRow(ds, save, handle, refresh) {
+  const row = document.createElement("div");
+  row.className = "datasource-modal-save-row";
+
+  const open = document.createElement("button");
+  open.className = "datasource-modal-item";
+  open.type = "button";
+
+  const name = document.createElement("div");
+  name.className = "datasource-modal-item-name";
+  name.textContent = save.projectName || stripZip(save.name);
+  open.appendChild(name);
+
+  const meta = document.createElement("div");
+  meta.className = "datasource-modal-item-stats";
+  const bits = [save.name];
+  if (save.savedAt) bits.push(new Date(save.savedAt).toLocaleString());
+  if (save.sizeBytes != null) bits.push(`${(save.sizeBytes / 1024).toFixed(0)} KB`);
+  meta.textContent = bits.join(" · ");
+  open.appendChild(meta);
+
+  open.addEventListener("click", async () => {
+    let blob;
+    try {
+      blob = await loadSave(ds.id, save.name);
+    } catch (e) {
+      window.alert(`Load failed: ${e.message || e}`);
+      return;
+    }
+    rehydrateFromBlob(blob, { displayName: save.name, datasetId: ds.id });
+    handle.close();
+  });
+  row.appendChild(open);
+
+  const del = document.createElement("button");
+  del.className = "datasource-modal-delete";
+  del.type = "button";
+  del.title = "Delete save";
+  del.textContent = "✕";
+  del.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete save "${save.name}"?`)) return;
+    try {
+      await deleteSave(ds.id, save.name);
+    } catch (err) {
+      window.alert(`Delete failed: ${err.message || err}`);
+      return;
+    }
+    refresh();
+  });
+  row.appendChild(del);
+
+  return row;
+}
+
+function stripZip(name) {
+  return String(name).replace(/\.zip$/i, "");
 }

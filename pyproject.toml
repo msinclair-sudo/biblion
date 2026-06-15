@@ -36,6 +36,9 @@ dev = [
     # ("Executable doesn't exist…"). After install, run once:
     #     playwright install chromium
     "playwright==1.60.0",
+    # network-toy browser tier runs under pytest-xdist (`-n auto`, see
+    # network_toy/pytest.ini). Moved here from the retired environment.yml.
+    "pytest-xdist",
 ]
 # SPECTER2 embedding for `biblion advanced embedding` (network-toy bundle).
 # Heavy / GPU-oriented and imported lazily, so kept out of the core install.

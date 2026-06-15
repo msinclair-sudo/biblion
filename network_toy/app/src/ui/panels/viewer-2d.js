@@ -18,7 +18,7 @@
 import ForceGraph from "force-graph";
 import { getState, setTabConfig }      from "../state.js";
 import {
-  getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE,
+  getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
 } from "../viewer-shared/colour-modes.js";
 
 export const ID = "viewer-2d";
@@ -163,6 +163,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
   init();
   if (Graph) rebuildData();
   lastDataRevision = getState().engineRevision;
+  // J25: highlight-channel fingerprint — see viewer-3d. A change repaints via
+  // the cheap nodeColor accessor (no rebuildData).
+  let lastHlSig = highlightSignature(getState());
 
   return {
     update(s) {
@@ -171,15 +174,20 @@ export function mount(container, _state, config = {}, tabContext = null) {
         rebuildData();
         lastDataRevision = s.engineRevision;
         lastSelection = s.selection;
+        lastHlSig = highlightSignature(s);
         colourOverlay.refreshOptions();
         return;
       }
+      // Selection-only OR highlight-only change: re-paint colours, no rebuild.
       const selChanged =
         !lastSelection ||
         lastSelection.type !== s.selection.type ||
         lastSelection.id   !== s.selection.id;
-      if (selChanged) {
+      const hlSig = highlightSignature(s);
+      const hlChanged = hlSig !== lastHlSig;
+      if (selChanged || hlChanged) {
         lastSelection = s.selection;
+        lastHlSig     = hlSig;
         repaintSelection();
       }
     },

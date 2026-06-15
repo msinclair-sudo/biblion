@@ -21,7 +21,8 @@ import { listAlgorithms as listClusteringAlgos,
          getAlgorithm   as getClusteringAlgo }     from "../../clustering-registry.js";
 import { listAlgorithms as listLayoutAlgos,
          getAlgorithm   as getLayoutAlgo }         from "../../citation-layout/registry.js";
-import { getState, update, setDataSourceMode, setDataSourceConfig } from "../state.js";
+import { getState, update, setDataSourceMode, setDataSourceConfig,
+         addTab, setActiveTab }                     from "../state.js";
 import { createStep, listSteps, clearWorkflow, getStep,
          getStepAncestors, getSelectedStep, selectStep,
          findClusterLevels, rearmStep }           from "../workflow.js";
@@ -180,18 +181,34 @@ function findSelectedAncestorOfType(targetType) {
   return null;
 }
 
-// For analysis cards that hang off a clustering ladder (labelling, scoring,
-// export, future siblings), the auto-spawned crossClusterCitations card
-// should become their effective parent so its citation-flow data is
-// projected into state on selection (children read it via projection).
-// Returns the crossCluster's id when one exists under `clusteringId`, else
-// returns `clusteringId` itself (the legacy attach point). Pass-through when
-// clusteringId is null.
-function preferCrossClusterChild(clusteringId) {
-  if (!clusteringId) return clusteringId;
-  const xcc = listSteps({ type: "crossClusterCitations" })
-    .find(c => c.parentId === clusteringId);
-  return xcc ? xcc.id : clusteringId;
+// Cross-cluster citations (J16): no card, no tree node. After the layer
+// ladder commits we run the analysis directly off the picker's clustering
+// ancestor, stash the flow matrix on state.crossClusterCitations, and
+// auto-open the singleton cross-cluster panel (secondary slot) that reads it.
+// The runner throws when there are no citation edges; callers gate on that.
+function runCrossClusterPanel(parentStepId) {
+  buildCrossClusterJob({ parentStepId })({})
+    .then((res) => {
+      update({ crossClusterCitations: (res && res.crossClusterCitations) || null });
+      openCrossClusterPanel();
+    })
+    .catch((e) => {
+      if (e && e.name === "AbortError") return;
+      console.error("[multi-level-picker] cross-cluster analysis failed:", e);
+    });
+}
+
+// Open the cross-cluster panel once, in the secondary slot. Idempotent: if a
+// tab of that singleton type is already open there, just activate it instead
+// of stacking a duplicate (mirrors panel-system autoOpenPanelForStep).
+function openCrossClusterPanel() {
+  const slot = "secondary";
+  const slotState = getState().panels && getState().panels[slot];
+  if (slotState && Array.isArray(slotState.tabs)) {
+    const existing = slotState.tabs.find(t => t.type === "cross-cluster");
+    if (existing) { setActiveTab(slot, existing.id); return; }
+  }
+  addTab(slot, "cross-cluster", {});
 }
 
 // Create a tree step + enqueue a step-bound job that runs `engineFn`.
@@ -319,9 +336,9 @@ function dataDescriptor() {
       clearWorkflow();
 
       const cfg = (getState().dataSource.configs && getState().dataSource.configs[sourceId]) || {};
-      const label = sourceId === "real"
-        ? `Real · ${cfg.subset || "real"}`
-        : "Toy data";
+      // Card label = the chosen dataset id (data/-driven picker). Falls back to
+      // the source id for any source that doesn't carry a `dataset` param.
+      const label = cfg.dataset ? `Data · ${cfg.dataset}` : sourceId;
       const stepId = createStep({
         type:     "data",
         label,
@@ -416,46 +433,69 @@ function dimredDescriptor(editStepId = null) {
           catch (e) { console.error("[dimred-descriptor] redimred failed:", e); throw e; }
         },
       });
-      // When fusion produced a second (pre-fusion) embedding, auto-fork the
-      // workflow into a pre branch + a post branch under this dimred card and
-      // select the POST one (the fused result). Identity fusion → no fork
-      // (one embedding); the user adds clustering under the dimred directly.
+      // A non-identity fusion produces a SECOND (pre-fusion) embedding, so this
+      // dimred card forks into a pre branch + a post branch. The branch cards
+      // are pure routers (their jobs are trivial stamps — fusion-branch-runner)
+      // and the FIFO queue keeps them behind the dimred job, so we spawn them
+      // EAGERLY here — as soon as Apply is hit — rather than waiting for
+      // engine.redimred() to resolve. They sit pending under the dimred card
+      // while it computes, which lets the user queue clustering on either branch
+      // before dim-reduction finishes. The branches are keyed on the fusion
+      // param (known up front from the modal config); identity fusion → no fork.
       //
       // Once both branches exist we also auto-spawn a nodeDisplacement card
       // under the dimred (Pass 1d) — it's a property of the fork itself
       // (needs only the two branches' positions, no clustering), so it
-      // shouldn't sit behind a manual "+".
+      // shouldn't sit behind a manual "+". It needs the resolved dimred result,
+      // so it (and the POST selection) waits for the promise to land below.
       const spawnNodeDispIfMissing = (dimredCard) => {
+        // The ND card now parents on the POST fusion branch (not the dimred), so
+        // detect an existing one by whether its post-branch parent lives under
+        // this dimred fork.
+        const branchIds = new Set(
+          listSteps({ type: "fusionBranch" })
+            .filter(b => b.parentId === dimredCard.id)
+            .map(b => b.id)
+        );
         const existingND = listSteps({ type: "nodeDisplacement" })
-          .find(d => d.parentId === dimredCard.id);
+          .find(d => branchIds.has(d.parentId));
         if (existingND) return;
         nodeDisplacementDescriptor().applyChange()
           .catch(e => { if (!(e && e.name === "AbortError")) console.error("[dimred-descriptor] auto node-displacement failed:", e); });
       };
-      promise.then(() => {
-        const dimredCard = listSteps({ type: "dimred" }).slice(-1)[0];
-        if (!dimredCard || !(dimredCard.result && dimredCard.result.fusionActive)) return;
+      // The dimred card was just created (and selected) by createAndRunStep, or
+      // re-armed in place under the gear edit; resolve its id synchronously so
+      // we can hang placeholder branches off it now. (Legacy no-tree fallback:
+      // createAndRunStep ran engineFn without a step — getSelectedStep won't be
+      // a dimred — so the guard below skips the fork, matching old behaviour.)
+      const dimredCard = editStepId ? getStep(editStepId) : getSelectedStep();
+      const fusionActive = fusion && fusion.method && fusion.method !== "identity";
+      if (dimredCard && dimredCard.type === "dimred" && fusionActive) {
         const existing = listSteps({ type: "fusionBranch" })
           .filter(b => b.parentId === dimredCard.id);
-        if (existing.length) {
-          // Branches already in place (e.g. re-run of an existing dimred) —
-          // make sure nodeDisplacement is too, then select POST.
-          spawnNodeDispIfMissing(dimredCard);
-          const post = existing.find(b => b.params && b.params.endpoint === "post");
-          if (post) selectStep(post.id);
-          return;
+        // Re-run path: branches already in place — don't double-spawn. The
+        // placeholder/refresh happens via the existing cards (and the dimred
+        // job re-running refreshes the result they project on selection).
+        if (!existing.length) {
+          fusionBranchDescriptor().applyChange({ endpoint: "pre",  parentId: dimredCard.id })
+            .catch(() => {});
+          fusionBranchDescriptor().applyChange({ endpoint: "post", parentId: dimredCard.id })
+            .catch(() => {});
         }
-        fusionBranchDescriptor().applyChange({ endpoint: "pre",  parentId: dimredCard.id })
-          .catch(() => {});
-        fusionBranchDescriptor().applyChange({ endpoint: "post", parentId: dimredCard.id })
-          .then(() => {
-            const post = listSteps({ type: "fusionBranch" })
-              .find(b => b.parentId === dimredCard.id && b.params.endpoint === "post");
-            if (post) selectStep(post.id);
-            // Both branches now exist — spawn the cross-branch analysis.
-            spawnNodeDispIfMissing(dimredCard);
-          })
-          .catch(() => {});
+      }
+      // When the dimred job lands and fusion really did yield a second
+      // embedding, finish the fork: select the POST branch (the fused result)
+      // and ensure the cross-branch nodeDisplacement card exists. The branch
+      // cards themselves were already spawned eagerly above.
+      promise.then(() => {
+        const card = listSteps({ type: "dimred" })
+          .find(d => dimredCard && d.id === dimredCard.id)
+          || listSteps({ type: "dimred" }).slice(-1)[0];
+        if (!card || !(card.result && card.result.fusionActive)) return;
+        const post = listSteps({ type: "fusionBranch" })
+          .find(b => b.parentId === card.id && b.params && b.params.endpoint === "post");
+        if (post) selectStep(post.id);
+        spawnNodeDispIfMissing(card);
       }).catch(() => { /* dimred failure already logged */ });
       return promise;
     },
@@ -536,26 +576,33 @@ function resolveBranchPair(fromStepId) {
   return { dimredId, preId: pre.id, postId: post.id };
 }
 
-// Node-displacement card — a cross-branch comparison. Wires the two fusion
-// branches (refIds: [pre, post]) and measures how far each node moved between
-// the pre- and post-fusion layouts (align + per-node distance). Attaches under
-// the dimred card (the fork owner) so it sees both branches.
+// Node-displacement card — a cross-branch comparison. Branches off BOTH fusion
+// branches: it measures how far each node moved between the pre- and post-fusion
+// layouts (align + per-node distance), so it has two incoming lineage edges.
+// The single-parentId tree model carries only one solid edge, so we parent the
+// card on the POST branch (the fused result, also the selected lineage) and
+// carry the PRE branch as a ref-edge — workflow-chart promotes both to primary
+// (solid) edges for nodeDisplacement (no dimred spine edge). The job reads its
+// endpoints from the explicit pre/post branch ids below, not from parentId, so
+// re-parenting onto a branch leaves the displacement computation unchanged.
 function nodeDisplacementDescriptor(editStepId = null) {
   const editStep = () => (editStepId ? getStep(editStepId) : null);
+  // Reconstruct the branch pair from an existing ND step (gear edit): parentId
+  // is the post branch, refIds[0] is the pre branch.
+  const pairFromStep = (es) =>
+    (es && es.parentId && es.refIds && es.refIds.length === 1)
+      ? { dimredId: null, preId: es.refIds[0], postId: es.parentId }
+      : null;
   const desc = {
     label: "Run: Node displacement (pre → post)",
     getActive: () => {
       const es = editStep();
-      const pair = es && es.refIds && es.refIds.length === 2
-        ? { dimredId: es.parentId, preId: es.refIds[0], postId: es.refIds[1] }
-        : resolveBranchPair();
+      const pair = pairFromStep(es) || resolveBranchPair();
       return { hasPair: !!pair, pair };
     },
     applyChange: async () => {
       const es = editStep();
-      const pair = (es && es.refIds && es.refIds.length === 2)
-        ? { dimredId: es.parentId, preId: es.refIds[0], postId: es.refIds[1] }
-        : resolveBranchPair();
+      const pair = pairFromStep(es) || resolveBranchPair();
       if (!pair) {
         throw new Error("[node-displacement] needs both pre + post fusion branches (run a graph-diffusion dim-reduction first)");
       }
@@ -564,9 +611,10 @@ function nodeDisplacementDescriptor(editStepId = null) {
         editStepId,
         type:   "nodeDisplacement",
         label,
-        params: {},
-        parentId: pair.dimredId,
-        refIds: [pair.preId, pair.postId],
+        // Parent on the post branch; the pre branch rides as a ref-edge that the
+        // chart promotes to a second solid incoming edge.
+        parentId: pair.postId,
+        refIds: [pair.preId],
       });
       selectStep(stepId);
       const { promise } = enqueueJob({
@@ -722,9 +770,6 @@ export function rerunStep(stepId) {
   }
   if (step.type === "export") {
     return exportDescriptor().applyChange();
-  }
-  if (step.type === "crossClusterCitations") {
-    return crossClusterDescriptor().applyChange();
   }
   if (step.type === "nodeDisplacement") {
     return nodeDisplacementDescriptor(step.id).applyChange();
@@ -1078,31 +1123,21 @@ function multiLevelPickerDescriptor(editStepId = null) {
         stepId,
         fn:    buildMultiLevelPickerJob({ pickedCounts: counts, uidPrefix }),
       });
-      // Once the ladder is committed, auto-spawn the cross-cluster citations
-      // card. Mirrors how the sweep auto-spawns this picker; re-pick reuses
-      // the existing card. Bridge analysis is no longer a card type
-      // (cards.md Pass 2a) — bridges are computed inside the picker's
-      // commit job and surfaced on state.bridgeAnalysis for the panel.
+      // Once the ladder is committed, compute the cross-cluster citation flow
+      // and surface it via an auto-opened panel (J16). It used to be a card,
+      // but the run takes no config and always covered every layer, so a tree
+      // node for it was wasted — like bridge analysis (cards.md Pass 2a), the
+      // result now lives on state and a singleton panel reads it. Re-pick
+      // re-computes and refreshes the same panel.
       promise.then(() => {
         const picker = step();
         if (!picker) return;
-
-        // Cross-cluster citations — no params; needs the committed ladder.
         // Gated on citation edges existing in live state: toy data without
-        // synthetic citations has none, and the runner would fail. Real-data
-        // sources (biblion) ship edges at ingest, so the auto-spawn fires
-        // there. Users can still manually add the card on toy data once
-        // they've generated citations.
+        // synthetic citations has none, and the runner would throw. Real-data
+        // sources (biblion) ship edges at ingest, so this fires there.
         const edges = getState().rawCitationEdges;
         const hasEdges = Array.isArray(edges) && edges.length > 0;
-        if (hasEdges) {
-          const existingXcc = listSteps({ type: "crossClusterCitations" })
-            .find(b => b.parentId === picker.id);
-          if (!existingXcc) {
-            crossClusterDescriptor().applyChange()
-              .catch(e => { if (!(e && e.name === "AbortError")) console.error("[multi-level-picker] auto cross-cluster failed:", e); });
-          }
-        }
+        if (hasEdges) runCrossClusterPanel(picker.id);
       }).catch((e) => {
         if (e && e.name === "AbortError") return;
         console.error("[multi-level-picker] commit failed:", e);
@@ -1148,18 +1183,18 @@ function multiLevelPickerDescriptor(editStepId = null) {
 function labellingDescriptor(editStepId = null) {
   const editStep = () => (editStepId ? getStep(editStepId) : null);
   // Attach under the SELECTED card when it has a clustering ladder reachable;
-  // otherwise fall back to the nearest clustering-like ancestor. preferCross-
-  // ClusterChild bumps the attach point down to the auto-spawned crossCluster
-  // card when one exists, so labelling becomes a child of crossCluster and
-  // can read its citation-flow data via projection.
+  // otherwise fall back to the nearest clustering-like ancestor. Labelling
+  // anchors directly on the clustering card now — the cross-cluster citations
+  // card it used to hang off was dropped (J16); its flow data lives on
+  // state.crossClusterCitations, so no tree node mediates the read anymore.
   const resolveParent = () => {
     const es = editStep();
     if (es) return es.parentId;
     const sel = getSelectedStep();
     if (sel && findClusterLevels(sel.id).levels.length) {
-      return preferCrossClusterChild(sel.id);
+      return sel.id;
     }
-    return preferCrossClusterChild(findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES));
+    return findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES);
   };
   const desc = {
     label: "Run: Cluster labelling",
@@ -1280,16 +1315,16 @@ function exportDescriptor(editStepId = null) {
     const es = editStep();
     if (es) return es.parentId;
     // Prefer a scoring card (export by score); fall back to any clustering-
-    // like card (export a single cluster without scores). The clustering-
-    // fallback path bumps through any auto-spawned crossCluster card so the
-    // export sees its citation-flow data via projection.
+    // like card (export a single cluster without scores). Anchors directly on
+    // the clustering card now — the cross-cluster citations card it used to
+    // bump through was dropped (J16); its flow data lives on state.
     const sel = getSelectedStep();
     if (sel) {
       if (sel.type === "scoring")                     return sel.id;
-      if (findClusterLevels(sel.id).levels.length)    return preferCrossClusterChild(sel.id);
+      if (findClusterLevels(sel.id).levels.length)    return sel.id;
     }
     return findSelectedAncestorOfType("scoring")
-        || preferCrossClusterChild(findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES));
+        || findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES);
   };
   const desc = {
     label: "Prepare: Export (RIS)",
@@ -1329,18 +1364,20 @@ function exportDescriptor(editStepId = null) {
   return desc;
 }
 
-// Cross-cluster citation degree card — an "analysis layer" attaching under a
-// clustering-like card (the picker). Computes, for every layer, how much each
-// cluster cites every other (directed flow matrix + in/out degree + top
-// links). No config modal — it always runs all layers; picking it preps +
-// selects the card, and the cross-cluster panel renders the result.
+// Cross-cluster citation degree — no longer a card (J16). It took no config
+// and always ran every layer, so a tree node was wasted; the result now lives
+// on state.crossClusterCitations and a singleton panel renders it (like bridge
+// analysis). It auto-computes after the layer ladder commits; this descriptor
+// only backs the manual "Cross-cluster citations" next-step action, recomputing
+// off the nearest clustering ancestor and opening the panel. No applyChange /
+// card spawn — there is nothing to put in the tree.
 function crossClusterDescriptor(editStepId = null) {
   const editStep = () => (editStepId ? getStep(editStepId) : null);
   const resolveParent = () => {
     const es = editStep();
     return es ? es.parentId : findSelectedAncestorOfType(CLUSTERING_LIKE_TYPES);
   };
-  const desc = {
+  return {
     label: "Run: Cross-cluster citations",
     getActive: () => {
       const parentId = resolveParent();
@@ -1349,34 +1386,13 @@ function crossClusterDescriptor(editStepId = null) {
       const hasEdges = Array.isArray(getState().rawCitationEdges) && getState().rawCitationEdges.length > 0;
       return { hasClustering: true, nLevels: levels.length, hasEdges, parentId };
     },
-    applyChange: async () => {
+    openModal: () => {
       const parentId = resolveParent();
       if (!parentId) {
-        throw new Error("[cross-cluster-descriptor] no clustering ancestor to analyse");
+        console.warn("[cross-cluster-descriptor] no clustering ancestor to analyse");
+        return;
       }
-      const label = "Cross-cluster citations";
-      const stepId = beginStep({
-        editStepId,
-        type:   "crossClusterCitations",
-        label,
-        params: {},
-        parentId,
-      });
-      selectStep(stepId);
-      const { promise } = enqueueJob({
-        type:  "crossClusterCitations",
-        label,
-        stepId,
-        fn:    buildCrossClusterJob({ parentStepId: parentId }),
-      });
-      promise.catch((e) => {
-        if (e && e.name === "AbortError") return;
-        console.error("[cross-cluster-descriptor] job failed:", e);
-      });
-      return promise;
+      runCrossClusterPanel(parentId);
     },
-    openModal: () => desc.applyChange()
-      .catch(e => console.error("[cross-cluster-descriptor] applyChange failed:", e)),
   };
-  return desc;
 }
