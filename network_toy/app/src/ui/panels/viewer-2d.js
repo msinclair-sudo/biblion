@@ -19,7 +19,7 @@ import ForceGraph from "force-graph";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive,
+  anyHighlightActive, pinnedSignature,
 } from "../viewer-shared/colour-modes.js";
 
 export const ID = "viewer-2d";
@@ -187,6 +187,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // J25: highlight-channel fingerprint — see viewer-3d. A change repaints via
   // the cheap nodeColor accessor (no rebuildData).
   let lastHlSig = highlightSignature(getState());
+  let lastPinSig = pinnedSignature(getState());
 
   return {
     update(s) {
@@ -197,19 +198,23 @@ export function mount(container, _state, config = {}, tabContext = null) {
         lastDataRevision = s.engineRevision;
         lastSelection = s.selection;
         lastHlSig = highlightSignature(s);
+        lastPinSig = pinnedSignature(s);
         colourOverlay.refreshOptions();
         return;
       }
-      // Selection-only OR highlight-only change: re-paint colours, no rebuild.
+      // Selection-only OR highlight-only OR pin-only change: re-paint colours.
       const selChanged =
         !lastSelection ||
         lastSelection.type !== s.selection.type ||
         lastSelection.id   !== s.selection.id;
       const hlSig = highlightSignature(s);
       const hlChanged = hlSig !== lastHlSig;
-      if (selChanged || hlChanged) {
+      const pinSig = pinnedSignature(s);
+      const pinChanged = pinSig !== lastPinSig;
+      if (selChanged || hlChanged || pinChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
+        lastPinSig    = pinSig;
         repaintSelection();
       }
     },

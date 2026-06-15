@@ -370,8 +370,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
     if (!nc) return items;
     for (let nodeId = 0; nodeId < nc.length; nodeId++) {
       if (nc[nodeId] !== clusterId) continue;
-      if (nodes[nodeId] && nodes[nodeId].isGhost) continue;
-      const paperId = getIdByRow(nodeId);
+      const node = nodes[nodeId];
+      if (node && node.isGhost) continue;
+      // Prefer the node's own paperId — it survives a project save/load, whereas
+      // getIdByRow needs the live sqlite handle, which a reload doesn't restore
+      // (the cascade is skipped). Without this the cart button greys out after a
+      // reload even though every node still carries its paperId.
+      const paperId = (node && node.paperId != null) ? node.paperId : getIdByRow(nodeId);
       if (paperId != null) items.push({ paperId, nodeId, source });
     }
     return items;

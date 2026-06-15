@@ -17,6 +17,7 @@
 // pipeline; cart needs only paperId (nodeId is filled when the hit is a node).
 
 import { getState, addToCart, setSearchMatches, clearSearchMatches } from "../state.js";
+import { selectedNodeIds, highlightSignature } from "../viewer-shared/colour-modes.js";
 import {
   loadDatasets, getActiveDatasetId, getNodeByPaperId,
 } from "../../datasource/sqlite.js";
@@ -138,8 +139,8 @@ export function mount(container, _state, config = {}, _tabContext = null) {
   const actionBar = document.createElement("div");
   actionBar.className = "search-actions";
   root.appendChild(actionBar);
-  const highlightBtn = mkBtn(actionBar, "search-btn", "Highlight in graph", () => doHighlight());
-  const clearHlBtn   = mkBtn(actionBar, "search-btn", "Clear highlight", () => clearSearchMatches());
+  const highlightBtn = mkBtn(actionBar, "search-btn", "Select all", () => doSelectAll());
+  const clearHlBtn   = mkBtn(actionBar, "search-btn", "Deselect all", () => doDeselectAll());
   const addSelBtn    = mkBtn(actionBar, "search-btn", "Add selected to cart", () => doAddToCart(true));
   const addAllBtn    = mkBtn(actionBar, "search-btn", "Add all to cart", () => doAddToCart(false));
 
@@ -199,6 +200,7 @@ export function mount(container, _state, config = {}, _tabContext = null) {
       const res = await runSearch(editor.value, { cap: DEFAULT_ROW_CAP });
       lastResult = res;
       rowChecked.clear();
+      syncGraphSelection();          // a new query drops the old graph selection
       sortKey = null;
       renderResults();
       if (res.error) {
@@ -242,6 +244,9 @@ export function mount(container, _state, config = {}, _tabContext = null) {
       return;
     }
 
+    // Graph selection (any source) — used to mark rows already selected.
+    const sel = selectedNodeIds(getState());
+
     // Columns = a leading "dataset" tag + a checkbox + every result column.
     const cols = res.columns;
     const headTr = document.createElement("tr");
@@ -255,6 +260,7 @@ export function mount(container, _state, config = {}, _tabContext = null) {
         if (pid == null) continue;
         if (master.checked) rowChecked.add(pid); else rowChecked.delete(pid);
       }
+      syncGraphSelection();
       renderResults();
     });
     thCheck.appendChild(master);
@@ -268,6 +274,11 @@ export function mount(container, _state, config = {}, _tabContext = null) {
       const tr = document.createElement("tr");
       tr.className = "search-row";
       const pid = paperIdOf(r);
+      const nid = pid == null ? null : getNodeByPaperId(pid);
+      // Reflect-back: a row whose node is in the graph selection (any source —
+      // search, node-table, scoring, …) reads as selected, even if it wasn't
+      // ticked here.
+      if (nid != null && sel.has(nid)) tr.classList.add("selected");
 
       const tdCheck = document.createElement("td");
       tdCheck.className = "search-cell search-cell-check";
@@ -278,6 +289,7 @@ export function mount(container, _state, config = {}, _tabContext = null) {
       cb.addEventListener("change", () => {
         if (pid == null) return;
         if (cb.checked) rowChecked.add(pid); else rowChecked.delete(pid);
+        syncGraphSelection();    // node rows → live graph selection
         updateActionState();
       });
       tdCheck.appendChild(cb);
@@ -298,12 +310,14 @@ export function mount(container, _state, config = {}, _tabContext = null) {
         tr.appendChild(td);
       }
 
-      // Per-row click selects/focuses the node when the hit is in the active
-      // dataset (has a graph node). Non-active hits are list-only.
+      // Per-row click toggles the row's selection (same as ticking its
+      // checkbox), so clicking anywhere on a hit selects it in the graph.
       tr.addEventListener("click", (e) => {
         if (e.target instanceof HTMLInputElement) return;   // checkbox handled
-        const nodeId = pid == null ? null : getNodeByPaperId(pid);
-        if (nodeId != null) setSearchMatches([nodeId]);
+        if (pid == null) return;
+        if (rowChecked.has(pid)) rowChecked.delete(pid); else rowChecked.add(pid);
+        syncGraphSelection();
+        renderResults();
       });
 
       tbody.appendChild(tr);
@@ -344,18 +358,38 @@ export function mount(container, _state, config = {}, _tabContext = null) {
   }
 
   // ── row actions ─────────────────────────────────────────────────
-  // Highlight every active-dataset hit (those mapping to a graph node). Non-
-  // active hits have no node and are silently skipped (list-only).
-  function doHighlight() {
+  // The checked rows ARE the selection: mirror their active-dataset node subset
+  // into the shared "search" highlight source (which feeds the viewer grey-out,
+  // the Selected-papers panel, and white-pinning). Non-active hits have no node
+  // and contribute nothing to the graph selection — they stay checked for the
+  // cart only. Called after every change to rowChecked.
+  function syncGraphSelection() {
     const rows = (lastResult && lastResult.rows) || [];
     const nodeIds = [];
     for (const r of rows) {
       const pid = paperIdOf(r);
-      if (pid == null) continue;
+      if (pid == null || !rowChecked.has(pid)) continue;
       const nid = getNodeByPaperId(pid);
       if (nid != null) nodeIds.push(nid);
     }
-    setSearchMatches(nodeIds);
+    if (nodeIds.length) setSearchMatches(nodeIds);   // replaces the "search" source
+    else clearSearchMatches();
+  }
+
+  // Bulk: select / deselect every result row (the checked set drives both the
+  // graph selection and the cart-add).
+  function doSelectAll() {
+    for (const r of (lastResult && lastResult.rows) || []) {
+      const pid = paperIdOf(r);
+      if (pid != null) rowChecked.add(pid);
+    }
+    syncGraphSelection();
+    renderResults();
+  }
+  function doDeselectAll() {
+    rowChecked.clear();
+    syncGraphSelection();
+    renderResults();
   }
 
   // Add results to the cart. nodeId is filled only for active-dataset hits;
@@ -394,11 +428,19 @@ export function mount(container, _state, config = {}, _tabContext = null) {
     renderScope();
   }).catch(() => { /* no API → empty scope list */ });
 
+  // Fingerprint of the graph selection (highlight channel + single selection),
+  // so we can re-mark the result rows when it changes from anywhere.
+  const selSig = (s) => `${highlightSignature(s)}|${(s.selection && s.selection.type) || ""}:${(s.selection && s.selection.id) ?? ""}:${(s.selection && s.selection.level) ?? ""}`;
+  let lastSelSig = selSig(getState());
+
   return {
-    update(_s) {
+    update(s) {
       // Active dataset may change after a re-ingest; refresh the (active) tag.
       const a = getActiveDatasetId();
       if (a !== activeId) { activeId = a; renderScope(); }
+      // Re-render so the reflect-back row marks track the live selection.
+      const sig = selSig(s);
+      if (sig !== lastSelSig) { lastSelSig = sig; renderResults(); }
     },
     destroy() { container.innerHTML = ""; },
   };

@@ -1,62 +1,60 @@
-// Cart — the data-wrangle table for papers collected from clusters / selections,
-// staged for export to a biblion subset (cluster→cart→subset round-trip).
+// Selected papers — a live table of every paper currently SELECTED in the viewer
+// (node-table cluster/node picks + scoring/search highlights, via selectedNodeIds).
+// Ticking a row PINS that paper white in both viewers (state.pinnedNodes), an
+// emphasis layer on top of the normal selection colouring. Multiple pins at once;
+// pins persist until cleared, independent of the selection.
 //
-// A standalone table (deliberately NOT node-table's renderer): rows are cart
-// papers, columns are EVERY per-node datum we can join — biblion metadata,
-// citation in-degree, cluster id per level, layout position, ghost flag — with
-// show/hide columns, text filter, sort, per-row remove, and per-row checkboxes
-// for partial commit. Export emits {"papers":[{"id","source"}]} for
-// `biblion advanced subset make <name> --ids-file <file>`.
-//
-// Per-node data sources (joined by nodeId):
-//   s.genResult.nodes[i]                       → paperId, isGhost, year (toy)
-//   getNodeRecord(i)                           → title, venue, authors, doi, pubType, year
-//   s.citationResult.inDeg[i]                  → citation in-degree
-//   s.clusterLevels[L].clusterResult.nodeCluster[i] → cluster id at level L
-//   s._basePos[3i..3i+2]                       → x / y / z
+// Sibling of the Cart panel: same wide joinable table (reuses paper-table.js for
+// columns + join + format/sort + the cart-* CSS), but its rows come from the
+// current selection rather than state.cart, and its checkbox toggles a white pin
+// rather than a partial-commit selection.
 
-import { getState, removeFromCart, clearCart, setTabConfig } from "../state.js";
-import { downloadText } from "../../export/cluster-export.js";
-import { paperColumns, joinPaperRow, formatCell, compareBy } from "./paper-table.js";
+import {
+  getState, togglePinnedNode, clearPinnedNodes, setTabConfig,
+} from "../state.js";
+import {
+  selectedNodeIds, highlightSignature, pinnedSignature,
+} from "../viewer-shared/colour-modes.js";
+import {
+  paperColumns, joinPaperRow, formatCell, compareBy,
+} from "./paper-table.js";
 import { makeColumnsResizable } from "./column-resize.js";
 
-export const ID = "cart";
-export const LABEL = "Cart";
-export const DESCRIPTION = "Papers collected from clusters/selections, staged for export to a biblion subset. Show/hide columns, filter, sort, then export ids as JSON for `subset make --ids-file`.";
-export const SINGLETON = true;   // one cart per project
-
-// Column catalogue + per-node join + cell format/sort live in paper-table.js,
-// shared with the Selected-papers panel.
+export const ID = "selected-papers";
+export const LABEL = "Selected papers";
+export const DESCRIPTION = "Papers currently selected in the viewer. Tick a paper to pin it white (emphasis) in both viewers; multiple pins persist until cleared.";
+export const SINGLETON = true;
 
 // Shown on first mount; everything else is opt-in via the column picker.
 const DEFAULT_VISIBLE = new Set([
-  "source", "title", "year", "venue", "authors", "inDeg", "isGhost",
+  "title", "year", "venue", "authors", "inDeg",
 ]);
 
 export function mount(container, _state, config = {}, tabContext = null) {
   container.innerHTML = "";
 
-  // Panel-local UI state (not persisted — only the cart contents are).
+  // Panel-local UI state.
   const visible = new Set(DEFAULT_VISIBLE);
-  // Per-column widths (px), keyed by column key. Restored from the tab config
-  // and persisted back on resize so they survive a remount / project reload.
+  // Per-column widths (px), restored from + persisted to the tab config.
   const colWidths = { ...(config && config.colWidths) };
   const persistWidths = (w) => {
     if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { colWidths: w });
   };
-  const checked = new Set();          // paperIds selected for partial commit
   let filterText = "";
   let sortKey = null;
   let sortDir = "asc";
 
-  let joinedRows = [];                // cache: joined once per cart/engine change
-  let lastCartRef = null;
+  let joinedRows = [];
+  let columns = [];
+  let clusterDefaulted = false;
+
+  // Change-detection fingerprints.
+  let lastSelSig = null;
   let lastEngineRev = -1;
-  let columns = [];                   // resolved (base + dynamic cluster cols)
-  let clusterDefaulted = false;       // finest-cluster column auto-shown once
+  let lastPinSig = null;
 
   const root = document.createElement("div");
-  root.className = "cart-root";
+  root.className = "cart-root";          // reuse the cart panel's layout/styling
   container.appendChild(root);
 
   // ── toolbar ─────────────────────────────────────────────────────
@@ -79,15 +77,12 @@ export function mount(container, _state, config = {}, tabContext = null) {
   colsBtn.textContent = "Columns ▾";
   bar.appendChild(colsBtn);
 
-  const exportSelBtn = mkBtn(bar, "Export selected", () => doExport(true));
-  const exportAllBtn = mkBtn(bar, "Export all",      () => doExport(false));
-  const clearBtn     = mkBtn(bar, "Clear cart",      () => clearCart());
+  const clearPinsBtn = mkBtn(bar, "Clear pins", () => clearPinnedNodes());
 
   const countEl = document.createElement("span");
   countEl.className = "cart-count";
   bar.appendChild(countEl);
 
-  // Columns dropdown (toggled by colsBtn).
   const colsMenu = document.createElement("div");
   colsMenu.className = "cart-cols-menu";
   colsMenu.style.display = "none";
@@ -114,16 +109,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
   const hint = document.createElement("div");
   hint.className = "cart-hint";
-  hint.textContent =
-    "Export → biblion advanced subset make <name> --ids-file <downloaded.json>";
+  hint.textContent = "Tick a paper to pin it white in the viewer. Select clusters in the Node table or highlight from a Scoring card to populate this list.";
   root.appendChild(hint);
 
   // ── data join ───────────────────────────────────────────────────
   function resolveColumns(s) {
     const { columns: cols, clusterKeys } = paperColumns(s);
     columns = cols;
-    // Show the finest cluster column the first time clusters exist; after that
-    // the user's show/hide choices stand (don't re-add on every rejoin).
     if (clusterKeys.length && !clusterDefaulted) {
       visible.add(clusterKeys[clusterKeys.length - 1]);
       clusterDefaulted = true;
@@ -133,12 +125,16 @@ export function mount(container, _state, config = {}, tabContext = null) {
   function rejoin(s) {
     resolveColumns(s);
     const levels = s.clusterLevels || [];
-    const cart = s.cart || [];
-    joinedRows = cart.map(it =>
-      joinPaperRow(it.nodeId, s, levels, { paperId: it.paperId, source: it.source }));
-    // Drop checks for papers no longer in the cart.
-    const present = new Set(cart.map(it => it.paperId));
-    for (const pid of [...checked]) if (!present.has(pid)) checked.delete(pid);
+    const ids = [...selectedNodeIds(s)].sort((a, b) => a - b);
+    joinedRows = [];
+    for (const nodeId of ids) {
+      // Unlike the cart (which excludes ghosts from a subset EXPORT), this is a
+      // view of what's selected — include ghost papers too (they're real cited
+      // works with metadata, just not embedded). The "ghost" column marks them.
+      const row = joinPaperRow(nodeId, s, levels);
+      if (row.paperId == null) continue;        // need a paper to show
+      joinedRows.push(row);
+    }
   }
 
   // ── rendering ───────────────────────────────────────────────────
@@ -183,18 +179,23 @@ export function mount(container, _state, config = {}, tabContext = null) {
     thead.innerHTML = "";
     const tr = document.createElement("tr");
 
-    // Master checkbox (toggle all filtered rows).
+    // Master checkbox pins / unpins all currently-visible rows.
     const thCheck = document.createElement("th");
     thCheck.className = "cart-th cart-th-check";
     const master = document.createElement("input");
     master.type = "checkbox";
+    master.title = "Pin / unpin all shown";
+    const pinned = getState().pinnedNodes;
     const visRows = filteredSorted();
-    master.checked = visRows.length > 0 && visRows.every(r => checked.has(r.paperId));
+    master.checked = visRows.length > 0 && visRows.every(r => pinned.has(r.nodeId));
     master.addEventListener("change", () => {
+      // Toggle each shown row toward the master state (togglePinnedNode flips,
+      // so only flip rows that need flipping).
       for (const r of visRows) {
-        if (master.checked) checked.add(r.paperId); else checked.delete(r.paperId);
+        const isPinned = getState().pinnedNodes.has(r.nodeId);
+        if (master.checked && !isPinned) togglePinnedNode(r.nodeId);
+        else if (!master.checked && isPinned) togglePinnedNode(r.nodeId);
       }
-      renderBody();
     });
     thCheck.appendChild(master);
     tr.appendChild(thCheck);
@@ -223,13 +224,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
       });
       tr.appendChild(th);
     }
-
-    const thRm = document.createElement("th");
-    thRm.className = "cart-th cart-th-rm";
-    tr.appendChild(thRm);
     thead.appendChild(tr);
 
-    // Drag-to-resize the (keyed) data columns; widths persist on the tab.
+    // Drag-to-resize the data columns; widths persist on the tab.
     makeColumnsResizable(table, thead, {
       keyOf:    (th) => th.dataset.colKey || null,
       widths:   colWidths,
@@ -241,20 +238,19 @@ export function mount(container, _state, config = {}, tabContext = null) {
     tbody.innerHTML = "";
     const cols = visibleColumns();
     const rows = filteredSorted();
+    const pinned = getState().pinnedNodes;
 
     for (const r of rows) {
       const tr = document.createElement("tr");
-      tr.className = "cart-row";
+      tr.className = "cart-row" + (pinned.has(r.nodeId) ? " pinned" : "");
 
       const tdCheck = document.createElement("td");
       tdCheck.className = "cart-cell cart-cell-check";
       const cb = document.createElement("input");
       cb.type = "checkbox";
-      cb.checked = checked.has(r.paperId);
-      cb.addEventListener("change", () => {
-        if (cb.checked) checked.add(r.paperId); else checked.delete(r.paperId);
-        updateCount();
-      });
+      cb.title = "Pin this paper white in the viewer";
+      cb.checked = pinned.has(r.nodeId);
+      cb.addEventListener("change", () => togglePinnedNode(r.nodeId));
       tdCheck.appendChild(cb);
       tr.appendChild(tdCheck);
 
@@ -266,36 +262,23 @@ export function mount(container, _state, config = {}, tabContext = null) {
         if (col.kind === "text" && val !== "—") td.title = val;
         tr.appendChild(td);
       }
-
-      const tdRm = document.createElement("td");
-      tdRm.className = "cart-cell cart-cell-rm";
-      const rm = document.createElement("button");
-      rm.className = "cart-rm-btn";
-      rm.textContent = "×";
-      rm.title = "remove from cart";
-      rm.addEventListener("click", () => removeFromCart(r.paperId));
-      tdRm.appendChild(rm);
-      tr.appendChild(tdRm);
-
       tbody.appendChild(tr);
     }
 
-    const isEmpty = (getState().cart || []).length === 0;
+    const isEmpty = joinedRows.length === 0;
     empty.style.display = isEmpty ? "block" : "none";
-    empty.textContent = "Cart is empty — add a cluster from the Node table.";
+    empty.textContent = "No papers selected — pick a cluster in the Node table or highlight from a Scoring card.";
     scroll.style.display = isEmpty ? "none" : "block";
     updateCount();
   }
 
   function updateCount() {
-    const n = (getState().cart || []).length;
+    const n = joinedRows.length;
     const shown = filteredSorted().length;
-    const sel = checked.size;
+    const pins = getState().pinnedNodes.size;
     const filt = filterText && shown !== n ? `, ${shown} shown` : "";
-    countEl.textContent = `${n} paper${n === 1 ? "" : "s"}${filt}${sel ? `, ${sel} selected` : ""}`;
-    exportSelBtn.disabled = sel === 0;
-    exportAllBtn.disabled = n === 0;
-    clearBtn.disabled = n === 0;
+    countEl.textContent = `${n} selected${filt}${pins ? `, ${pins} pinned white` : ""}`;
+    clearPinsBtn.disabled = pins === 0;
   }
 
   function renderTable() {
@@ -309,35 +292,40 @@ export function mount(container, _state, config = {}, tabContext = null) {
     renderTable();
   }
 
-  function doExport(selectedOnly) {
-    const rows = filteredSorted().filter(r => !selectedOnly || checked.has(r.paperId));
-    if (rows.length === 0) return;
-    const payload = { papers: rows.map(r => ({ id: r.paperId, source: r.source })) };
-    const name = selectedOnly ? "cart-selected.json" : "cart-ids.json";
-    downloadText(JSON.stringify(payload, null, 2), name, "application/json");
+  // Fingerprint of the current selection: highlight channel + the single
+  // selection. A change means the row set must be re-joined.
+  function selSig(s) {
+    const sel = s.selection || {};
+    return `${highlightSignature(s)}|${sel.type || ""}:${sel.id ?? ""}:${sel.level ?? ""}`;
   }
 
   // Initial paint.
   const s0 = getState();
-  lastCartRef = s0.cart;
+  lastSelSig = selSig(s0);
   lastEngineRev = s0.engineRevision;
+  lastPinSig = pinnedSignature(s0);
   fullRender(s0);
 
   return {
     update(s) {
-      // Re-join only when the cart contents or the engine output changed;
-      // filter/sort/column toggles repaint without re-querying sqlite.
-      if (s.cart !== lastCartRef || s.engineRevision !== lastEngineRev) {
-        lastCartRef = s.cart;
+      const selSigNow = selSig(s);
+      if (selSigNow !== lastSelSig || s.engineRevision !== lastEngineRev) {
+        lastSelSig = selSigNow;
         lastEngineRev = s.engineRevision;
+        lastPinSig = pinnedSignature(s);
         fullRender(s);
+        return;
+      }
+      // Pins-only change → refresh checkboxes + count, no re-join.
+      const pinSig = pinnedSignature(s);
+      if (pinSig !== lastPinSig) {
+        lastPinSig = pinSig;
+        renderBody();
       }
     },
     destroy() { container.innerHTML = ""; },
   };
 }
-
-/* ── helpers ──────────────────────────────────────────────────────── */
 
 function mkBtn(parent, text, onClick) {
   const b = document.createElement("button");

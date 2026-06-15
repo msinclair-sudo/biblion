@@ -23,6 +23,7 @@ import * as CrossCluster           from "./cross-cluster.js";
 import * as NodeDisplacement       from "./node-displacement.js";
 import * as NextSteps              from "./next-steps.js";
 import * as Cart                   from "./cart.js";
+import * as SelectedPapers         from "./selected-papers.js";
 import * as SearchResults          from "./search-results.js";
 
 const entries = new Map();
@@ -64,6 +65,7 @@ register(CrossCluster);
 register(NodeDisplacement);
 register(NextSteps);
 register(Cart);
+register(SelectedPapers);
 register(SearchResults);
 
 // Future entries (mounted as their modules come online):

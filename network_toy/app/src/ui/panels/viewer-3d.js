@@ -25,7 +25,7 @@ import { buildBaseEdges }                   from "../../base-edges.js";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive,
+  anyHighlightActive, pinnedSignature,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
@@ -429,6 +429,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // J25: highlight-channel fingerprint — a change here repaints colours via the
   // cheap nodeColor accessor (no rebuildData / engine recompute).
   let lastHlSig    = highlightSignature(getState());
+  // Pinned (white-emphasis) set — repaint via the nodeColor accessor on change.
+  let lastPinSig   = pinnedSignature(getState());
 
   return {
     update(s) {
@@ -478,9 +480,12 @@ export function mount(container, _state, config = {}, tabContext = null) {
         lastSelection.id   !== s.selection.id;
       const hlSig = highlightSignature(s);
       const hlChanged = hlSig !== lastHlSig;
-      if (selChanged || hlChanged) {
+      const pinSig = pinnedSignature(s);
+      const pinChanged = pinSig !== lastPinSig;
+      if (selChanged || hlChanged || pinChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
+        lastPinSig    = pinSig;
         repaintSelection();
       }
     },

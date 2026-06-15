@@ -1294,6 +1294,30 @@ td.cart-cell {
 }
 td.cart-cell-int, td.cart-cell-float { text-align: right; }
 .cart-cell-check, .cart-th-check, .cart-cell-rm, .cart-th-rm { width: 1%; text-align: center; }
+/* Selected-papers panel: a pinned (white-emphasis) row reads as white-tinted,
+   echoing the pure-white node in the viewer. */
+tr.cart-row.pinned td.cart-cell {
+  background: rgba(255, 255, 255, 0.10);
+  color: #fff;
+}
+
+/* SQL search: a result row whose paper is currently selected in the graph
+   (by any source) — accent rail + tint, matching the scoring-block treatment. */
+tr.search-row.selected td { background: rgba(97, 175, 239, 0.12); }
+tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Drag-to-resize column handle (cart / selected-papers tables). The header cell
+   is position:sticky (a positioned ancestor), so the handle anchors to it. */
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+}
+.col-resize-handle:hover { background: var(--accent-dim); }
 .cart-rm-btn {
   background: none;
   border: none;

@@ -443,6 +443,53 @@ export function clearSqliteCorpus() {
   _handle = null;
 }
 
+// Re-open the snapshot DB for a project loaded from a save, WITHOUT re-running
+// the pipeline. A project load (topbar rehydrateFromBlob) restores state but
+// skips the data cascade, so the live DB handle that getNodeRecord / getNodeText
+// / SQL-search rely on was never reopened — per-paper metadata (title, authors,
+// venue, …) goes missing even though year/cluster (from genResult) still show.
+//
+// We rebuild idByRow / nodeByPaperId from the LOADED nodes' own paperIds (which
+// round-trip through the save), and only need the DB itself for the papers
+// table. `nodes` is state.genResult.nodes; `datasetId` is the saved dataset id
+// (possibly "<project>::<subset>" — the papers live in the project snapshot DB).
+// Returns true on success; throws on a missing/failed DB fetch (caller decides
+// whether to surface it).
+export async function reconnectSqliteCorpus(datasetId, nodes) {
+  if (!datasetId || !Array.isArray(nodes) || nodes.length === 0) return false;
+  const sep = datasetId.indexOf("::");
+  const projectId = sep === -1 ? datasetId : datasetId.slice(0, sep);
+  const base = await ensureDataset(projectId);
+  if (!base) return false;
+  assertSnapshotPath(base.sqlitePath);
+
+  const [SQL, dbAb] = await Promise.all([
+    getSQL(),
+    fetch(base.sqlitePath).then((r) => {
+      if (!r.ok) throw new Error(`[datasource:sqlite] ${base.sqlitePath}: HTTP ${r.status}`);
+      return r.arrayBuffer();
+    }),
+  ]);
+  const db = new SQL.Database(new Uint8Array(dbAb));
+
+  // node index → papers.id straight off the restored nodes (same content as the
+  // original paperIdByNode); reverse map for SQL search.
+  const idByRow = nodes.map((nd) => (nd && nd.paperId != null) ? nd.paperId : null);
+  const nodeByPaperId = new Map();
+  for (let i = 0; i < idByRow.length; i++) {
+    if (idByRow[i] != null) nodeByPaperId.set(idByRow[i], i);
+  }
+
+  if (_handle && _handle.db && _handle.db !== db) {
+    try { _handle.db.close(); } catch { /* already closed */ }
+  }
+  _handle = {
+    dataset: datasetId, db, idByRow, nodeByPaperId,
+    textStmt: null, recordStmt: null, attached: new Map(),
+  };
+  return true;
+}
+
 // ── SQL library search support (J09) ────────────────────────────────────
 // The active dataset's snapshot DB already lives in the page (_handle.db). The
 // search panel runs read-only SELECTs against it directly, plus any number of

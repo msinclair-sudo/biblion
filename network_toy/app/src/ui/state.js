@@ -219,6 +219,16 @@ const state = {
   // bump engineRevision so the viewers repaint via the cheap nodeColor accessor
   // (no rebuildData / engine recompute).
   highlights: { bySource: {} },
+  // ── pinned (white-emphasis) nodes ─────────────────────────────
+  // Node ids the user has "pinned" from the Selected-papers panel: rendered
+  // PURE WHITE in both viewers, overriding the colour-by / selection-dim, as a
+  // top emphasis layer. Independent of `highlights`/`selection` — pins persist
+  // until explicitly cleared. PURELY VISUAL + in-memory (never serialised;
+  // absent from serialise.js handling, so a Set here is dropped on save).
+  // Mutated via togglePinnedNode / clearPinnedNodes; like highlights, those
+  // notify subscribers WITHOUT bumping engineRevision (viewers repaint through
+  // the cheap nodeColor accessor, never rebuildData).
+  pinnedNodes: new Set(),
   // ── search highlight (J09 → folded into J25) ──────────────────
   // RETAINED as a back-compat shim only: the SQL search panel now routes its
   // hits through the general highlight channel (addHighlight("search", …)).
@@ -654,6 +664,23 @@ export function clearHighlight(source) {
 export function clearAllHighlights() {
   if (Object.keys(state.highlights.bySource).length === 0) return;
   update({ highlights: { bySource: {} } });
+}
+
+// ── Pinned (white-emphasis) nodes ───────────────────────────────────
+// Toggle a node's white pin. Like the highlight mutators, this notifies
+// subscribers via update() WITHOUT bumping engineRevision — viewers repaint
+// through the cheap nodeColor accessor (see colour-modes pinnedSignature).
+export function togglePinnedNode(nodeId) {
+  if (!Number.isInteger(nodeId)) return;
+  const next = new Set(state.pinnedNodes);
+  if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
+  update({ pinnedNodes: next });
+}
+
+// Drop every white pin. No-op when already empty.
+export function clearPinnedNodes() {
+  if (state.pinnedNodes.size === 0) return;
+  update({ pinnedNodes: new Set() });
 }
 
 // ── Search highlight (J09 → folded into J25) ────────────────────────

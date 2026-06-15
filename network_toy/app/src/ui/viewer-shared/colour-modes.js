@@ -11,6 +11,7 @@ import { tGradient, inDegGradient, boundaryScoreGradient } from "../gradients.js
 export const DEFAULT_COLOUR_MODE = "cluster:finest";
 export const DIMMED_COLOUR       = "#3a3f4a";
 export const UNKNOWN_COLOUR      = "#888";
+export const PINNED_COLOUR       = "#ffffff";   // white-emphasis pin (top layer)
 
 // ── gradient scaling stats, memoised on the source array reference ──────
 // The colour resolver runs once PER NODE PER FRAME, so scanning the whole
@@ -99,9 +100,16 @@ export function getColourModeOptions(state) {
     label: (ys.min != null) ? `Publication year (${ys.min}–${ys.max})` : "Time (t)",
   });
   if (state.citationResult) {
-    opts.push({ value: "inDeg:raw", label: "Citation in-degree (count)" });
-    opts.push({ value: "inDeg",     label: "Citation in-degree (normalised)" });
-    opts.push({ value: "inDeg:log", label: "Citation in-degree (log)" });
+    // Citation in-degree is heavily right-skewed (a few hubs, a long low tail),
+    // so LINEAR normalisation crushes nearly every node into the bottom of the
+    // gradient (they all read as one colour) while only the hubs reach the top —
+    // it looks binned. Log scaling spreads the tail across the gradient, so it's
+    // the sensible default ("Citation in-degree"); the linear ramp stays as an
+    // explicit option. (The "inDeg:raw" value is colour-identical to linear —
+    // raw counts already show in the in-deg table column — so it's dropped from
+    // the menu; baseColourFor still resolves it for any older saved tab config.)
+    opts.push({ value: "inDeg:log", label: "Citation in-degree" });
+    opts.push({ value: "inDeg",     label: "Citation in-degree (linear)" });
   }
   // Pre→post fusion node displacement (when a node-displacement card has run).
   if (state.nodeDisplacement && state.nodeDisplacement.dist) {
@@ -255,6 +263,52 @@ export function isNodeHighlighted(node, state) {
   return false;
 }
 
+// The set of node ids the viewer currently treats as SELECTED — the data
+// source for the Selected-papers panel. Mirrors nodeColourFor's "not greyed
+// when a selection is active" predicate: the union of every highlight source's
+// ids PLUS the nodes matching the single state.selection (cluster / node /
+// origin). Empty when nothing is selected (panel shows empty, matching the
+// viewer colouring everything by colour-by).
+export function selectedNodeIds(state) {
+  const ids = new Set();
+  const hs = state.highlights;
+  if (hs && hs.bySource) {
+    for (const source in hs.bySource) {
+      const g = hs.bySource[source];
+      if (g && g.ids) for (const id of g.ids) ids.add(id);
+    }
+  }
+  const sel = state.selection;
+  const nodes = (state.genResult && state.genResult.nodes) || [];
+  if (sel && sel.type === "node") {
+    if (Number.isInteger(sel.id)) ids.add(sel.id);
+  } else if (sel && sel.type === "cluster") {
+    const levels = state.clusterLevels || [];
+    if (levels.length) {
+      const lvlIdx = (sel.level == null)
+        ? levels.length - 1
+        : Math.max(0, Math.min(levels.length - 1, sel.level));
+      const cr = levels[lvlIdx] && levels[lvlIdx].clusterResult;
+      const nc = cr && cr.nodeCluster;
+      if (nc) for (let id = 0; id < nc.length; id++) if (nc[id] === sel.id) ids.add(id);
+    }
+  } else if (sel && sel.type === "origin") {
+    for (const nd of nodes) if (nd && nd.originId === sel.id) ids.add(nd.id);
+  }
+  return ids;
+}
+
+// Cheap fingerprint of the pinned-node set — viewers cache the prior tick's
+// value and repaint via the nodeColor accessor (no rebuildData) when it
+// changes. Same shape as highlightSignature: size + id-sum.
+export function pinnedSignature(state) {
+  const p = state.pinnedNodes;
+  if (!p || p.size === 0) return "";
+  let sum = 0;
+  for (const id of p) sum += id;
+  return `${p.size}:${sum}`;
+}
+
 // Cheap fingerprint of the highlight channel — each viewer caches the prior
 // tick's signature and, when it changes, repaints via the nodeColor accessor
 // only (no rebuildData). Size + a small id-sum per source is enough to catch
@@ -287,6 +341,10 @@ export function highlightSignature(state) {
 //      colour. This replaces the old per-source "glow" recolour: selection
 //      reads as colour-by-on-grey, not a flat highlight hue.
 export function nodeColourFor(node, state, mode) {
+  // White-pin emphasis (Selected-papers panel) wins over everything: a pinned
+  // node renders pure white regardless of colour-by / selection-dim. Every
+  // other node is unaffected (the pin is a top layer, not a focus filter).
+  if (state.pinnedNodes && state.pinnedNodes.has(node.id)) return PINNED_COLOUR;
   const base = baseColourFor(node, state, mode);
   const matched = nodeMatchesSelection(node, state, state.selection);   // true | false | null
   if (anyHighlightActive(state)) {

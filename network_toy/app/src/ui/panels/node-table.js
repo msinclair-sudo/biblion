@@ -240,9 +240,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const source = `L${c.level}·c${c.id}`;
     const items = [];
     const nc = c.cr.nodeCluster;
+    const nodes = (s.genResult && s.genResult.nodes) || [];
     for (let nodeId = 0; nodeId < nc.length; nodeId++) {
       if (nc[nodeId] !== c.id) continue;
-      const paperId = getIdByRow(nodeId);
+      // Prefer the node's own paperId (survives a project reload); getIdByRow
+      // only works while the live sqlite handle is present (see scoring.js).
+      const node = nodes[nodeId];
+      const paperId = (node && node.paperId != null) ? node.paperId : getIdByRow(nodeId);
       if (paperId != null) items.push({ paperId, nodeId, source });
     }
     return addToCart(items);

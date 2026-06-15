@@ -27,9 +27,11 @@ test("colour options surface in-degree raw/normalised/log + real-year", () => {
   const yearLabel = (realOpts.find((o) => o.v === "year") || {}).l;
 
   assert.ok(realValues.includes("year"));
-  assert.ok(realValues.includes("inDeg:raw"));
-  assert.ok(realValues.includes("inDeg"));
+  // Citation in-degree menu: log (default, perceptually spread) + linear. The
+  // colour-identical "inDeg:raw" is no longer surfaced as a menu option.
   assert.ok(realValues.includes("inDeg:log"));
+  assert.ok(realValues.includes("inDeg"));
+  assert.ok(!realValues.includes("inDeg:raw"));
   assert.ok(yearLabel.includes("1990") && yearLabel.includes("2020"));   // real range
   assert.equal((toyOpts.find((o) => o.v === "year") || {}).l, "Time (t)"); // no years → fallback
   assert.equal(toyOpts.some((o) => o.v.startsWith("inDeg")), false);       // no citationResult
@@ -87,6 +89,44 @@ test("no selection → every node shows its colour-by colour", () => {
   assert.equal(cm.anyHighlightActive(state), false);
   assert.equal(cm.nodeColourFor(nodes[0], state, "year"), cm.baseColourFor(nodes[0], state, "year"));
   assert.equal(cm.nodeColourFor(nodes[1], state, "year"), cm.baseColourFor(nodes[1], state, "year"));
+});
+
+test("pinned nodes render pure white, overriding colour-by + selection-dim", () => {
+  const nodes = [{ id: 0, year: 1990 }, { id: 1, year: 2000 }, { id: 2, year: 2020 }];
+  const state = {
+    genResult: { nodes }, clusterLevels: [], citationResult: null,
+    selection: { type: null, id: null }, highlights: { bySource: {} },
+    pinnedNodes: new Set([1]),
+  };
+  assert.equal(cm.nodeColourFor(nodes[1], state, "year"), cm.PINNED_COLOUR);   // pinned → white
+  assert.equal(cm.nodeColourFor(nodes[0], state, "year"), cm.baseColourFor(nodes[0], state, "year"));
+  // White wins even when the node would otherwise be greyed by a selection.
+  const dimmed = { ...state, highlights: { bySource: { s: { ids: new Set([0]), seq: 1 } } } };
+  assert.equal(cm.nodeColourFor(nodes[1], dimmed, "year"), cm.PINNED_COLOUR);  // still white (pinned)
+  assert.equal(cm.nodeColourFor(nodes[2], dimmed, "year"), cm.DIMMED_COLOUR);  // unselected, unpinned → grey
+});
+
+test("selectedNodeIds = highlight union ∪ single-selection matches", () => {
+  const nc = Int32Array.from([0, 0, 1, 1, 2]);
+  const nodes = Array.from({ length: 5 }, (_, id) => ({ id, originId: id % 2 }));
+  const levels = [{ uid: "L0", clusterResult: { nodeCluster: nc } }];
+
+  // Highlight channel only.
+  const hlState = {
+    genResult: { nodes }, clusterLevels: levels,
+    selection: { type: null, id: null },
+    highlights: { bySource: { scoring: { ids: new Set([2, 4]), seq: 1 } } },
+  };
+  assert.deepEqual([...cm.selectedNodeIds(hlState)].sort((a,b)=>a-b), [2, 4]);
+
+  // Single cluster selection (cluster 1 = nodes 2,3) unions with highlights.
+  const both = { ...hlState, selection: { type: "cluster", level: 0, id: 1 } };
+  assert.deepEqual([...cm.selectedNodeIds(both)].sort((a,b)=>a-b), [2, 3, 4]);
+
+  // Nothing selected → empty.
+  const none = { genResult: { nodes }, clusterLevels: levels,
+    selection: { type: null, id: null }, highlights: { bySource: {} } };
+  assert.equal(cm.selectedNodeIds(none).size, 0);
 });
 
 test("highlight signature changes on add / clear / membership", () => {

@@ -14,8 +14,9 @@ import {
 import { serialiseState }   from "../persistence/serialise.js";
 import { deserialiseFile }  from "../persistence/deserialise.js";
 import { saveProject as apiSaveProject } from "../persistence/projects-api.js";
+import { reconnectSqliteCorpus } from "../datasource/sqlite.js";
 import { enqueueJob }       from "./queue.js";
-import { createStep, getRootStep, importWorkflow } from "./workflow.js";
+import { importWorkflow } from "./workflow.js";
 import { projectStepIntoLegacyState } from "./workflow-projection.js";
 import { getLayerDescriptor } from "./modals/layer-descriptors.js";
 import { openDataSourceModal } from "./modals/data-source-modal.js";
@@ -82,6 +83,7 @@ export function mountTopbar() {
   root.appendChild(spacer);
 
   root.appendChild(renderSearch());
+  root.appendChild(renderSelected());
   root.appendChild(renderCart());
 
   // Click-outside handler closes any open menu.
@@ -196,6 +198,26 @@ function openCartPanel() {
   addTab("bottom", "cart", {});
 }
 
+// Selected-papers button (top-right): opens the singleton panel listing the
+// currently-selected papers, where the user can pin some white in the viewer.
+function renderSelected() {
+  const btn = document.createElement("button");
+  btn.className = "topbar-search";          // reuse the search button styling
+  btn.title = "Open the selected-papers panel";
+  btn.textContent = "Selected";
+  btn.addEventListener("click", openSelectedPanel);
+  return btn;
+}
+
+function openSelectedPanel() {
+  const s = getState();
+  for (const slot of Object.keys(s.panels)) {
+    const existing = s.panels[slot].tabs.find(t => t.type === "selected-papers");
+    if (existing) { setActiveTab(slot, existing.id); return; }
+  }
+  addTab("bottom", "selected-papers", {});
+}
+
 // Global search button (top-right): opens the SQL library-search panel (J09).
 function renderSearch() {
   const btn = document.createElement("button");
@@ -257,30 +279,16 @@ function saveProject({ promptForName }) {
     setProjectName(name);
   }
 
-  // Phase 2 slice 2.9.c — save becomes a tree card under the root, so
-  // the user's project history records every save. The card carries
-  // {filename, sizeBytes, savedAt} as result. If the workflow has no
-  // root yet (boot before migration), we fall back to a stepless job.
-  const root = getRootStep();
+  // A save is self-contained and must not leave tracks in the workflow tree:
+  // run the job stepless (no "save" card). The .zip already captures the whole
+  // state — recording each save as a card just accumulates clutter on every
+  // save. Save writes to data/<datasetId>/saves/<name>.zip; with the loaded
+  // project's name + dataset restored, "Save" overwrites the file it came from.
   const label = `Save "${name}"`;
-  let stepId = null;
-  if (root) {
-    try {
-      stepId = createStep({
-        type:    "save",
-        label,
-        params:  { filename: `${name}.zip` },
-        parentId: root.id,
-      });
-    } catch (e) {
-      console.warn("[topbar] createStep(save) failed; running stepless:", e);
-      stepId = null;
-    }
-  }
   const { promise } = enqueueJob({
     type:  "save",
     label,
-    stepId,
+    stepId: null,
     fn:    async () => {
       let blob;
       try {
@@ -368,22 +376,30 @@ export function rehydrateFromBlob(blobOrFile, { displayName, datasetId } = {}) {
       }
       console.log(`[topbar] loaded project '${fileName}'${datasetId ? ` (dataset ${datasetId})` : ""} (saved ${res.manifest.savedAt})`);
 
-      // Attach a load-history card to the loaded tree, if it has a root.
-      // Best-effort — failure here doesn't undo the load.
-      const root = getRootStep();
-      if (root) {
-        try {
-          createStep({
-            type:    "load",
-            label,
-            params:  { filename: fileName },
-            parentId: root.id,
-          });
-        } catch (e) {
-          console.warn("[topbar] createStep(load) failed (continuing):", e);
+      // Re-open the sqlite corpus so per-paper metadata (title / authors / venue
+      // / …) is available again — the load above skips the data cascade, so the
+      // live DB handle that getNodeRecord relies on was never reopened. Without
+      // this the Cart / Selected-papers tables show year + cluster (from
+      // genResult) but everything from the papers table is blank. Best-effort:
+      // a missing DB just leaves metadata empty, it doesn't fail the load.
+      try {
+        const ds   = getState().dataSource;
+        const mode = ds && ds.mode;
+        const cfg  = (ds && ds.configs && ds.configs[mode]) || {};
+        const dsId = cfg.dataset || datasetId;
+        const nodes = getState().genResult && getState().genResult.nodes;
+        if (mode === "sqlite" && dsId && nodes) {
+          await reconnectSqliteCorpus(dsId, nodes);
+          // Bump so the metadata-joining panels (cart / selected-papers) rejoin.
+          update({ engineRevision: getState().engineRevision + 1 });
         }
+      } catch (e) {
+        console.warn("[topbar] sqlite reconnect failed (paper metadata unavailable):", e);
       }
 
+      // No load-history card: a load restores the saved tree verbatim and must
+      // not leave tracks of its own. The restored workflow is exactly what was
+      // saved — appending a "load" card would mutate it on every open.
       return {
         capturedAt:      new Date().toISOString(),
         filename:        fileName,
