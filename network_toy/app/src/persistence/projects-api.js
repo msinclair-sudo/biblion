@@ -8,9 +8,25 @@
 
 const BASE = "/api/datasets";
 
+// A 404 on the dataset API almost always means the app is being served by a
+// plain static server (`python -m http.server`) rather than serve.py, the only
+// thing that answers /api/datasets. Surface that hint instead of a bare
+// "HTTP 404" so the picker's error is self-explanatory.
+const SERVE_HINT =
+  "the dataset API is served by serve.py, not `python -m http.server` — " +
+  "run `python serve.py` from network_toy/";
+
 async function getJson(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`[projects-api] ${url}: HTTP ${r.status}`);
+  let r;
+  try {
+    r = await fetch(url);
+  } catch (e) {
+    throw new Error(`[projects-api] ${url}: ${e.message || e} — ${SERVE_HINT}`);
+  }
+  if (!r.ok) {
+    const hint = r.status === 404 ? ` — ${SERVE_HINT}` : "";
+    throw new Error(`[projects-api] ${url}: HTTP ${r.status}${hint}`);
+  }
   return r.json();
 }
 
