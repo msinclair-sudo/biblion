@@ -17,6 +17,7 @@
 
 import { getState, subscribe, setSelection, setBridgeConfig } from "../state.js";
 import { recomputeBridgeAnalysis }                            from "../engine.js";
+import { slider as kitSlider }                                from "../widgets.js";
 
 export const ID          = "bridge-analysis";
 export const LABEL       = "Bridge analysis";
@@ -94,19 +95,18 @@ export function mount(container, _state, _config = {}) {
     const tauBar = document.createElement("div");
     tauBar.className = "panel-bridge-taubar";
     tauBar.appendChild(label("Dominance τ:"));
-    const slider = document.createElement("input");
-    slider.type = "range";
-    slider.min = "0.5"; slider.max = "1"; slider.step = "0.05";
-    slider.value = String(tau);
-    slider.className = "panel-bridge-tau-slider";
     const tauVal = document.createElement("span");
     tauVal.className = "panel-bridge-tau-val";
     tauVal.textContent = tau.toFixed(2);
-    slider.addEventListener("input", () => {
-      tau = parseFloat(slider.value);
-      tauVal.textContent = tau.toFixed(2);
-      render();                       // local re-bucket, no engine recompute
-    });
+    // kit slider() (widgets.js) — float field, keeps the bespoke
+    // .panel-bridge-tau-slider width class; same input wiring (local
+    // re-bucket via render(), no engine recompute).
+    const slider = kitSlider(
+      { min: 0.5, max: 1, step: 0.05 },
+      tau,
+      (v) => { tau = v; tauVal.textContent = tau.toFixed(2); render(); },
+      { className: "panel-bridge-tau-slider" },
+    );
     tauBar.appendChild(slider);
     tauBar.appendChild(tauVal);
     header.appendChild(tauBar);

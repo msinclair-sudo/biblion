@@ -19,6 +19,7 @@
 // lane (recluster, relayoutCitations, …).
 
 import { openModal } from "./modal.js";
+import { paramRow } from "../widgets.js";
 // enqueueBusy import removed 2026-05-27 (slice 2.5) — see Apply onClick.
 
 export function openAlgorithmModal(descriptor) {
@@ -78,91 +79,17 @@ export function openAlgorithmModal(descriptor) {
     paramsHost.innerHTML = "";
     if (!algo.modalSchema || algo.modalSchema.length === 0) {
       const none = document.createElement("div");
-      none.className = "algorithm-modal-noparams";
+      none.className = "kit-noparams";
       none.textContent = "No tuneable parameters.";
       paramsHost.appendChild(none);
       return;
     }
     for (const field of algo.modalSchema) {
-      paramsHost.appendChild(renderField(field, chosenParams));
+      // paramRow (widgets.js) reads/writes chosenParams[field.key] and
+      // keeps its slider readout in sync — same wiring as the old inline
+      // renderField/buildInput/formatField this replaced.
+      paramsHost.appendChild(paramRow(field, chosenParams));
     }
-  }
-
-  function renderField(field, params) {
-    const row = document.createElement("div");
-    row.className = "algorithm-modal-row";
-
-    const label = document.createElement("label");
-    label.textContent = field.label || field.key;
-    row.appendChild(label);
-
-    const input = buildInput(field, params, () => {
-      // Update readout if there's one
-      if (readout) readout.textContent = formatField(field, params[field.key]);
-    });
-    row.appendChild(input);
-
-    let readout = null;
-    if (field.kind === "range" || field.kind === "int") {
-      readout = document.createElement("span");
-      readout.className = "algorithm-modal-readout";
-      readout.textContent = formatField(field, params[field.key]);
-      row.appendChild(readout);
-    }
-
-    if (field.hint) {
-      const h = document.createElement("div");
-      h.className = "algorithm-modal-hint";
-      h.textContent = field.hint;
-      row.appendChild(h);
-    }
-
-    return row;
-  }
-
-  function buildInput(field, params, onChange) {
-    const cur = params[field.key];
-    if (field.kind === "select") {
-      const sel = document.createElement("select");
-      for (const opt of (field.options || [])) {
-        const o = document.createElement("option");
-        o.value = opt.value;
-        o.textContent = opt.label;
-        if (cur === opt.value) o.selected = true;
-        sel.appendChild(o);
-      }
-      sel.addEventListener("change", () => {
-        params[field.key] = sel.value;
-        onChange();
-      });
-      return sel;
-    }
-    // numeric — use range slider with a readout
-    const input = document.createElement("input");
-    input.type = "range";
-    input.min = String(field.min ?? 0);
-    input.max = String(field.max ?? 100);
-    input.step = String(field.step ?? 1);
-    input.value = String(cur ?? field.min ?? 0);
-    input.addEventListener("input", () => {
-      const v = field.kind === "int" ? parseInt(input.value, 10) : parseFloat(input.value);
-      params[field.key] = v;
-      onChange();
-    });
-    return input;
-  }
-
-  function formatField(field, value) {
-    if (field.format) {
-      try { return field.format(value); }
-      catch (_) { /* fall through */ }
-    }
-    if (field.kind === "int") return String(value);
-    const n = +value;
-    if (!Number.isFinite(n)) return "—";
-    if (Math.abs(n) >= 100) return n.toFixed(0);
-    if (Math.abs(n) >= 10)  return n.toFixed(1);
-    return n.toFixed(2);
   }
 
   // Initial render with active algo.

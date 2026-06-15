@@ -1900,6 +1900,66 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   vertical-align: middle;
 }
 
+/* ── shared widget kit (J12) ───────────────────────────────────────── */
+/*
+ * One spacing / affordance language for modal + panel form controls.
+ * These tokens + classes back the builders in app/src/ui/widgets.js and
+ * replace the per-surface `*-modal-row` / `*-readout` / `*-hint` grids
+ * that were copy-pasted across modals. Migrate a surface by emitting the
+ * `kit-*` classes (the default the builders produce); leave un-migrated
+ * surfaces on their existing classes until they are converted.
+ */
+:root {
+  --kit-row-label-w:   110px;  /* canonical label column for a field-row */
+  --kit-row-readout-w: 50px;   /* canonical readout column (slider value) */
+  --kit-row-gap:       6px 10px;
+  --kit-stack-gap:     12px;   /* vertical gap between stacked field-rows */
+}
+
+.kit-field-row {
+  display: grid;
+  grid-template-columns: var(--kit-row-label-w) 1fr var(--kit-row-readout-w);
+  gap: var(--kit-row-gap);
+  align-items: center;
+}
+.kit-field-row > label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.kit-field-row input[type="range"] {
+  width: 100%;
+}
+.kit-select,
+.kit-field-row select {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  /* span control + readout columns: selects have no slider readout */
+  grid-column: 2 / 4;
+}
+.kit-readout {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  text-align: right;
+}
+.kit-hint {
+  grid-column: 2 / 4;
+  font-size: 10px;
+  color: var(--text-faint);
+  line-height: 1.45;
+  margin-top: -2px;
+}
+.kit-noparams {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
 /* ── algorithm modal (workflow chart) ──────────────────────────────── */
 
 .algorithm-modal-body {
@@ -1920,8 +1980,7 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.algorithm-modal-algo-row select,
-.algorithm-modal-row select {
+.algorithm-modal-algo-row select {
   background: var(--bg-3);
   color: var(--text);
   border: 1px solid var(--border);
@@ -1940,42 +1999,15 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   line-height: 1.45;
 }
 
+/* Param rows now come from the shared kit (.kit-field-row / .kit-readout /
+   .kit-hint / .kit-noparams above). This container just stacks them; the
+   old per-modal `.algorithm-modal-row*` grid was consolidated into the kit
+   (J12). */
 .algorithm-modal-params {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--kit-stack-gap);
   margin-top: 4px;
-}
-.algorithm-modal-row {
-  display: grid;
-  grid-template-columns: 110px 1fr 50px;
-  gap: 6px 10px;
-  align-items: center;
-}
-.algorithm-modal-row label {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-.algorithm-modal-row input[type="range"] {
-  width: 100%;
-}
-.algorithm-modal-readout {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text);
-  text-align: right;
-}
-.algorithm-modal-hint {
-  grid-column: 2 / 4;
-  font-size: 10px;
-  color: var(--text-faint);
-  line-height: 1.45;
-  margin-top: -2px;
-}
-.algorithm-modal-noparams {
-  font-size: 11px;
-  color: var(--text-faint);
-  font-style: italic;
 }
 
 /* ── bootstrap-stability config modal (slice 2.9.a) ───────────────── */
@@ -2120,20 +2152,9 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   margin: -2px 0 6px;
 }
 
-.dimred-modal-row {
-  display: grid;
-  grid-template-columns: 110px 1fr 50px;
-  gap: 6px 10px;
-  align-items: center;
-}
-.dimred-modal-row label {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-.dimred-modal-row input[type="range"] {
-  width: 100%;
-}
-.dimred-modal-row select,
+/* Param rows now come from the shared kit (.kit-field-row etc. above);
+   the old `.dimred-modal-row*` grid was consolidated into the kit (J12).
+   The left-column picker select keeps its own `.dimred-modal-select`. */
 .dimred-modal-select {
   background: var(--bg-3);
   color: var(--text);
@@ -2142,7 +2163,6 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   border-radius: 3px;
   font-family: var(--font-mono);
   font-size: 12px;
-  grid-column: 2 / 4;
 }
 
 .dimred-modal-desc {
@@ -2158,25 +2178,6 @@ td.cart-cell-int, td.cart-cell-float { text-align: right; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.dimred-modal-readout {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text);
-  text-align: right;
-}
-.dimred-modal-hint {
-  grid-column: 2 / 4;
-  font-size: 10px;
-  color: var(--text-faint);
-  line-height: 1.45;
-  margin-top: -2px;
-}
-.dimred-modal-noparams {
-  font-size: 11px;
-  color: var(--text-faint);
-  font-style: italic;
 }
 
 /* ── data-source modal ───────────────────────────────────────────── */

@@ -9,6 +9,7 @@
 // selected dimred ancestor and enqueues the sweep.
 
 import { openModal } from "./modal.js";
+import { fieldRow, numberInput } from "../widgets.js";
 
 export function openMultiLevelModal(descriptor) {
   const active = descriptor.getActive();   // { hasDimred, n, defaults, parentId }
@@ -71,25 +72,19 @@ export function openMultiLevelModal(descriptor) {
   });
 }
 
+// Built on the kit's fieldRow + numberInput (widgets.js). This surface
+// keeps its bespoke column-stacked wrapper (.multi-level-modal-row /
+// -hint) rather than the grid `.kit-field-row`, so we override rowClass
+// and hintClass — same DOM/affordance as the old hand-rolled version.
 function numberRow(parent, labelText, value, min, max, step, hint) {
-  const row = document.createElement("div");
-  row.className = "multi-level-modal-row";
-  const lab = document.createElement("label");
-  lab.textContent = labelText;
-  const input = document.createElement("input");
-  input.type = "number";
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step);
-  input.value = String(value);
-  row.appendChild(lab);
-  row.appendChild(input);
-  if (hint) {
-    const h = document.createElement("div");
-    h.className = "multi-level-modal-hint";
-    h.textContent = hint;
-    row.appendChild(h);
-  }
+  const input = numberInput({ min, max, step, value });
+  const { row } = fieldRow({
+    label: labelText,
+    control: input,
+    hint,
+    rowClass: "multi-level-modal-row",
+    hintClass: "multi-level-modal-hint",
+  });
   parent.appendChild(row);
   return input;
 }

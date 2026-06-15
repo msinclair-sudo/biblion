@@ -10,6 +10,7 @@
 import { getState, subscribe } from "../state.js";
 import { getStep, getSelectedStep, getStepAncestors } from "../workflow.js";
 import { renderHeatmap }       from "../charts/heatmap.js";
+import { select } from "../widgets.js";
 
 export const ID          = "cross-cluster";
 export const LABEL       = "Cross-cluster citations";
@@ -72,16 +73,16 @@ export function mount(container, _state, config = {}) {
     const lvlLab = document.createElement("label");
     lvlLab.textContent = "Level";
     ctrl.appendChild(lvlLab);
-    const lvlSel = document.createElement("select");
-    lvlSel.className = "xcc-select";
-    cc.byLayer.forEach((b, i) => {
-      const o = document.createElement("option");
-      o.value = String(i);
-      o.textContent = `L${b.layer} · ${b.k} clusters`;
-      if (i === ui.level) o.selected = true;
-      lvlSel.appendChild(o);
-    });
-    lvlSel.addEventListener("change", () => { ui.level = Number(lvlSel.value); render(); });
+    // kit select() (widgets.js) — same options/value/onChange wiring as the
+    // hand-rolled <select>; option values are still string indices.
+    const lvlSel = select(
+      cc.byLayer.map((b, i) => ({ value: String(i), label: `L${b.layer} · ${b.k} clusters` })),
+      {
+        value: String(ui.level),
+        className: "xcc-select",
+        onChange: (v) => { ui.level = Number(v); render(); },
+      },
+    );
     ctrl.appendChild(lvlSel);
 
     const normBtn = document.createElement("button");
