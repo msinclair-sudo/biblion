@@ -172,3 +172,39 @@ def test_legacy_save_without_validation_runs_key(clean_page):
     # Absent in old save → absent in patch → state default ([]) takes over.
     assert out["hasKey"] is False
     assert out["value"] is None
+
+
+def test_embedding_m_and_rowof_round_trip(clean_page):
+    """embedding.m (embedded-node count) and rowOf (node index → embedding row,
+    -1 for ghosts) must survive save/load. pickStage0Input sizes the noise stage
+    to embedding.m, so dropping it makes a reloaded project re-run dim-reduction
+    on the wrong row count for ghost corpora (NaN → umap-js overflow)."""
+    out = clean_page.evaluate(
+        '''async () => {
+            const m = await import("/app/src/ui/state.js");
+            const { serialiseState } = await import("/app/src/persistence/serialise.js");
+            const { deserialiseFile } = await import("/app/src/persistence/deserialise.js");
+            m.update({ embedding: {
+                d: 2,
+                data:  new Float32Array([1, 2, 3, 4, 5, 6]),   // m=3 rows × d=2
+                m:     3,
+                rowOf: new Int32Array([0, 1, 2, -1]),          // n=4, last is a ghost
+            } });
+            const blob = serialiseState(m.getState());
+            const file = new File([blob], "t.zip", { type: "application/zip" });
+            const { patch } = await deserialiseFile(file);
+            const e = patch.embedding || {};
+            return {
+                m:          e.m,
+                rowOfIsI32: e.rowOf instanceof Int32Array,
+                rowOf:      e.rowOf ? Array.from(e.rowOf) : null,
+                dataIsF32:  e.data instanceof Float32Array,
+                dataLen:    e.data ? e.data.length : 0,
+            };
+        }'''
+    )
+    assert out["m"] == 3
+    assert out["rowOfIsI32"] is True
+    assert out["rowOf"] == [0, 1, 2, -1]
+    assert out["dataIsF32"] is True
+    assert out["dataLen"] == 6

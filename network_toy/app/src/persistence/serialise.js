@@ -83,12 +83,21 @@ export function serialiseState(state) {
     out._basePos2d = stashBinary(arrays, "arrays/basePos2d.f32", state._basePos2d, dedup);
   }
 
-  // 4. embedding — {d, data: Float32Array(n*d)}.
+  // 4. embedding — {d, data: Float32Array(m*d), m, rowOf?: Int32Array(n)}.
+  //    m (embedded-node count) and rowOf (node index → embedding row, -1 for
+  //    ghosts) MUST round-trip: pickStage0Input sizes the noise stage to
+  //    embedding.m, so dropping it makes a reloaded project re-run dim-reduction
+  //    (esp. graph-diffusion / dim-sweep) on the wrong row count for ghost
+  //    corpora (NaN → umap-js overflow). Ghost-free sources may omit both.
   if (state.embedding && state.embedding.data instanceof Float32Array) {
     out.embedding = {
       d:    state.embedding.d,
       data: stashBinary(arrays, "arrays/embedding.f32", state.embedding.data, dedup),
     };
+    if (Number.isInteger(state.embedding.m)) out.embedding.m = state.embedding.m;
+    if (state.embedding.rowOf instanceof Int32Array) {
+      out.embedding.rowOf = stashBinary(arrays, "arrays/embeddingRowOf.i32", state.embedding.rowOf, dedup);
+    }
   }
 
   // 4a. rawCitationEdges — flat number[] of length 2|E| populated at
