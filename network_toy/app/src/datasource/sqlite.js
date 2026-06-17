@@ -424,6 +424,121 @@ export function getNodeRecord(nodeId) {
   };
 }
 
+// Parse biblion's JSON name array (authors / editors) into a clean string list;
+// any parse failure degrades to [].
+function parseNameList(json) {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed)
+      ? parsed.filter((a) => typeof a === "string" && a.trim())
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+// { scheme: [value, …] } from the identifiers table for one paper. The table is
+// absent in older snapshots — the first failure flips a handle flag so we don't
+// re-prepare per row.
+function loadIdentifiers(handle, paperId) {
+  if (handle.identifiersTable === false) return {};
+  try {
+    const stmt = handle.idStmt ||
+      (handle.idStmt = handle.db.prepare(
+        "SELECT scheme, value FROM identifiers WHERE paper_id = ?"));
+    stmt.reset();
+    stmt.bind([paperId]);
+    const out = {};
+    while (stmt.step()) {
+      const { scheme, value } = stmt.getAsObject();
+      if (scheme && value) (out[scheme] || (out[scheme] = [])).push(value);
+    }
+    return out;
+  } catch {
+    handle.identifiersTable = false;   // no identifiers table in this snapshot
+    return {};
+  }
+}
+
+// The papers columns getNodeFullRecord wants. Older snapshots predate the
+// extended bibliographic columns (editors/volume/pages/…), so we intersect this
+// list with what the table actually has — a missing column reads back as null.
+const _FULL_RECORD_COLUMNS = [
+  "citekey", "title", "year", "venue", "doi", "pub_type", "abstract", "authors",
+  "editors", "volume", "issue", "first_page", "last_page", "publisher",
+  "booktitle", "series", "edition", "language", "month", "editorial_status",
+  "pubmed_id",
+];
+
+// Set of column names on the papers table, discovered once per handle.
+function papersColumns(handle) {
+  if (handle.papersCols) return handle.papersCols;
+  const cols = new Set();
+  try {
+    const stmt = handle.db.prepare("PRAGMA table_info(papers)");
+    while (stmt.step()) {
+      const { name } = stmt.getAsObject();
+      if (name) cols.add(name);
+    }
+    stmt.free();
+  } catch { /* degrade to empty -> getNodeFullRecord returns mostly nulls */ }
+  handle.papersCols = cols;
+  return cols;
+}
+
+// Full bibliographic record for citation export (BibTeX). Reads the complete set
+// of reference columns the snapshot has (older snapshots lack the extended ones)
+// plus the identifiers table (isbn/issn/arxiv/…). Heavier than getNodeRecord
+// (which feeds the live tables on every rejoin) — meant for export, where the
+// caller iterates a bounded set. Null when no corpus is loaded / the row is gone.
+//
+//   { paperId, citekey, title, year, venue, doi, pubType, abstract, authors:[],
+//     editors:[], volume, issue, firstPage, lastPage, publisher, booktitle,
+//     series, edition, language, month, editorialStatus, pubmedId,
+//     identifiers:{scheme:[…]} }
+export function getNodeFullRecord(nodeId) {
+  if (!_handle) return null;
+  const { db, idByRow } = _handle;
+  const paperId = idByRow[nodeId];
+  if (paperId == null) return null;
+  const stmt = _handle.fullRecordStmt ||
+    (_handle.fullRecordStmt = (() => {
+      const present = papersColumns(_handle);
+      const cols = _FULL_RECORD_COLUMNS.filter((c) => present.has(c));
+      return db.prepare(`SELECT ${cols.join(", ")} FROM papers WHERE id = ?`);
+    })());
+  stmt.reset();
+  stmt.bind([paperId]);
+  if (!stmt.step()) return null;
+  const r = stmt.getAsObject();
+  return {
+    paperId,
+    citekey:         r.citekey || null,
+    title:           r.title || null,
+    year:            Number.isFinite(r.year) ? r.year : null,
+    venue:           r.venue || null,
+    doi:             r.doi || null,
+    pubType:         r.pub_type || null,
+    abstract:        r.abstract || null,
+    authors:         parseNameList(r.authors),
+    editors:         parseNameList(r.editors),
+    volume:          r.volume || null,
+    issue:           r.issue || null,
+    firstPage:       r.first_page || null,
+    lastPage:        r.last_page || null,
+    publisher:       r.publisher || null,
+    booktitle:       r.booktitle || null,
+    series:          r.series || null,
+    edition:         r.edition || null,
+    language:        r.language || null,
+    month:           r.month || null,
+    editorialStatus: r.editorial_status || null,
+    pubmedId:        r.pubmed_id || null,
+    identifiers:     loadIdentifiers(_handle, paperId),
+  };
+}
+
 // Whether a live sqlite corpus is loaded (so callers can decide whether to
 // offer text-based labelling / bibliographic export). True after a successful
 // produceSqlite().

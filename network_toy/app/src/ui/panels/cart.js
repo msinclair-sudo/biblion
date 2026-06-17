@@ -5,8 +5,10 @@
 // papers, columns are EVERY per-node datum we can join — biblion metadata,
 // citation in-degree, cluster id per level, layout position, ghost flag — with
 // show/hide columns, text filter, sort, per-row remove, and per-row checkboxes
-// for partial commit. Export emits {"papers":[{"id","source"}]} for
-// `biblion advanced subset make <name> --ids-file <file>`.
+// for partial commit. Export emits a BibTeX (.bib) bibliography, pulling each
+// paper's full reference (authors, venue, year, volume/issue/pages, identifiers,
+// …) live from the connected snapshot DB via getNodeFullRecord; the cart's
+// `source` provenance rides along in each entry's `note` field.
 //
 // Per-node data sources (joined by nodeId):
 //   s.genResult.nodes[i]                       → paperId, isGhost, year (toy)
@@ -17,12 +19,14 @@
 
 import { getState, removeFromCart, clearCart, setTabConfig } from "../state.js";
 import { downloadText } from "../../export/cluster-export.js";
+import { formatBibtex } from "../../export/bibtex.js";
+import { getNodeFullRecord, hasSqliteText } from "../../datasource/sqlite.js";
 import { paperColumns, joinPaperRow, formatCell, compareBy } from "./paper-table.js";
 import { makeColumnsResizable } from "./column-resize.js";
 
 export const ID = "cart";
 export const LABEL = "Cart";
-export const DESCRIPTION = "Papers collected from clusters/selections, staged for export to a biblion subset. Show/hide columns, filter, sort, then export ids as JSON for `subset make --ids-file`.";
+export const DESCRIPTION = "Papers collected from clusters/selections, staged for citation export. Show/hide columns, filter, sort, then export as a BibTeX (.bib) bibliography pulled live from the connected snapshot database.";
 export const SINGLETON = true;   // one cart per project
 
 // Column catalogue + per-node join + cell format/sort live in paper-table.js,
@@ -115,7 +119,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   const hint = document.createElement("div");
   hint.className = "cart-hint";
   hint.textContent =
-    "Export → biblion advanced subset make <name> --ids-file <downloaded.json>";
+    "Export → a BibTeX (.bib) file of the cart papers, pulled from the connected snapshot DB.";
   root.appendChild(hint);
 
   // ── data join ───────────────────────────────────────────────────
@@ -312,9 +316,26 @@ export function mount(container, _state, config = {}, tabContext = null) {
   function doExport(selectedOnly) {
     const rows = filteredSorted().filter(r => !selectedOnly || checked.has(r.paperId));
     if (rows.length === 0) return;
-    const payload = { papers: rows.map(r => ({ id: r.paperId, source: r.source })) };
-    const name = selectedOnly ? "cart-selected.json" : "cart-ids.json";
-    downloadText(JSON.stringify(payload, null, 2), name, "application/json");
+    // BibTeX needs the live snapshot DB (full reference fields aren't on the
+    // joined row). After a project load without a reconnected corpus there's
+    // nothing to pull — say so rather than emit empty/partial entries.
+    if (!hasSqliteText()) {
+      window.alert("BibTeX export needs the connected snapshot database. Re-open the dataset, then export.");
+      return;
+    }
+    const records = [];
+    const notes = [];
+    let missing = 0;
+    for (const r of rows) {
+      const rec = getNodeFullRecord(r.nodeId);
+      if (!rec) { missing++; continue; }
+      records.push(rec);
+      notes.push(r.source || null);
+    }
+    if (records.length === 0) return;
+    if (missing) console.warn(`[cart] BibTeX export: ${missing} paper(s) had no DB record and were skipped.`);
+    const name = selectedOnly ? "cart-selected.bib" : "cart.bib";
+    downloadText(formatBibtex(records, notes), name, "application/x-bibtex");
   }
 
   // Initial paint.

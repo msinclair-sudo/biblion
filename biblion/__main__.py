@@ -21,6 +21,7 @@ Common options
 """
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -1894,10 +1895,14 @@ class _SelectorError(Exception):
     """Bad selector arguments for build_selector()."""
 
 
-def _ids_from_file(path) -> list:
-    """Read an id list from a JSON file. Accepts a flat list ``[id, …]``, an
-    ``{"ids": [...]}`` object, or the toy's cart export
-    ``{"papers": [{"id": …}, …]}``. Raises _SelectorError on anything else."""
+def _ids_from_file(path, conn=None) -> list:
+    """Read an id list from a file. A ``.bib`` file is resolved as BibTeX
+    against the project DB (needs `conn`; see _ids_from_bib). Otherwise it's
+    read as JSON: a flat list ``[id, …]``, an ``{"ids": [...]}`` object, or the
+    toy's cart export ``{"papers": [{"id": …}, …]}``. Raises _SelectorError on
+    anything else."""
+    if str(path).lower().endswith(".bib"):
+        return _ids_from_bib(path, conn)
     try:
         data = json.loads(Path(path).read_text())
     except (OSError, ValueError) as e:
@@ -1918,11 +1923,92 @@ def _ids_from_file(path) -> list:
     return ids
 
 
-def build_selector(args) -> tuple:
+def _ids_from_bib(path, conn) -> list:
+    """Resolve a BibTeX file (e.g. the network-toy cart's export) to a list of
+    papers.id. Each @entry is matched to an existing paper by DOI, then citekey,
+    then a secondary identifier (arXiv eprint / ISSN / ISBN), then PubMed id —
+    the same key order import_bib uses, so a paper imported from a .bib resolves
+    back to itself. Entries that match nothing are reported and skipped.
+
+    `conn` is a (read-only) handle to the project snapshot DB; required because
+    the match needs its papers/identifiers tables. The cart .bib carries no
+    papers.id, so identity is recovered bibliographically — papers lacking any
+    shared identifier in the DB can't be resolved."""
+    from .modules.import_bib import parse_bib, _extract_doi
+    if conn is None:
+        raise _SelectorError(
+            "--ids-file: a .bib file resolves against the project DB, which "
+            "wasn't available")
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise _SelectorError(f"--ids-file: cannot read {path}: {e}")
+    entries = list(parse_bib(text))
+    if not entries:
+        raise _SelectorError(f"--ids-file: no BibTeX @entries in {path}")
+
+    def _q(sql, val):
+        # An older snapshot may lack a column/table (citekey, identifiers, …);
+        # treat that as "no match" rather than a hard failure.
+        try:
+            row = conn.execute(sql, (val,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
+
+    ids, seen, unresolved = [], set(), 0
+    for e in entries:
+        pid = None
+        doi = _extract_doi(e)
+        if doi:
+            pid = _q("SELECT id FROM papers WHERE doi = ?", doi)
+        if pid is None and e.citekey:
+            pid = _q("SELECT id FROM papers WHERE citekey = ?", e.citekey)
+        if pid is None:
+            cands = []
+            eprint, etype = e.get("eprint"), (e.get("eprinttype") or "").lower()
+            if eprint and etype:
+                cands.append((etype, eprint))
+            for scheme in ("issn", "isbn"):
+                v = e.get(scheme)
+                if v:
+                    cands.append((scheme, v))
+            for scheme, value in cands:
+                try:
+                    row = conn.execute(
+                        "SELECT paper_id FROM identifiers WHERE scheme = ? AND value = ?",
+                        (scheme, value)).fetchone()
+                except sqlite3.OperationalError:
+                    row = None
+                if row:
+                    pid = row[0]
+                    break
+        if pid is None and e.get("pmid"):
+            pid = _q("SELECT id FROM papers WHERE pubmed_id = ?", e.get("pmid"))
+        if pid is None:
+            unresolved += 1
+            continue
+        if pid not in seen:
+            seen.add(pid)
+            ids.append(pid)
+    if unresolved:
+        print(f"[biblion subset] --ids-file: {unresolved} of {len(entries)} "
+              f".bib entries matched no paper in the DB (skipped)")
+    if not ids:
+        raise _SelectorError(
+            f"--ids-file: none of the {len(entries)} .bib entries matched a "
+            f"paper (need an overlapping DOI / citekey / identifier)")
+    return ids
+
+
+def build_selector(args, conn=None) -> tuple:
     """Return (where, params) from exactly one of --seeds / --all / --year /
     --ids / --ids-file / --where. Shared by `export` and `subset make` so the two
     can't drift. Raises _SelectorError on misuse. (--where is free-form SQL — the
-    caller's trust boundary; only used by surfaces that expose it.)"""
+    caller's trust boundary; only used by surfaces that expose it.)
+
+    `conn` is passed through to _ids_from_file only for a ``.bib`` --ids-file,
+    whose entries are resolved to ids against the project DB."""
     seeds = bool(getattr(args, 'seeds', False))
     take_all = bool(getattr(args, 'all', False))
     year = getattr(args, 'year', None)
@@ -1946,7 +2032,7 @@ def build_selector(args) -> tuple:
             if not id_list:
                 raise _SelectorError("--ids was empty")
         else:
-            id_list = _ids_from_file(ids_file)
+            id_list = _ids_from_file(ids_file, conn)
         ph = ','.join('?' * len(id_list))
         return f"id IN ({ph})", tuple(id_list)
     return where, ()
@@ -1964,11 +2050,24 @@ def cmd_subset(args) -> int:
     sub = args.subset_cmd
 
     if sub == 'make':
+        # A .bib --ids-file is resolved to concrete ids against the snapshot DB
+        # (it carries no papers.id); other selectors don't touch the DB here.
+        conn = None
+        ids_file = getattr(args, 'ids_file', None)
+        if ids_file and str(ids_file).lower().endswith('.bib'):
+            if not snapshot_db.exists():
+                print(f"[biblion subset] snapshot DB not found: {snapshot_db} "
+                      f"(run `biblion advanced snapshot {dataset}` first)")
+                return 2
+            conn = sqlite3.connect(f"file:{snapshot_db}?mode=ro", uri=True)
         try:
-            where, params = build_selector(args)
+            where, params = build_selector(args, conn=conn)
         except _SelectorError as e:
             print(f"[biblion subset] {e}")
             return 2
+        finally:
+            if conn is not None:
+                conn.close()
         try:
             snapshot_mod.build_subset(snapshot_db, args.name, where, tuple(params),
                                       project_dir, dataset, label=args.label)
@@ -2199,8 +2298,9 @@ def _add_advanced_subcommands(sub) -> None:
     ss_make.add_argument('--year', type=int, default=None, help='A single publication year')
     ss_make.add_argument('--ids', type=str, default=None, help='Comma-separated papers.id list')
     ss_make.add_argument('--ids-file', type=str, default=None,
-        help='JSON file of ids: a flat list, {"ids":[...]}, or a cart export '
-             '{"papers":[{"id":...}]}')
+        help='A .bib file (e.g. the network-toy cart export) whose entries are '
+             'resolved to papers by DOI/citekey/identifier; or a JSON file of '
+             'ids: a flat list, {"ids":[...]}, or {"papers":[{"id":...}]}')
     ssubsub.add_parser('list', help='List subsets for the current project (default)')
     ss_rm = ssubsub.add_parser('remove', help='Delete a subset bundle')
     ss_rm.add_argument('name')

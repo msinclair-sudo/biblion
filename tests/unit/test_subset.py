@@ -108,6 +108,74 @@ def test_build_selector_ids_file(tmp_path):
         build_selector(_args(ids_file=str(tmp_path / "nope.json")))
 
 
+def _make_resolvable_snapshot(path):
+    """Snapshot whose papers carry a DOI / a citekey / an arXiv identifier, so a
+    .bib can be resolved back to each by a different key."""
+    conn = sqlite3.connect(str(path))
+    db.init_db(conn)
+    now = "2026-01-01T00:00:00Z"
+    rows = [
+        # id, title, doi,            citekey
+        (1, "P1", "10.1234/p1",      None),
+        (2, "P2", None,              "jones2019foo"),
+        (3, "P3", None,              None),            # resolved via arXiv id
+    ]
+    for pid, title, doi, citekey in rows:
+        conn.execute(
+            "INSERT INTO papers (id, title, abstract, year, doi, citekey, is_seed, "
+            "is_stub, is_rejected, discovery_count, created_at) "
+            "VALUES (?,?,?,?,?,?,0,0,0,1,?)",
+            (pid, title, "abs", 2021, doi, citekey, now))
+    conn.execute("INSERT INTO identifiers (paper_id, scheme, value, source) "
+                 "VALUES (3, 'arxiv', '2101.00003', 'test')")
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.unit
+def test_ids_from_bib_resolves_by_doi_citekey_identifier(tmp_path):
+    snap = tmp_path / "proj_snapshot.db"
+    _make_resolvable_snapshot(snap)
+    bib = tmp_path / "cart.bib"
+    bib.write_text(
+        "@article{p1key,\n  title = {P1},\n  doi = {10.1234/P1},\n}\n\n"      # DOI, case-insensitive
+        "@article{jones2019foo,\n  title = {P2},\n}\n\n"                      # citekey
+        "@article{p3key,\n  title = {P3},\n  eprint = {2101.00003},\n"
+        "  eprinttype = {arxiv},\n}\n\n"                                      # arXiv identifier
+        "@article{ghostkey,\n  title = {Nope},\n  doi = {10.9999/missing},\n}\n"  # unresolved -> skipped
+    )
+    conn = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    try:
+        where, params = build_selector(_args(ids_file=str(bib)), conn=conn)
+    finally:
+        conn.close()
+    assert where == "id IN (?,?,?)"
+    assert sorted(params) == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_ids_from_bib_needs_conn_and_errors_when_nothing_matches(tmp_path):
+    snap = tmp_path / "proj_snapshot.db"
+    _make_resolvable_snapshot(snap)
+    bib = tmp_path / "cart.bib"
+    bib.write_text("@article{x,\n  title = {Z},\n  doi = {10.9999/none},\n}\n")
+    # A .bib selector needs a DB connection.
+    with pytest.raises(_SelectorError):
+        build_selector(_args(ids_file=str(bib)))
+    # conn present but no entry matches -> error (not a silent empty subset).
+    conn = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    try:
+        with pytest.raises(_SelectorError):
+            build_selector(_args(ids_file=str(bib)), conn=conn)
+        # An entry-less .bib also errors.
+        empty = tmp_path / "empty.bib"
+        empty.write_text("% no entries here\n")
+        with pytest.raises(_SelectorError):
+            build_selector(_args(ids_file=str(empty)), conn=conn)
+    finally:
+        conn.close()
+
+
 @pytest.mark.unit
 def test_build_subset_slices_master(tmp_path):
     snap = tmp_path / "proj_snapshot.db"
