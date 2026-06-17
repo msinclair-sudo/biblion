@@ -7,8 +7,12 @@ API that drives the dataset picker and writes saves back to disk.
 
 No third-party deps — stdlib only, keeping the toy's "no build step" promise.
 
-Layout the server understands (rooted at this file's dir, network_toy/, whose
-`data` symlinks to the repo-root `data/`):
+The static app lives under this file's dir (network_toy/); datasets live in the
+repo-root `data/` dir (one level up). The server serves `/data/<...>` URLs from
+that repo-root dir directly (see Handler.translate_path), so no symlink between
+the two is needed.
+
+Layout the server understands:
 
     data/<dataset>/
       <dataset>_snapshot.db   embeddings.npy   paper_index.json   manifest.json
@@ -41,7 +45,10 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
+# Datasets live in the repo-root data/ dir (one level up from network_toy/),
+# not under network_toy/ itself. Resolved directly here so the toy needs no
+# network_toy/data symlink; /data/ URLs are mapped to this dir in the Handler.
+DATA = ROOT.parent / "data"
 _DEFAULT_PORT = int(os.environ.get("NETWORK_TOY_PORT", "8000"))
 
 # The four files that make a data/<id> dir a loadable dataset (see datasource/
@@ -141,9 +148,26 @@ def _safe_save_name(name):
 
 
 class Handler(SimpleHTTPRequestHandler):
-    # Serve static files from network_toy/ so /app/, /data/ (symlink) resolve.
+    # Static files (the /app/ ES-module tree) come from network_toy/; dataset
+    # files under /data/ come from the repo-root data/ dir (DATA). See
+    # translate_path — this split is what removes the need for a data symlink.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def translate_path(self, path):
+        # Map /data/<...> URLs onto DATA (repo-root data/) instead of ROOT.
+        # We temporarily swap self.directory and defer to the stdlib
+        # translate_path so its path-safety normalisation (which strips '..'
+        # segments) still applies — guarding against traversal out of DATA.
+        clean = urlparse(path).path
+        if clean == "/data" or clean.startswith("/data/"):
+            rel = clean[len("/data/"):]
+            saved, self.directory = self.directory, str(DATA)
+            try:
+                return super().translate_path("/" + rel)
+            finally:
+                self.directory = saved
+        return super().translate_path(path)
 
     # --- helpers -----------------------------------------------------------
 

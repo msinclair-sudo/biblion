@@ -3,8 +3,8 @@
 .env.*
 
 # Local research data + media — never push to the public repo. Anchored to the
-# repo root so the tracked network_toy/data -> ../data symlink is unaffected.
-# (The data/**/* rules below stay as a belt-and-braces net for sub-artifacts.)
+# repo root. (The data/**/* rules below stay as a belt-and-braces net for
+# sub-artifacts.)
 /data/
 /media/
 
@@ -32,8 +32,9 @@ network_toy/pending_changes.md
 # Local-only working dirs.
 network_toy/scratch/
 network_toy/saves/
-# Materialised real-data inputs. The data symlink (network_toy/data ->
-# ../data) stays tracked; only a real data/ dir is ignored.
+# Materialised real-data inputs. serve.py serves datasets from the repo-root
+# data/ dir directly (no network_toy/data symlink); ignore any stray
+# network_toy/data/ dir so it never gets committed.
 network_toy/data/
 
 # Generated network-toy snapshot/embedding artifacts (live next to the DBs

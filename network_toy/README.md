@@ -641,7 +641,8 @@ app/                              static page + ES modules
         panel-picker.js           panel types + saved validation runs (§6.19)
         layer-descriptors.js
     main.js                       boot + UI glue
-data -> ../data                   symlink to the repo-root data/ (gitignored)
+../data/                          the repo-root data/ dir (gitignored); serve.py
+                                  serves it at /data/ — no symlink needed
   <dataset>/                      one biblion corpus per dir (served at /data/<id>/)
     <dataset>_snapshot.db         snapshot the toy attaches (read-only)
     embeddings.npy                SPECTER2 vectors (n × 768, float32)

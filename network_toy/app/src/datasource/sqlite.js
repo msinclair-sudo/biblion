@@ -1,8 +1,8 @@
 // Real-data source backed by a biblion SQLite corpus, built by biblion itself:
 //   biblion advanced snapshot   -> <name>_snapshot.db + paper_index.json + ...
 //   biblion advanced embedding  -> embeddings.npy
-// The bundle lands next to the project DB at data/<name>/; the toy reaches it
-// because network_toy/data is a symlink to that repo-root data/ dir.
+// The bundle lands next to the project DB at the repo-root data/<name>/; the toy
+// reaches it because serve.py maps /data/ URLs onto that repo-root data/ dir.
 //
 // Unlike real.js (a pile of JSON/npy files), this source reads a single
 // `*_snapshot.db` snapshot in the browser via sql.js (WASM) and queries it on
@@ -44,9 +44,9 @@ const STRUCTURAL_WHERE =
 // id → {label, sqlitePath, embeddingsPath, indexPath}. No longer hardcoded:
 // the list is fetched from serve.py /api/datasets (which scans data/*/ for
 // loadable datasets), then this map is populated by datasetEntry()/loadDatasets().
-// Paths are derived from the id and resolved by the static server (rooted at
-// network_toy/, whose data/ symlinks to the repo-root data/). The DB is always
-// the snapshot copy (…_snapshot.db), never the live <name>.db.
+// Paths are derived from the id and resolved by serve.py, which serves /data/
+// URLs from the repo-root data/ dir. The DB is always the snapshot copy
+// (…_snapshot.db), never the live <name>.db.
 const DATASETS = {};
 
 // Build the per-dataset fetch URLs from its id. Centralised so the picker and

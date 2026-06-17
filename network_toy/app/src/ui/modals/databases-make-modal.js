@@ -52,7 +52,7 @@ export function openDatabasesMakeModal(descriptor) {
     cmds.textContent =
       `biblion advanced snapshot ${id}\n` +
       `biblion advanced embedding ${id}\n` +
-      `# bundle lands at network_toy/data/${id}/`;
+      `# bundle lands at data/${id}/`;
   };
   renderCmds();
   idInput.addEventListener("input", renderCmds);

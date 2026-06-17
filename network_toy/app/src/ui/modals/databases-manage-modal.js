@@ -128,7 +128,7 @@ function manageRow(ds, activeId, descriptor, handle, onRemove) {
     const ok = window.confirm(
       `Remove "${ds.label || ds.id}" from this session?\n\n` +
       `This only hides it here — to delete the corpus, remove ` +
-      `network_toy/data/${ds.id}/ on disk.`
+      `data/${ds.id}/ on disk.`
     );
     if (ok) onRemove();
   });
