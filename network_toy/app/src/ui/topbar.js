@@ -16,7 +16,8 @@ import { deserialiseFile }  from "../persistence/deserialise.js";
 import { saveProject as apiSaveProject } from "../persistence/projects-api.js";
 import { reconnectSqliteCorpus } from "../datasource/sqlite.js";
 import { enqueueJob }       from "./queue.js";
-import { importWorkflow } from "./workflow.js";
+import { importWorkflow, getRootStep, getStepChildren } from "./workflow.js";
+import { exportRecipe, applyRecipe } from "../persistence/recipe.js";
 import { projectStepIntoLegacyState } from "./workflow-projection.js";
 import { getLayerDescriptor } from "./modals/layer-descriptors.js";
 import { openDataSourceModal } from "./modals/data-source-modal.js";
@@ -40,6 +41,9 @@ const MENUS = [
       { label: "Open…",         action: () => openSave() },
       { divider: true },
       { label: "Import .zip…",  action: () => loadProject() },
+      { divider: true },
+      { label: "Export recipe…", action: () => exportRecipeAction() },
+      { label: "Apply recipe…",  action: () => applyRecipeAction() },
     ],
   },
   {
@@ -429,6 +433,64 @@ function loadProject() {
     input.remove();
     if (!file) return;
     rehydrateFromBlob(file, { displayName: file.name });
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+// Export the current workflow's "method" (card sequence + params, pruned at
+// cluster picking) as a portable .recipe.json. Guarded at runtime since the
+// File menu items are static (no per-item dynamic enable).
+function exportRecipeAction() {
+  if (!getRootStep()) {
+    window.alert("Build a workflow first — there's no method to export yet.");
+    return;
+  }
+  try {
+    exportRecipe();
+  } catch (e) {
+    console.error("[topbar] export recipe failed:", e);
+    window.alert(`Export recipe failed: ${(e && e.message) || e}`);
+  }
+}
+
+// Pick a .recipe.json and replay its compute steps onto the loaded dataset.
+function applyRecipeAction() {
+  const root = getRootStep();
+  if (!root || root.type !== "data") {
+    window.alert("Load a dataset first (Data ▸ Open dataset…), then apply the recipe.");
+    return;
+  }
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json,application/json";
+  input.style.display = "none";
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    input.remove();
+    if (!file) return;
+    let recipe;
+    try {
+      recipe = JSON.parse(await file.text());
+    } catch {
+      window.alert("That file isn't valid JSON.");
+      return;
+    }
+    if (!recipe || recipe.schema !== "network_toy.recipe") {
+      window.alert("That file isn't a network_toy recipe.");
+      return;
+    }
+    if (getStepChildren(root.id).length > 0 &&
+        !window.confirm("This dataset already has analysis cards. "
+          + "Apply the recipe on top, adding new branches?")) {
+      return;
+    }
+    try {
+      await applyRecipe(recipe);
+    } catch (e) {
+      console.error("[topbar] apply recipe failed:", e);
+      window.alert(`Apply recipe failed: ${(e && e.message) || e}`);
+    }
   });
   document.body.appendChild(input);
   input.click();
