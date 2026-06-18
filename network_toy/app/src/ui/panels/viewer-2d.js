@@ -30,6 +30,9 @@ export const SINGLETON = true;
 
 const DEFAULT_NODE_R = 3;
 
+// Node-radius multiplier driven by the viewer's size slider (state.view.nodeScale).
+function nodeScale() { return (getState().view || {}).nodeScale ?? 1; }
+
 export function mount(container, _state, config = {}, tabContext = null) {
   let colourMode = config.colourMode || DEFAULT_COLOUR_MODE;
 
@@ -106,7 +109,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
       .width(Math.max(1, rect.width))
       .height(Math.max(1, rect.height))
       .backgroundColor("#06080c")
-      .nodeRelSize(DEFAULT_NODE_R)
+      .nodeRelSize(DEFAULT_NODE_R * nodeScale())
       .nodeColor(nodeColour)
       .nodeVisibility(ghostVisible)
       .nodeCanvasObjectMode(ghostMode)
@@ -183,7 +186,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   function ghostMode(n) { return n.isGhost ? "replace" : undefined; }
   function ghostCanvas(n, ctx, scale) {
     if (!n.isGhost) return;
-    const R = DEFAULT_NODE_R;
+    const R = DEFAULT_NODE_R * nodeScale();
     const col = nodeColourFor(n, getState(), colourMode);
     const lw = Math.max(0.4, 0.7 / (scale || 1));
     ctx.save();
@@ -228,6 +231,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let lastPinSig = pinnedSignature(getState());
   let lastTagSig = tagsSignature(getState());
   let lastShowGhosts = ghostsShown();
+  let lastNodeScale = nodeScale();
 
   return {
     update(s) {
@@ -256,12 +260,19 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const tagChanged = tagSig !== lastTagSig;
       const showGhosts = (s.view || {}).showGhosts !== false;
       const ghostChanged = showGhosts !== lastShowGhosts;
-      if (selChanged || hlChanged || pinChanged || tagChanged || ghostChanged) {
+      const ns = (s.view || {}).nodeScale ?? 1;
+      const nodeScaleChanged = ns !== lastNodeScale;
+      if (selChanged || hlChanged || pinChanged || tagChanged || ghostChanged || nodeScaleChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
         lastTagSig    = tagSig;
         lastShowGhosts = showGhosts;
+        if (nodeScaleChanged) {
+          lastNodeScale = ns;
+          // Re-render at the new radius; ghost hatch reads the scale on repaint.
+          Graph.nodeRelSize(DEFAULT_NODE_R * ns);
+        }
         if (tagChanged) colourOverlay.refreshOptions();
         repaintSelection();
       }

@@ -93,6 +93,8 @@ function mountEdgeControls() {
   const skel         = document.getElementById("ec-structure");
   const skelCol      = document.getElementById("ec-structure-colour");
   const ghosts       = document.getElementById("ec-ghosts");
+  const nodeScale    = document.getElementById("ec-node-scale");
+  const nodeScaleRead= document.getElementById("ec-node-scale-readout");
   if (!cite || !citOpa || !arrows || !base || !baseDens || !skel) return;
 
   // Seed widgets from state.
@@ -107,8 +109,10 @@ function mountEdgeControls() {
   skel.checked       = !!v0.showStructure;
   if (skelCol)       skelCol.value    = v0.structureColour || "#5dd39e";
   if (ghosts)        ghosts.checked   = v0.showGhosts !== false;
+  if (nodeScale)     nodeScale.value  = String(v0.nodeScale ?? 1);
   if (citOpaRead)    citOpaRead.textContent   = (+v0.citOpacity).toFixed(2);
   if (baseDensRead)  baseDensRead.textContent = (+v0.baseDensity).toFixed(3);
+  if (nodeScaleRead) nodeScaleRead.textContent = (+(v0.nodeScale ?? 1)).toFixed(2);
 
   cite.addEventListener("change",     () => setView({ showCitations: cite.checked }));
   arrows.addEventListener("change",   () => setView({ citArrows:     arrows.checked }));
@@ -124,6 +128,11 @@ function mountEdgeControls() {
     const v = +baseDens.value;
     setView({ baseDensity: v });
     if (baseDensRead) baseDensRead.textContent = v.toFixed(3);
+  });
+  if (nodeScale) nodeScale.addEventListener("input", () => {
+    const v = +nodeScale.value;
+    setView({ nodeScale: v });
+    if (nodeScaleRead) nodeScaleRead.textContent = v.toFixed(2);
   });
   if (citCol)  citCol.addEventListener("input",  () => setView({ citColour:       citCol.value }));
   if (baseCol) baseCol.addEventListener("input", () => setView({ baseColour:      baseCol.value }));
@@ -144,6 +153,10 @@ function mountEdgeControls() {
     if (Math.abs(+baseDens.value - v.baseDensity) > 1e-6) {
       baseDens.value = String(v.baseDensity);
       if (baseDensRead) baseDensRead.textContent = (+v.baseDensity).toFixed(3);
+    }
+    if (nodeScale && Math.abs(+nodeScale.value - (v.nodeScale ?? 1)) > 1e-6) {
+      nodeScale.value = String(v.nodeScale ?? 1);
+      if (nodeScaleRead) nodeScaleRead.textContent = (+(v.nodeScale ?? 1)).toFixed(2);
     }
     if (citCol  && v.citColour       && citCol.value.toLowerCase()  !== v.citColour.toLowerCase())       citCol.value  = v.citColour;
     if (baseCol && v.baseColour      && baseCol.value.toLowerCase() !== v.baseColour.toLowerCase())      baseCol.value = v.baseColour;

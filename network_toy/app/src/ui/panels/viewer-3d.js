@@ -47,6 +47,10 @@ const COLOUR_KEY = {
   "structure-edge":"structureColour",
 };
 
+// Base sphere radius before the size-slider multiplier (state.view.nodeScale).
+const BASE_NODE_REL = 2;
+function nodeScale() { return (getState().view || {}).nodeScale ?? 1; }
+
 export const ID = "viewer-3d";
 export const LABEL = "3D viewer";
 export const DESCRIPTION = "Live blend visualisation; per-frame interpolation between basePos and aligned citation layout.";
@@ -184,7 +188,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
       .width(Math.max(1, rect.width))
       .height(Math.max(1, rect.height))
       .backgroundColor("#06080c")
-      .nodeRelSize(2)
+      .nodeRelSize(BASE_NODE_REL * nodeScale())
       .nodeOpacity(1.0)
       .cooldownTicks(Infinity)        // keep ticking forever; blend needs it
       .warmupTicks(60);
@@ -442,6 +446,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   if (Graph) rebuildData();
   lastDataRevision = getState().engineRevision;
   lastFusionBlend  = getState().fusionBlend;
+  let lastNodeScale = getState().view?.nodeScale ?? 1;
   let lastViewSig  = viewSignature(getState().view);
   // J25: highlight-channel fingerprint — a change here repaints colours via the
   // cheap nodeColor accessor (no rebuildData / engine recompute).
@@ -488,6 +493,14 @@ export function mount(container, _state, config = {}, tabContext = null) {
         lastFusionBlend = s.fusionBlend;
         try { Graph.d3ReheatSimulation(); }   catch (_) {}
         try { Graph.resumeAnimation();   }   catch (_) {}
+      }
+
+      // Node size-slider change: live-resize spheres, no graph rebuild.
+      const ns = s.view?.nodeScale ?? 1;
+      if (ns !== lastNodeScale) {
+        lastNodeScale = ns;
+        try { Graph.nodeRelSize(BASE_NODE_REL * ns); } catch (_) {}
+        try { Graph.refresh(); } catch (_) {}
       }
 
       // Selection-only OR highlight-only change: re-paint colours, no rebuild.
