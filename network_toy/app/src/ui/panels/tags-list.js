@@ -119,7 +119,7 @@ export function mount(container, _state, _config = {}, _tabContext = null) {
       if (tagsSignature(s) !== lastSig) render();
     },
     destroy() {
-      if (activeTag) clearHighlight("tags");
+      if (activeTag) { clearHighlight("tags"); activeTag = null; }
       container.innerHTML = "";
     },
   };

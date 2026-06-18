@@ -321,6 +321,19 @@ function renderActivePanel(slot, slotEl) {
 
   // Detach (keep-alive) or tear down the previous instance for this slot.
   const prev = slotInstances.get(slot);
+
+  // Re-entrancy guard for the teardown path: a prev.destroy() that writes
+  // state (e.g. tags-list clearing its "tags" highlight channel) re-enters
+  // the subscribe callback synchronously, BEFORE we've updated this slot's
+  // tracker below. Pre-advance the tracker to the desired slotState so that
+  // re-entrant pass sees panelsRef === desired (and instance null) and skips
+  // re-rendering this slot — otherwise we recurse and double-mount, wiping
+  // the freshly-mounted panel's DOM. Mirrors the pre-mount guard further down.
+  slotInstances.set(slot, {
+    panelsRef: slotState, instance: null,
+    tabId: slotState.activeTabId, keepAlive: false,
+  });
+
   if (prev && prev.instance) {
     // A keep-alive panel is only DETACHED if its tab still exists (i.e. we
     // switched away). If the tab was closed, fall through to real teardown.
