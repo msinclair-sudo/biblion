@@ -450,19 +450,30 @@ export function mount(container, _state, config = {}, tabContext = null) {
     labWrap.appendChild(labHead);
     const byMethod = (info && info.byMethod) || {};
 
+    // Which method's value renders here. The "combined" pick (the default) now
+    // shows the FULL stratified band breakdown from the best available banded
+    // method instead of combine()'s collapsed two-term one-liner — the card has
+    // the width for it, and the fine-grain bands are the point of the panel. We
+    // only fall back to the combined string when no banded method is present.
+    const BANDED = ["keybertStratified", "cTfidfStratified", "tfidfStratified"];
+    let displayMethod = labelMethod;
     if (labelMethod === COMBINED) {
+      displayMethod = BANDED.find(id => byMethod[id] && byMethod[id].bands) || COMBINED;
+    }
+
+    if (displayMethod === COMBINED) {
       const li = document.createElement("div");
       li.className = "scoring-label-bullet" + (info && info.combined ? "" : " none");
       li.textContent = `• ${(info && info.combined) || "(unlabelled)"}`;
       labWrap.appendChild(li);
-    } else if (!byMethod[labelMethod]) {
+    } else if (!byMethod[displayMethod]) {
       const li = document.createElement("div");
       li.className = "scoring-label-bullet none";
       li.textContent = "• (no label for this method)";
       labWrap.appendChild(li);
     } else {
-      const v = byMethod[labelMethod];
-      const name = METHOD_LABEL[labelMethod] || labelMethod;
+      const v = byMethod[displayMethod];
+      const name = METHOD_LABEL[displayMethod] || displayMethod;
       // banded (stratified) labels render one band per line for readability.
       if (v && v.bands) {
         const wrap = document.createElement("div");
@@ -507,12 +518,11 @@ export function mount(container, _state, config = {}, tabContext = null) {
       }
       left.appendChild(stars);
     }
-    block.appendChild(left);
-
-    // metrics slot (right). Straddle metric from bridge analysis, surfaced
-    // next to the score so the manual 1–5 is made with the geometry in view.
-    // dominantFraction = how much of the cluster sits in its single biggest
-    // parent; straddle = 1 − that. Bridges (span ≥ 2 under τ) are flagged.
+    // metrics slot — now at the bottom-left of the card (was a fixed-width right
+    // column that squeezed the labels). Straddle metric from bridge analysis,
+    // surfaced under the score so the manual 1–5 is made with the geometry in
+    // view. dominantFraction = how much of the cluster sits in its single
+    // biggest parent; straddle = 1 − that. Bridges (span ≥ 2 under τ) are flagged.
     const metrics = document.createElement("div");
     metrics.className = "scoring-metrics"
       + (metric && metric.isBridge ? " is-bridge" : "");
@@ -526,7 +536,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
     } else {
       metrics.textContent = "—";
     }
-    block.appendChild(metrics);
+    left.appendChild(metrics);
+    block.appendChild(left);
 
     return block;
   }

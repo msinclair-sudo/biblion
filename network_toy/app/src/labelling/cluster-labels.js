@@ -346,7 +346,7 @@ function runKeyBERT(cr, ctx, membersArg) {
 // live in the sparse upper tail and that axis is logarithmic: we log-space the
 // four non-signature bands over [2 .. maxDf]. See scratch/label_overlap/ for the
 // analysis that motivated this (quantiles collapse, flat ratios don't transfer).
-export const STRAT_PER_BAND = 3;
+export const STRAT_PER_BAND = 6;
 const STRAT_BANDS = ["anchor", "broad", "mid", "specific", "signature"];
 
 // Common non-English (Romance) function words that survive the English-only
