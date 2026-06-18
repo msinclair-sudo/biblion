@@ -46,6 +46,15 @@ test("bibtexTypeFor maps real pub_type strings; unknown -> misc", () => {
   assert.equal(bib.bibtexTypeFor(null), "misc");
 });
 
+test("keywords field carries tags (and is omitted when none)", () => {
+  const withKw = bib.formatBibtexRecord({ ...REC, keywords: ["methods", "to-read"] }, "k");
+  assert.ok(withKw.includes("keywords    = {methods, to-read}"));
+  const noKw = bib.formatBibtexRecord({ ...REC, keywords: [] }, "k");
+  assert.ok(!noKw.includes("keywords"));
+  const undef = bib.formatBibtexRecord(REC, "k");   // REC has no keywords key
+  assert.ok(!undef.includes("keywords"));
+});
+
 test("formatBibtexRecord emits a valid @article entry with biblatex fields", () => {
   const out = bib.formatBibtexRecord(REC, "smith2021soil");
   assert.ok(out.startsWith("@article{smith2021soil,\n"));

@@ -1340,6 +1340,34 @@ tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--ac
   white-space: nowrap;
 }
 
+/* ── tags-list panel ──────────────────────────────────────────────── */
+
+.tags-list { overflow-y: auto; min-height: 0; flex: 1; }
+.tags-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  cursor: default;
+}
+.tags-row-active { background: var(--bg-2); }
+.tags-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+.tags-name { flex: 1; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tags-name:hover { color: var(--accent, #6cf); }
+.tags-count {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
 /* ── viewer-3d empty state ────────────────────────────────────────── */
 
 .viewer-3d-empty {

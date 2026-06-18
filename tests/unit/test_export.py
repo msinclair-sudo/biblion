@@ -92,6 +92,54 @@ class TestBibtexEmission:
         assert out.rstrip().endswith('ER  -')
 
 
+class TestTagsExport:
+    """User tags (paper_tags table) surface as BibTeX keywords / RIS KW, unioned
+    with any long-tail field_observations keywords."""
+
+    def test_paper_tags_emit_as_keywords(self, tmp_path, db_conn, insert_paper):
+        pid = insert_paper(doi='10.1/t', pub_type='article', title='Tagged',
+                           year=2021, authors=json.dumps(['Vega, Ana']))
+        db_conn.execute(
+            "INSERT INTO paper_tags (paper_id, tag, added_at, added_by) "
+            "VALUES (?, 'to-read', datetime('now'), 'network_toy')", (pid,))
+        db_conn.execute(
+            "INSERT INTO paper_tags (paper_id, tag, added_at, added_by) "
+            "VALUES (?, 'methods', datetime('now'), 'cli')", (pid,))
+        db_conn.commit()
+        out = tmp_path / 'tagged.bib'
+        export(db_conn, out, 'bib', '1=1', ())
+        text = out.read_text()
+        # paper_tags ORDER BY tag -> methods, to-read
+        assert 'keywords    = {methods, to-read}' in text
+
+    def test_keywords_union_with_field_observations(self, tmp_path, db_conn, insert_paper):
+        pid = insert_paper(doi='10.2/t', pub_type='article', title='Both',
+                           year=2021, authors=json.dumps(['Vega, Ana']))
+        db_conn.execute(
+            "INSERT INTO field_observations "
+            "(paper_id, field, value, raw_value, source, observed_at) "
+            "VALUES (?, 'keywords', 'soil', 'soil', 'bib:t', datetime('now'))", (pid,))
+        db_conn.execute(
+            "INSERT INTO paper_tags (paper_id, tag, added_at, added_by) "
+            "VALUES (?, 'to-read', datetime('now'), 'network_toy')", (pid,))
+        db_conn.commit()
+        out = tmp_path / 'union.bib'
+        export(db_conn, out, 'bib', '1=1', ())
+        kw_line = next(l for l in out.read_text().splitlines() if 'keywords' in l)
+        assert 'soil' in kw_line and 'to-read' in kw_line     # union, not overwrite
+
+    def test_tags_as_ris_kw_lines(self, tmp_path, db_conn, insert_paper):
+        pid = insert_paper(doi='10.3/t', pub_type='article', title='RisTagged',
+                           year=2021, authors=json.dumps(['Vega, Ana']))
+        db_conn.execute(
+            "INSERT INTO paper_tags (paper_id, tag, added_at, added_by) "
+            "VALUES (?, 'fieldwork', datetime('now'), 'network_toy')", (pid,))
+        db_conn.commit()
+        out = tmp_path / 'tagged.ris'
+        export(db_conn, out, 'ris', '1=1', ())
+        assert 'KW  - fieldwork' in out.read_text()
+
+
 class TestExportRoundTrip:
     def test_bib_round_trip(self, tmp_path, db_conn, insert_paper):
         _populate(db_conn, insert_paper)

@@ -10,6 +10,11 @@
 //
 // See doc/ui.md §6.
 
+// Tags write through to the live project DB; these are the only cross-module
+// imports state.js needs (neither imports state.js back, so no cycle).
+import { getActiveDatasetId } from "../datasource/sqlite.js";
+import { writeTags, loadTags } from "../persistence/projects-api.js";
+
 const state = {
   // ── data source ──────────────────────────────────────────────
   // mode mirrors activeAlgorithm.dataSource (kept for backward-compat
@@ -243,6 +248,16 @@ const state = {
   // cart panel joins richer per-node data at render time, so nothing heavy is
   // stored here. Persisted (SCHEMA_VERSION 3).
   cart: [],
+  // ── tags ─────────────────────────────────────────────────────
+  // User-applied tags on papers, keyed by paperId (the DB's identity), value an
+  // array of tag strings: { [paperId]: ["methods", "to-read"] }. Scoped to the
+  // active dataset's project. Loaded fresh from the live project DB on dataset
+  // open (projects-api.loadTags); the mutators below update this optimistically
+  // AND write through to that DB. Annotation state like pinnedNodes — mutators
+  // do NOT bump engineRevision; the viewer repaints via the colour accessor.
+  // Persisted (PASS_THROUGH_KEYS) for offline-save fidelity; the DB stays the
+  // source of truth on reload.
+  tags: {},
   filter: null,
   // Fusion-comparison slider (Layer 1.5 A/B). Interpolates basePos
   // between pre-fusion (semantic-only) and post-fusion (citation-aware)
@@ -491,6 +506,111 @@ export function clearCart() {
   if (state.cart.length) update({ cart: [] });
 }
 
+// ── Tag helpers ─────────────────────────────────────────────────────
+// Tags are keyed by paperId and write through to the active dataset's live
+// project DB. The map is always REPLACED (never mutated in place) so the colour
+// resolver can memoise on its identity and rollback is a single update().
+
+// Replace the whole tags map from a DB load. DB JSON keys are strings; normalise
+// to Number keys and drop empty arrays so `state.tags` is uniform.
+export function setTagsFromDb(map) {
+  const next = {};
+  for (const k in (map || {})) {
+    const arr = map[k];
+    if (Array.isArray(arr) && arr.length) next[Number(k)] = arr.slice();
+  }
+  update({ tags: next });
+}
+
+// Add `tag` to each paperId. Optimistic: state updates first, then POSTs to
+// serve.py; on failure the prior map is restored and onError (if given) is
+// called. Returns the number of (paperId) entries that gained the tag.
+export function addTag(paperIds, tag, { onError } = {}) {
+  const clean = String(tag || "").trim();
+  if (!clean) return 0;
+  const prev = state.tags;
+  const next = { ...prev };
+  const adds = [];
+  for (const pid of paperIds) {
+    if (pid == null) continue;
+    const cur = next[pid] ? next[pid].slice() : [];
+    if (cur.includes(clean)) continue;
+    cur.push(clean);
+    next[pid] = cur;
+    adds.push({ paperId: pid, tag: clean });
+  }
+  if (adds.length === 0) return 0;
+  update({ tags: next });
+  const ds = getActiveDatasetId();
+  if (ds) {
+    writeTags(ds, { adds }).catch((e) => {
+      update({ tags: prev });                 // rollback to pre-add map
+      if (onError) onError(e); else console.error("[tags] add failed:", e);
+    });
+  }
+  return adds.length;
+}
+
+// Sync state.tags with the active dataset's live DB. Call after a dataset
+// becomes active (ingest / project reconnect): fetches all tags fresh and
+// replaces the map. With no active sqlite corpus (toy data, or after switching
+// away) it clears tags to {}. Fire-and-forget — never blocks ingest; a fetch
+// failure (serve.py down) leaves the existing/persisted tags in place.
+export function refreshTagsForActiveDataset() {
+  const ds = getActiveDatasetId();
+  if (!ds) { setTagsFromDb({}); return; }
+  loadTags(ds).then(setTagsFromDb).catch((e) => {
+    console.warn("[tags] could not load from DB:", e.message || e);
+  });
+}
+
+// Remove `tag` from one paper (optimistic + write-through, symmetric to addTag).
+export function removeTag(paperId, tag, { onError } = {}) {
+  const prev = state.tags;
+  const cur = prev[paperId] || [];
+  if (!cur.includes(tag)) return;
+  const next = { ...prev };
+  const rem = cur.filter((t) => t !== tag);
+  if (rem.length) next[paperId] = rem; else delete next[paperId];
+  update({ tags: next });
+  const ds = getActiveDatasetId();
+  if (ds) {
+    writeTags(ds, { removes: [{ paperId, tag }] }).catch((e) => {
+      update({ tags: prev });
+      if (onError) onError(e); else console.error("[tags] remove failed:", e);
+    });
+  }
+}
+
+// Remove `tag` from EVERY paper that carries it, in one optimistic update +
+// one batched write-through (so deleting a tag used on many papers is a single
+// POST). Used by the tags-list panel's remove control.
+export function removeTagEverywhere(tag, { onError } = {}) {
+  const prev = state.tags;
+  const next = {};
+  const removes = [];
+  for (const pid in prev) {
+    const id = Number(pid);
+    if (prev[pid].includes(tag)) {
+      const rem = prev[pid].filter((t) => t !== tag);
+      if (rem.length) next[id] = rem;        // drop empties
+      removes.push({ paperId: id, tag });
+    } else {
+      next[id] = prev[pid];
+    }
+  }
+  if (removes.length === 0) return 0;
+  update({ tags: next });
+  const ds = getActiveDatasetId();
+  if (ds) {
+    writeTags(ds, { removes }).catch((e) => {
+      update({ tags: prev });
+      if (onError) onError(e); else console.error("[tags] remove-all failed:", e);
+    });
+  }
+  return removes.length;
+}
+
 // ── Panel/tab helpers ──────────────────────────────────────────────
 // Slot shape: { activeTabId, tabs: [{ id, type, config }] }
 // Each tab has a unique id within the slot; close removes by id and
@@ -536,6 +656,18 @@ export function setActiveTab(slot, tabId) {
   update({
     panels: { ...state.panels, [slot]: { ...cur, activeTabId: tabId } },
   });
+}
+
+// Open the tags-list panel (singleton) in the secondary slot, or focus it if
+// already open. Called when the first tag of a session is applied. Lives here
+// (not in panel-system) so panels can trigger it without importing panel-system
+// — that would form a panel → panel-system → registry → panel cycle.
+export function autoOpenTagsListPanel() {
+  const slot = "secondary";
+  const cur = state.panels[slot];
+  const existing = cur && cur.tabs && cur.tabs.find(t => t.type === "tags-list");
+  if (existing) { setActiveTab(slot, existing.id); return existing.id; }
+  return addTab(slot, "tags-list", {});
 }
 
 export function setTabConfig(slot, tabId, partialConfig) {

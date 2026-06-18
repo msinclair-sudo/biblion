@@ -134,6 +134,23 @@ CREATE INDEX IF NOT EXISTS idx_identifiers_scheme_value
     ON identifiers(scheme, value);
 
 -- ---------------------------------------------------------------------------
+-- User-applied tags (network_toy Selected-papers panel; biblion CLI).
+-- NOT part of the merge substrate: the MergeWriter never reads or writes this
+-- table, so there is no field-resolution contention with it — a separate writer
+-- (serve.py) updates it directly, taking at most a brief WAL writer-lock wait.
+-- Copied into every snapshot like any other table; biblion export emits these
+-- as BibTeX keywords. PK makes re-tagging idempotent (INSERT OR IGNORE).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS paper_tags (
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    tag      TEXT    NOT NULL,
+    added_at TEXT    NOT NULL,
+    added_by TEXT,                             -- 'network_toy' | 'cli' | NULL
+    PRIMARY KEY (paper_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_tags_tag ON paper_tags(tag);
+
+-- ---------------------------------------------------------------------------
 -- Citation graph edges.
 -- citing → cited.
 -- ---------------------------------------------------------------------------

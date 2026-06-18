@@ -9,7 +9,7 @@
 
 import {
   getState, subscribe, setProjectName, update,
-  addTab, setActiveTab,
+  addTab, setActiveTab, refreshTagsForActiveDataset,
 } from "./state.js";
 import { serialiseState }   from "../persistence/serialise.js";
 import { deserialiseFile }  from "../persistence/deserialise.js";
@@ -392,6 +392,9 @@ export function rehydrateFromBlob(blobOrFile, { displayName, datasetId } = {}) {
           await reconnectSqliteCorpus(dsId, nodes);
           // Bump so the metadata-joining panels (cart / selected-papers) rejoin.
           update({ engineRevision: getState().engineRevision + 1 });
+          // Sync tags from the (now reopened) live DB — DB is the source of
+          // truth, overriding any tags carried in the loaded save.
+          refreshTagsForActiveDataset();
         }
       } catch (e) {
         console.warn("[topbar] sqlite reconnect failed (paper metadata unavailable):", e);

@@ -323,12 +323,15 @@ export function mount(container, _state, config = {}, tabContext = null) {
       window.alert("BibTeX export needs the connected snapshot database. Re-open the dataset, then export.");
       return;
     }
+    const tagsMap = getState().tags || {};
     const records = [];
     const notes = [];
     let missing = 0;
     for (const r of rows) {
       const rec = getNodeFullRecord(r.nodeId);
       if (!rec) { missing++; continue; }
+      const t = tagsMap[r.paperId];           // user tags → BibTeX keywords
+      if (t && t.length) rec.keywords = t.slice();
       records.push(rec);
       notes.push(r.source || null);
     }

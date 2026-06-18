@@ -11,6 +11,7 @@
 
 import {
   getState, togglePinnedNode, clearPinnedNodes, setTabConfig,
+  addTag, autoOpenTagsListPanel,
 } from "../state.js";
 import {
   selectedNodeIds, highlightSignature, pinnedSignature,
@@ -78,6 +79,36 @@ export function mount(container, _state, config = {}, tabContext = null) {
   bar.appendChild(colsBtn);
 
   const clearPinsBtn = mkBtn(bar, "Clear pins", () => clearPinnedNodes());
+
+  // ── tagging ──────────────────────────────────────────────────────
+  // Type a tag name, then apply it to all listed papers or just the
+  // tick-marked (pinned) ones. Tags write through to the project's live DB.
+  const tagInput = document.createElement("input");
+  tagInput.className = "cart-filter";        // reuse styling
+  tagInput.type = "text";
+  tagInput.placeholder = "tag name…";
+  bar.appendChild(tagInput);
+
+  function applyTag(rows) {
+    const tag = tagInput.value.trim();
+    if (!tag || rows.length === 0) return;
+    const hadTags = Object.keys(getState().tags || {}).length > 0;
+    const paperIds = rows.map(r => r.paperId).filter(p => p != null);
+    const n = addTag(paperIds, tag, {
+      onError: (e) => window.alert(
+        "Tag write failed (the dataset may be snapshot-only, or the DB is busy): "
+        + (e.message || e)),
+    });
+    if (n > 0 && !hadTags) autoOpenTagsListPanel();   // first tag → open the list
+    tagInput.value = "";
+    updateCount();
+  }
+
+  const tagAllBtn = mkBtn(bar, "Tag all", () => applyTag(filteredSorted()));
+  const tagTickBtn = mkBtn(bar, "Tag tick-marked", () => {
+    const pinned = getState().pinnedNodes;
+    applyTag(filteredSorted().filter(r => pinned.has(r.nodeId)));
+  });
 
   const countEl = document.createElement("span");
   countEl.className = "cart-count";
@@ -279,6 +310,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const filt = filterText && shown !== n ? `, ${shown} shown` : "";
     countEl.textContent = `${n} selected${filt}${pins ? `, ${pins} pinned white` : ""}`;
     clearPinsBtn.disabled = pins === 0;
+    tagAllBtn.disabled = shown === 0;
+    tagTickBtn.disabled = pins === 0;
   }
 
   function renderTable() {

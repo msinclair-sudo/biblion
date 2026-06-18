@@ -30,6 +30,8 @@ const PASS_THROUGH_KEYS = [
   "panels",
   "selection",
   "cart",
+  "tags",          // user tags {paperId:[tag]} — DB is source of truth on reload;
+                   // this copy is offline-save fidelity when serve.py is unreachable
   "filter",
   "fusionBlend",
   "bridgeConfig",

@@ -19,7 +19,7 @@ import ForceGraph from "force-graph";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive, pinnedSignature,
+  anyHighlightActive, pinnedSignature, tagsSignature,
 } from "../viewer-shared/colour-modes.js";
 
 export const ID = "viewer-2d";
@@ -188,6 +188,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // the cheap nodeColor accessor (no rebuildData).
   let lastHlSig = highlightSignature(getState());
   let lastPinSig = pinnedSignature(getState());
+  let lastTagSig = tagsSignature(getState());
 
   return {
     update(s) {
@@ -199,10 +200,11 @@ export function mount(container, _state, config = {}, tabContext = null) {
         lastSelection = s.selection;
         lastHlSig = highlightSignature(s);
         lastPinSig = pinnedSignature(s);
+        lastTagSig = tagsSignature(s);
         colourOverlay.refreshOptions();
         return;
       }
-      // Selection-only OR highlight-only OR pin-only change: re-paint colours.
+      // Selection-only OR highlight-only OR pin-only OR tag-only change: repaint.
       const selChanged =
         !lastSelection ||
         lastSelection.type !== s.selection.type ||
@@ -211,10 +213,14 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const hlChanged = hlSig !== lastHlSig;
       const pinSig = pinnedSignature(s);
       const pinChanged = pinSig !== lastPinSig;
-      if (selChanged || hlChanged || pinChanged) {
+      const tagSig = tagsSignature(s);
+      const tagChanged = tagSig !== lastTagSig;
+      if (selChanged || hlChanged || pinChanged || tagChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
+        lastTagSig    = tagSig;
+        if (tagChanged) colourOverlay.refreshOptions();
         repaintSelection();
       }
     },

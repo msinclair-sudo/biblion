@@ -25,7 +25,7 @@ import { buildBaseEdges }                   from "../../base-edges.js";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive, pinnedSignature,
+  anyHighlightActive, pinnedSignature, tagsSignature,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
@@ -431,6 +431,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let lastHlSig    = highlightSignature(getState());
   // Pinned (white-emphasis) set — repaint via the nodeColor accessor on change.
   let lastPinSig   = pinnedSignature(getState());
+  // Tag set — repaint when tags change so "colour by tag" updates live.
+  let lastTagSig   = tagsSignature(getState());
 
   return {
     update(s) {
@@ -482,10 +484,16 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const hlChanged = hlSig !== lastHlSig;
       const pinSig = pinnedSignature(s);
       const pinChanged = pinSig !== lastPinSig;
-      if (selChanged || hlChanged || pinChanged) {
+      const tagSig = tagsSignature(s);
+      const tagChanged = tagSig !== lastTagSig;
+      if (selChanged || hlChanged || pinChanged || tagChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
+        lastTagSig    = tagSig;
+        // The "Tag" colour option appears once tags exist / disappears when the
+        // last is removed — keep the dropdown in sync at that boundary.
+        if (tagChanged) colourOverlay.refreshOptions();
         repaintSelection();
       }
     },

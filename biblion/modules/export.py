@@ -85,13 +85,15 @@ def _load_rows(conn: sqlite3.Connection, where: str, params: tuple) -> list:
     return conn.execute(sql, params).fetchall()
 
 
-def _load_aux(conn: sqlite3.Connection, paper_ids: list[int]) -> tuple[dict, dict]:
+def _load_aux(conn: sqlite3.Connection, paper_ids: list[int]) -> tuple[dict, dict, dict]:
     """Return ({paper_id: {field: value}} of long-tail observations,
-    {paper_id: {scheme: [values]}} of identifiers) for the given papers."""
+    {paper_id: {scheme: [values]}} of identifiers,
+    {paper_id: [tag, ...]} of user tags) for the given papers."""
     eav: dict[int, dict] = {}
     ids: dict[int, dict] = {}
+    tags: dict[int, list] = {}
     if not paper_ids:
-        return eav, ids
+        return eav, ids, tags
     for i in range(0, len(paper_ids), 500):
         chunk = paper_ids[i:i + 500]
         ph = ','.join('?' * len(chunk))
@@ -111,7 +113,16 @@ def _load_aux(conn: sqlite3.Connection, paper_ids: list[int]) -> tuple[dict, dic
         ):
             ids.setdefault(r['paper_id'], {}).setdefault(
                 r['scheme'], []).append(r['value'])
-    return eav, ids
+        # paper_tags is a recent table; tolerate its absence in an old DB.
+        try:
+            for r in conn.execute(
+                f"SELECT paper_id, tag FROM paper_tags "
+                f"WHERE paper_id IN ({ph}) ORDER BY tag", chunk,
+            ):
+                tags.setdefault(r['paper_id'], []).append(r['tag'])
+        except sqlite3.OperationalError:
+            pass
+    return eav, ids, tags
 
 
 def _pages(row) -> Optional[str]:
@@ -182,8 +193,9 @@ def _esc(v) -> str:
     return s
 
 
-def paper_to_bibtex(row, eav: dict, ids: dict, key: str) -> str:
+def paper_to_bibtex(row, eav: dict, ids: dict, key: str, tags: dict | None = None) -> str:
     btype = _PUBTYPE_TO_BIBTYPE.get(_canon_type(row['pub_type']), 'misc')
+    tags = tags or {}
     fields: list[tuple[str, str]] = []
 
     def put(name, value):
@@ -229,9 +241,20 @@ def paper_to_bibtex(row, eav: dict, ids: dict, key: str) -> str:
         note_parts.append(eav_note)
     if note_parts:
         put('note', '; '.join(note_parts))
+    # keywords: union of any long-tail keywords observation and user tags
+    # (paper_tags). Emitted here so the EAV loop below can skip 'keywords'.
+    kw_parts: list[str] = []
+    eav_kw = eav.get(row['id'], {}).get('keywords')
+    if eav_kw:
+        kw_parts += [k.strip() for k in re.split(r'[;,]', eav_kw) if k.strip()]
+    for t in tags.get(row['id'], []):
+        if t not in kw_parts:
+            kw_parts.append(t)
+    if kw_parts:
+        put('keywords', ', '.join(kw_parts))
     for obs_field, bibname in _EAV_BIB_FIELDS.items():
-        if obs_field == 'note':
-            continue                 # handled above (merged with editorial status)
+        if obs_field in ('note', 'keywords'):
+            continue                 # handled above
         put(bibname, eav.get(row['id'], {}).get(obs_field))
 
     body = ',\n'.join(f"  {name:<11} = {{{val}}}" for name, val in fields)
@@ -242,8 +265,9 @@ def paper_to_bibtex(row, eav: dict, ids: dict, key: str) -> str:
 # RIS emission
 # ---------------------------------------------------------------------------
 
-def paper_to_ris(row, eav: dict, ids: dict) -> str:
+def paper_to_ris(row, eav: dict, ids: dict, tags: dict | None = None) -> str:
     ty = _PUBTYPE_TO_RISTYPE.get(_canon_type(row['pub_type']), 'GEN')
+    tags = tags or {}
     lines: list[str] = [f"TY  - {ty}"]
 
     def put(tag, value):
@@ -273,9 +297,17 @@ def paper_to_ris(row, eav: dict, ids: dict) -> str:
             put('SN', vals[0])
     put('AB', row['abstract'])
     kw = eav.get(row['id'], {}).get('keywords')
+    kw_seen = set()
     if kw:
         for k in re.split(r'[;,]', kw):
-            put('KW', k.strip())
+            k = k.strip()
+            if k and k not in kw_seen:
+                kw_seen.add(k)
+                put('KW', k)
+    for t in tags.get(row['id'], []):       # user tags as extra KW lines
+        if t not in kw_seen:
+            kw_seen.add(t)
+            put('KW', t)
     note_parts = []
     if row['editorial_status']:
         note_parts.append(str(row['editorial_status']).upper())
@@ -310,7 +342,7 @@ def export(conn: sqlite3.Connection, out_path: Path, fmt: str,
         params = tuple(params) + _REDACTED_STATUSES
     rows = _load_rows(conn, where, params)
     paper_ids = [r['id'] for r in rows]
-    eav, ids = _load_aux(conn, paper_ids)
+    eav, ids, tags = _load_aux(conn, paper_ids)
 
     used_keys: set = set()
     # Pre-seed used keys with the stored citekeys so synthesized ones can't
@@ -322,10 +354,10 @@ def export(conn: sqlite3.Connection, out_path: Path, fmt: str,
     chunks: list[str] = []
     for r in rows:
         if fmt == 'ris':
-            chunks.append(paper_to_ris(r, eav, ids))
+            chunks.append(paper_to_ris(r, eav, ids, tags))
         else:
             key = r['citekey'] or _synth_citekey(r, used_keys)
-            chunks.append(paper_to_bibtex(r, eav, ids, key))
+            chunks.append(paper_to_bibtex(r, eav, ids, key, tags))
 
     out_path.write_text(''.join(chunks), encoding='utf-8')
     return len(rows)

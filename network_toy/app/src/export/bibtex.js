@@ -9,7 +9,8 @@
 //   record = { paperId, citekey, title, year, venue, doi, pubType, abstract,
 //              authors:[], editors:[], volume, issue, firstPage, lastPage,
 //              publisher, booktitle, series, edition, language, month,
-//              editorialStatus, pubmedId, identifiers:{isbn:[],issn:[],arxiv:[]} }
+//              editorialStatus, pubmedId, identifiers:{isbn:[],issn:[],arxiv:[]},
+//              keywords:[] }   // user tags, emitted as the BibTeX keywords field
 
 // biblion pub_type -> BibTeX entry type. Real snapshots carry OpenAlex / S2 type
 // strings (journalarticle, proceedingsarticle, postedcontent, …), not biblion's
@@ -151,6 +152,11 @@ export function formatBibtexRecord(rec, key, note) {
     put("eprinttype", "arxiv");
   }
   put("pmid", rec.pubmedId);
+  // User tags as the native BibTeX keywords field (comma-joined); round-trips
+  // through biblion import_bib (which parses keywords) and biblion export.
+  if (Array.isArray(rec.keywords) && rec.keywords.length) {
+    put("keywords", rec.keywords.map((k) => String(k).trim()).filter(Boolean).join(", "));
+  }
   put("abstract", rec.abstract);
   // Editorial notice + provenance ride in `note` so they stay attached in any
   // reader (mirrors export.py, which folds editorial_status into note).

@@ -7,11 +7,43 @@
 // colour rule (e.g. a new mode) updates both viewers atomically.
 
 import { tGradient, inDegGradient, boundaryScoreGradient } from "../gradients.js";
+import { getIdByRow } from "../../datasource/sqlite.js";
 
 export const DEFAULT_COLOUR_MODE = "cluster:finest";
 export const DIMMED_COLOUR       = "#3a3f4a";
 export const UNKNOWN_COLOUR      = "#888";
 export const PINNED_COLOUR       = "#ffffff";   // white-emphasis pin (top layer)
+
+// Categorical palette for the "tag" colour mode (Tableau-10). Shared with the
+// tags-list panel's swatches so a tag's colour matches across viewer + panel.
+export const TAG_PALETTE = [
+  "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
+  "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ab",
+];
+
+// tag name → colour, assigning palette slots in sorted order of all distinct
+// tags currently in state.tags. Memoised on the tags-map identity (the state
+// mutators replace the map, never mutate it, so identity is a safe cache key).
+let _tagColourCache = { ref: null, byTag: new Map() };
+export function tagColourMap(state) {
+  const tags = (state && state.tags) || {};
+  if (_tagColourCache.ref === tags) return _tagColourCache.byTag;
+  const names = new Set();
+  for (const pid in tags) for (const t of tags[pid]) names.add(t);
+  const byTag = new Map();
+  [...names].sort().forEach((t, i) => byTag.set(t, TAG_PALETTE[i % TAG_PALETTE.length]));
+  _tagColourCache = { ref: tags, byTag };
+  return byTag;
+}
+
+// Fingerprint of state.tags — distinct-tag count + total assignments. A change
+// here repaints the viewer via the cheap nodeColor accessor (no rebuild).
+export function tagsSignature(state) {
+  const t = (state && state.tags) || {};
+  let papers = 0, assigns = 0;
+  for (const pid in t) { papers += 1; assigns += t[pid] ? t[pid].length : 0; }
+  return `${papers}:${assigns}`;
+}
 
 // ── gradient scaling stats, memoised on the source array reference ──────
 // The colour resolver runs once PER NODE PER FRAME, so scanning the whole
@@ -116,6 +148,10 @@ export function getColourModeOptions(state) {
     opts.push({ value: "displacement",     label: "Fusion displacement (normalised)" });
     opts.push({ value: "displacement:log", label: "Fusion displacement (log)" });
   }
+  // User tags (only once at least one paper is tagged).
+  if (state.tags && Object.keys(state.tags).length > 0) {
+    opts.push({ value: "tag", label: "Tag" });
+  }
   return opts;
 }
 
@@ -204,6 +240,17 @@ export function baseColourFor(node, state, mode) {
     const ba = state.bridgeAnalysis;
     if (!ba) return UNKNOWN_COLOUR;
     return boundaryScoreGradient(ba.perNodeScore[node.id] || 0);
+  }
+  if (mode === "tag") {
+    // Tags are keyed by paperId; map the node index → paperId via the corpus.
+    const tags = state.tags || {};
+    const pid = getIdByRow(node.id);
+    const list = pid != null ? tags[pid] : null;
+    if (!list || list.length === 0) return DIMMED_COLOUR;   // untagged → grey
+    // A node may carry several tags; colour by the alphabetically-first so the
+    // choice is deterministic and matches the sorted palette assignment.
+    const first = list.slice().sort()[0];
+    return tagColourMap(state).get(first) || UNKNOWN_COLOUR;
   }
   return UNKNOWN_COLOUR;
 }

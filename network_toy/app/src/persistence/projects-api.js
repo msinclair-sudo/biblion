@@ -67,3 +67,35 @@ export async function deleteSave(datasetId, name) {
   if (!r.ok) throw new Error(`[projects-api] delete ${name}: HTTP ${r.status}`);
   return r.json();
 }
+
+// ── tags (read/write against the dataset's live project DB) ──────────────────
+// { "<paperId>": ["tag", ...] } for the dataset. Returns {} when the dataset is
+// snapshot-only (no live DB) or has no tags. Reads are always fresh from the
+// live DB, so tags written by the biblion CLI or a prior session show up.
+export function loadTags(datasetId) {
+  return getJson(`${BASE}/${encodeURIComponent(datasetId)}/tags`);
+}
+
+// Batch add/remove tags. `adds`/`removes` are [{paperId:int, tag:string}].
+// Returns the server's {ok, applied}; throws on HTTP error (e.g. 409 when the
+// dataset is snapshot-only, 503 when the DB write-lock times out) so the caller
+// can roll back optimistic UI state.
+export async function writeTags(datasetId, { adds = [], removes = [] } = {}) {
+  const url = `${BASE}/${encodeURIComponent(datasetId)}/tags`;
+  let r;
+  try {
+    r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adds, removes }),
+    });
+  } catch (e) {
+    throw new Error(`[projects-api] writeTags: ${e.message || e} — ${SERVE_HINT}`);
+  }
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try { const j = await r.json(); if (j && j.error) msg = j.error; } catch { /* keep status */ }
+    throw new Error(`[projects-api] writeTags: ${msg}`);
+  }
+  return r.json();
+}

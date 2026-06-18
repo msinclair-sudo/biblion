@@ -28,6 +28,15 @@ API:
     GET    /api/datasets/<id>/saves/<name>     -> the save zip bytes
     POST   /api/datasets/<id>/saves/<name>     -> atomic write of the body
     DELETE /api/datasets/<id>/saves/<name>     -> unlink
+    GET    /api/datasets/<id>/tags             -> {"<paperId>": ["tag", ...], ...}
+    POST   /api/datasets/<id>/tags             -> {adds:[{paperId,tag}], removes:[...]}
+
+User tags are read/written against the dataset's LIVE project DB (data/<project>/
+<project>.db, stripping any "::subset"), NOT the read-only snapshot — so a tag
+survives re-snapshotting and is visible to the biblion CLI. The merge writer
+never touches the paper_tags table, so these writes only take a brief WAL
+writer-lock (busy_timeout); a dataset shipped snapshot-only (no live DB) reads
+as {} and rejects writes with 409.
 
 Path-safety: <id> is validated against the discovered dataset set; <name> is
 sanitised (no '/', no '..', must end '.zip'). Everything else falls through to
@@ -38,7 +47,9 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import zipfile
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -99,6 +110,71 @@ def discover_datasets():
 
 def _saves_dir(dataset_id):
     return DATA / dataset_id / "saves"
+
+
+# ── tags (read/write against the live project DB) ────────────────────────────
+_TAG_NAME_MAX = 64
+
+_PAPER_TAGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS paper_tags (
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    tag      TEXT    NOT NULL,
+    added_at TEXT    NOT NULL,
+    added_by TEXT,
+    PRIMARY KEY (paper_id, tag)
+)
+"""
+
+
+def _live_db_path(dataset_id):
+    """The LIVE project DB for a dataset id, stripping any '::subset' suffix
+    (subsets share their project's DB). May not exist — datasets can ship
+    snapshot-only (no live <project>.db)."""
+    sep = dataset_id.find("::")
+    project_id = dataset_id if sep == -1 else dataset_id[:sep]
+    return DATA / project_id / f"{project_id}.db"
+
+
+def _open_live_db(dataset_id):
+    """Open the dataset's live project DB read/write with a busy_timeout, ensure
+    the paper_tags table exists, and return the connection — or None when the
+    live DB is absent (snapshot-only dataset)."""
+    path = _live_db_path(dataset_id)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(str(path), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    # The table is in biblion's _SCHEMA, but a live DB created before this
+    # feature won't have it; CREATE IF NOT EXISTS is cheap and idempotent.
+    conn.execute(_PAPER_TAGS_SCHEMA)
+    return conn
+
+
+def _clean_tag(raw):
+    """Sanitise a tag name: trim, reject empty / over-long / containing ',' or
+    ';' (those would split the keywords field on .bib/.ris re-import)."""
+    if not isinstance(raw, str):
+        return None
+    t = raw.strip()
+    if not t or len(t) > _TAG_NAME_MAX or "," in t or ";" in t:
+        return None
+    return t
+
+
+def read_tags(dataset_id):
+    """{ '<paperId>': ['tag', ...] } from the live DB; {} if snapshot-only."""
+    conn = _open_live_db(dataset_id)
+    if conn is None:
+        return {}
+    try:
+        out = {}
+        for r in conn.execute("SELECT paper_id, tag FROM paper_tags ORDER BY paper_id, tag"):
+            out.setdefault(str(r["paper_id"]), []).append(r["tag"])
+        return out
+    finally:
+        conn.close()
 
 
 def _count_saves(dataset_id):
@@ -211,6 +287,55 @@ class Handler(SimpleHTTPRequestHandler):
             return None
         return dataset_id, name, _saves_dir(dataset_id) / name
 
+    def _do_tags_post(self, dataset_id):
+        """Apply a batch of tag adds/removes to the dataset's live project DB.
+        Body: {"adds": [{paperId, tag}, ...], "removes": [...]}. Snapshot-only
+        datasets reject with 409; a write-lock timeout returns 503."""
+        if dataset_id not in {d["id"] for d in discover_datasets()}:
+            return self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown dataset {dataset_id!r}")
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid JSON")
+        conn = _open_live_db(dataset_id)
+        if conn is None:
+            return self._send_error_json(
+                HTTPStatus.CONFLICT,
+                "dataset has no live database (snapshot-only); tags cannot be written")
+        now = datetime.now(timezone.utc).isoformat()
+        applied = 0
+        try:
+            with conn:                       # one transaction: commit or roll back
+                for item in (body.get("adds") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    tag = _clean_tag(item.get("tag"))
+                    pid = item.get("paperId")
+                    if tag is None or not isinstance(pid, int):
+                        continue
+                    if not conn.execute("SELECT 1 FROM papers WHERE id = ?", (pid,)).fetchone():
+                        continue             # unknown paper -> skip (clean, no FK trap)
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO paper_tags (paper_id, tag, added_at, added_by) "
+                        "VALUES (?, ?, ?, 'network_toy')", (pid, tag, now))
+                    applied += cur.rowcount
+                for item in (body.get("removes") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    tag = _clean_tag(item.get("tag"))
+                    pid = item.get("paperId")
+                    if tag is None or not isinstance(pid, int):
+                        continue
+                    cur = conn.execute(
+                        "DELETE FROM paper_tags WHERE paper_id = ? AND tag = ?", (pid, tag))
+                    applied += cur.rowcount
+        except sqlite3.OperationalError as e:
+            return self._send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, f"database busy: {e}")
+        finally:
+            conn.close()
+        return self._send_json({"ok": True, "applied": applied}, status=HTTPStatus.OK)
+
     # --- verbs -------------------------------------------------------------
 
     def do_GET(self):
@@ -224,6 +349,11 @@ class Handler(SimpleHTTPRequestHandler):
             if dataset_id not in {d["id"] for d in discover_datasets()}:
                 return self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown dataset {dataset_id!r}")
             return self._send_json(list_saves(dataset_id))
+        if len(parts) == 2 and parts[1] == "tags":
+            dataset_id = parts[0]
+            if dataset_id not in {d["id"] for d in discover_datasets()}:
+                return self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown dataset {dataset_id!r}")
+            return self._send_json(read_tags(dataset_id))
         resolved = self._resolve_save_path(parts)
         if resolved is None:
             return
@@ -241,6 +371,8 @@ class Handler(SimpleHTTPRequestHandler):
         parts = self._api_parts()
         if parts is None:
             return self._send_error_json(HTTPStatus.NOT_FOUND, "no such endpoint")
+        if len(parts) == 2 and parts[1] == "tags":
+            return self._do_tags_post(parts[0])
         resolved = self._resolve_save_path(parts)
         if resolved is None:
             return

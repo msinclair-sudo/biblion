@@ -25,6 +25,7 @@ import * as NextSteps              from "./next-steps.js";
 import * as Cart                   from "./cart.js";
 import * as SelectedPapers         from "./selected-papers.js";
 import * as SearchResults          from "./search-results.js";
+import * as TagsList               from "./tags-list.js";
 
 const entries = new Map();
 
@@ -67,6 +68,7 @@ register(NextSteps);
 register(Cart);
 register(SelectedPapers);
 register(SearchResults);
+register(TagsList);
 
 // Future entries (mounted as their modules come online):
 // register(await import("./cluster-tree.js"));

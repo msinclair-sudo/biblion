@@ -25,7 +25,7 @@ import { computeBridgeAnalysis, computeBridgesPerPair }          from "./bridge-
 import { runPhase2Score, buildLayersFromPicks }                 from "../eval/multilayer-sweep.js";
 import { bootstrapStability as runBootstrapStability,
          SCORE_VERSION as BOOTSTRAP_SCORE_VERSION }             from "../eval/bootstrap.js";
-import { update, getState, setLayerState }                       from "./state.js";
+import { update, getState, setLayerState, refreshTagsForActiveDataset } from "./state.js";
 import { runDAG }                                                from "../workers/dag.js";
 import { slimNodesForClustering, buildGhostContext, sliceDimred,
          expandGhostResult }                                     from "../clustering-cascade.js";
@@ -232,6 +232,9 @@ export async function ingestDataOnly() {
     engineRevision:         s.engineRevision + 1,
   });
   setLayerState("data", "fresh");
+  // Pull any existing tags for the now-active dataset from its live DB (a no-op
+  // that clears tags for non-sqlite sources). Fire-and-forget.
+  refreshTagsForActiveDataset();
 }
 
 // Full data cascade: ingest + dim-reduce (which in turn cascades into
