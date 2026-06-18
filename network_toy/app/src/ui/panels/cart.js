@@ -4,8 +4,9 @@
 // A standalone table (deliberately NOT node-table's renderer): rows are cart
 // papers, columns are EVERY per-node datum we can join — biblion metadata,
 // citation in-degree, cluster id per level, layout position, ghost flag — with
-// show/hide columns, text filter, sort, per-row remove, and per-row checkboxes
-// for partial commit. Export emits a BibTeX (.bib) bibliography, pulling each
+// show/hide columns, text filter, sort, per-row remove, and row-click selection
+// (Ctrl for several, Shift for a range) for partial commit. Export emits a
+// BibTeX (.bib) bibliography, pulling each
 // paper's full reference (authors, venue, year, volume/issue/pages, identifiers,
 // …) live from the connected snapshot DB via getNodeFullRecord; the cart's
 // `source` provenance rides along in each entry's `note` field.
@@ -35,7 +36,7 @@ export const SINGLETON = true;   // one cart per project
 
 // Shown on first mount; everything else is opt-in via the column picker.
 const DEFAULT_VISIBLE = new Set([
-  "source", "title", "year", "venue", "authors", "inDeg", "isGhost",
+  "source", "title", "year", "venue", "authors", "tags", "inDeg", "isGhost",
 ]);
 
 export function mount(container, _state, config = {}, tabContext = null) {
@@ -50,6 +51,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
     if (tabContext) setTabConfig(tabContext.slot, tabContext.tabId, { colWidths: w });
   };
   const checked = new Set();          // paperIds selected for partial commit
+  // Index (within the current filteredSorted() order) of the last row a plain /
+  // Ctrl click selected — the anchor for Shift-click range selection.
+  let lastCheckAnchor = null;
   let filterText = "";
   let sortKey = null;
   let sortDir = "asc";
@@ -79,27 +83,24 @@ export function mount(container, _state, config = {}, tabContext = null) {
   });
   bar.appendChild(filterInput);
 
-  const colsBtn = document.createElement("button");
-  colsBtn.className = "cart-btn";
-  colsBtn.textContent = "Columns ▾";
-  bar.appendChild(colsBtn);
-
   const exportSelBtn = mkBtn(bar, "Export selected", () => doExport(true));
   const exportAllBtn = mkBtn(bar, "Export all",      () => doExport(false));
+  // Select every shown row (replaces the old master "select all" checkbox).
+  const selectAllBtn = mkBtn(bar, "Select all shown", () => {
+    const rows = filteredSorted();
+    rangeCheck(rows, 0, rows.length - 1);
+    renderBody();
+  });
   const clearBtn     = mkBtn(bar, "Clear cart",      () => clearCart());
 
   const countEl = document.createElement("span");
   countEl.className = "cart-count";
   bar.appendChild(countEl);
 
-  // Columns dropdown (toggled by colsBtn).
+  // Column on/off toggles, always visible inline (no dropdown).
   const colsMenu = document.createElement("div");
   colsMenu.className = "cart-cols-menu";
-  colsMenu.style.display = "none";
   root.appendChild(colsMenu);
-  colsBtn.addEventListener("click", () => {
-    colsMenu.style.display = colsMenu.style.display === "none" ? "block" : "none";
-  });
 
   // ── table ───────────────────────────────────────────────────────
   const empty = document.createElement("div");
@@ -188,22 +189,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
     thead.innerHTML = "";
     const tr = document.createElement("tr");
 
-    // Master checkbox (toggle all filtered rows).
-    const thCheck = document.createElement("th");
-    thCheck.className = "cart-th cart-th-check";
-    const master = document.createElement("input");
-    master.type = "checkbox";
-    const visRows = filteredSorted();
-    master.checked = visRows.length > 0 && visRows.every(r => checked.has(r.paperId));
-    master.addEventListener("change", () => {
-      for (const r of visRows) {
-        if (master.checked) checked.add(r.paperId); else checked.delete(r.paperId);
-      }
-      renderBody();
-    });
-    thCheck.appendChild(master);
-    tr.appendChild(thCheck);
-
     for (const col of visibleColumns()) {
       const th = document.createElement("th");
       th.className = "cart-th sortable";
@@ -251,21 +236,28 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const cols = visibleColumns();
     const rows = filteredSorted();
 
-    for (const r of rows) {
+    rows.forEach((r, i) => {
       const tr = document.createElement("tr");
-      tr.className = "cart-row";
+      tr.className = "cart-row row-click" + (checked.has(r.paperId) ? " row-selected" : "");
 
-      const tdCheck = document.createElement("td");
-      tdCheck.className = "cart-cell cart-cell-check";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = checked.has(r.paperId);
-      cb.addEventListener("change", () => {
-        if (cb.checked) checked.add(r.paperId); else checked.delete(r.paperId);
-        updateCount();
+      // The row itself is the export-selection control (we dropped the checkbox
+      // column): plain click selects only this paper, Ctrl/Cmd toggles it
+      // keeping the rest, Shift selects the visual range from the last anchor.
+      // Clicks on the remove "×" button never select.
+      tr.addEventListener("click", (ev) => {
+        if (ev.target.closest("button")) return;
+        if (ev.metaKey || ev.ctrlKey) {
+          if (checked.has(r.paperId)) checked.delete(r.paperId); else checked.add(r.paperId);
+          lastCheckAnchor = i;
+        } else if (ev.shiftKey && lastCheckAnchor != null) {
+          rangeCheck(rows, lastCheckAnchor, i);
+        } else {
+          checked.clear();
+          checked.add(r.paperId);
+          lastCheckAnchor = i;
+        }
+        renderBody();
       });
-      tdCheck.appendChild(cb);
-      tr.appendChild(tdCheck);
 
       for (const col of cols) {
         const td = document.createElement("td");
@@ -287,13 +279,24 @@ export function mount(container, _state, config = {}, tabContext = null) {
       tr.appendChild(tdRm);
 
       tbody.appendChild(tr);
-    }
+    });
 
     const isEmpty = (getState().cart || []).length === 0;
     empty.style.display = isEmpty ? "block" : "none";
     empty.textContent = "Cart is empty — add a cluster from the Node table.";
     scroll.style.display = isEmpty ? "none" : "block";
     updateCount();
+  }
+
+  // Select every row in the visual range [a, b] (inclusive), unioning onto the
+  // current export selection — Shift-click extends, it never deselects.
+  function rangeCheck(rows, a, b) {
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    for (let i = lo; i <= hi; i++) {
+      const r = rows[i];
+      if (r && r.paperId != null) checked.add(r.paperId);
+    }
   }
 
   function updateCount() {
@@ -304,6 +307,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
     countEl.textContent = `${n} paper${n === 1 ? "" : "s"}${filt}${sel ? `, ${sel} selected` : ""}`;
     exportSelBtn.disabled = sel === 0;
     exportAllBtn.disabled = n === 0;
+    selectAllBtn.disabled = shown === 0;
     clearBtn.disabled = n === 0;
   }
 

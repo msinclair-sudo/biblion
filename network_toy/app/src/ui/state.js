@@ -204,6 +204,13 @@ const state = {
     },
   },
   selection: { type: null, id: null },
+  // Additional selection descriptors from Ctrl/Cmd-clicking more Node-table
+  // rows. The effective ("dimming") selection is the union of `selection`
+  // (the primary / last-clicked) and these extras. Kept as a parallel array
+  // so the many single-selection readers keep treating `selection` as one
+  // descriptor; only the union helpers in colour-modes.js consult the extras.
+  // Invariant: empty whenever `selection.type` is null.
+  selectionExtra: [],
   // ── node highlights (J25) ────────────────────────────────────
   // General multi-source highlight channel: a coloured glow drawn ADDITIVELY
   // over the active colour mode + selection-dim, in both viewers, driven by
@@ -737,8 +744,58 @@ export function setLayerParams(layer, params) {
   });
 }
 
+// Descriptor equality for the two selection channels (primary + extras). Two
+// descriptors select the same thing when their type and identifying field
+// match. Shared by setSelection's toggle-off path (node-table) and
+// toggleSelection here.
+export function sameSelectionDesc(a, b) {
+  if (!a || !b) return false;
+  if (a.type !== b.type) return false;
+  if (a.type === "cluster") return a.level === b.level && a.id === b.id;
+  if (a.type === "origin")  return a.id === b.id;
+  if (a.type === "node")    return a.id === b.id;
+  if (a.type === "nodes")   return a.key === b.key;
+  return false;
+}
+
+// Plain click: replace the whole selection with a single descriptor (or
+// clear). Always wipes the Ctrl-click extras.
 export function setSelection(selection) {
-  update({ selection: selection || { type: null, id: null } });
+  update({
+    selection: selection || { type: null, id: null },
+    selectionExtra: [],
+  });
+}
+
+// Ctrl/Cmd click: additively toggle `desc` into the multi-selection.
+//   - union empty       → becomes the sole primary (like setSelection)
+//   - desc is primary    → remove it, promote the first extra (or clear)
+//   - desc is an extra   → remove that extra
+//   - otherwise          → append to selectionExtra
+export function toggleSelection(desc) {
+  if (!desc || !desc.type) return;
+  const prim = state.selection;
+  const extra = state.selectionExtra || [];
+  if (!prim || !prim.type) {            // nothing selected yet
+    setSelection(desc);
+    return;
+  }
+  if (sameSelectionDesc(prim, desc)) {  // toggling the primary off
+    const [next, ...rest] = extra;
+    update({
+      selection: next || { type: null, id: null },
+      selectionExtra: next ? rest : [],
+    });
+    return;
+  }
+  const i = extra.findIndex((d) => sameSelectionDesc(d, desc));
+  if (i >= 0) {
+    const rest = extra.slice();
+    rest.splice(i, 1);
+    update({ selectionExtra: rest });
+  } else {
+    update({ selectionExtra: [...extra, desc] });
+  }
 }
 
 // ── Node highlights (J25) ───────────────────────────────────────────

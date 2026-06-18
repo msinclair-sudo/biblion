@@ -19,7 +19,7 @@ import ForceGraph from "force-graph";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive, pinnedSignature, tagsSignature, ghostBaseColour,
+  anyHighlightActive, pinnedSignature, tagsSignature, selectionSignature, ghostBaseColour,
   citationEdgeVisible,
 } from "../viewer-shared/colour-modes.js";
 
@@ -66,7 +66,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let Graph = null;
   let lastDataRevision = -1;
   let resizeObs = null;
-  let lastSelection = null;
+  let lastSelSig = "";
 
   // Colour-mode dropdown reuses the same builder as viewer-3d.
   const colourOverlay = buildColourModeOverlay({
@@ -260,7 +260,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
       if (s.engineRevision !== lastDataRevision) {
         rebuildData();
         lastDataRevision = s.engineRevision;
-        lastSelection = s.selection;
+        lastSelSig = selectionSignature(s);
         lastHlSig = highlightSignature(s);
         lastPinSig = pinnedSignature(s);
         lastTagSig = tagsSignature(s);
@@ -268,10 +268,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
         return;
       }
       // Selection-only OR highlight-only OR pin-only OR tag-only change: repaint.
-      const selChanged =
-        !lastSelection ||
-        lastSelection.type !== s.selection.type ||
-        lastSelection.id   !== s.selection.id;
+      const selSig = selectionSignature(s);
+      const selChanged = selSig !== lastSelSig;
       const hlSig = highlightSignature(s);
       const hlChanged = hlSig !== lastHlSig;
       const pinSig = pinnedSignature(s);
@@ -285,7 +283,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const ns = (s.view || {}).nodeScale ?? 1;
       const nodeScaleChanged = ns !== lastNodeScale;
       if (selChanged || hlChanged || pinChanged || tagChanged || ghostChanged || citChanged || nodeScaleChanged) {
-        lastSelection = s.selection;
+        lastSelSig = selSig;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
         lastTagSig    = tagSig;

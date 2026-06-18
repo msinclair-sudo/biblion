@@ -17,7 +17,7 @@
 // pipeline; cart needs only paperId (nodeId is filled when the hit is a node).
 
 import { getState, addToCart, setSearchMatches, clearSearchMatches } from "../state.js";
-import { selectedNodeIds, highlightSignature } from "../viewer-shared/colour-modes.js";
+import { selectedNodeIds, highlightSignature, selectionSignature } from "../viewer-shared/colour-modes.js";
 import {
   loadDatasets, getActiveDatasetId, getNodeByPaperId,
 } from "../../datasource/sqlite.js";
@@ -437,7 +437,7 @@ export function mount(container, _state, config = {}, _tabContext = null) {
 
   // Fingerprint of the graph selection (highlight channel + single selection),
   // so we can re-mark the result rows when it changes from anywhere.
-  const selSig = (s) => `${highlightSignature(s)}|${(s.selection && s.selection.type) || ""}:${(s.selection && s.selection.id) ?? ""}:${(s.selection && s.selection.level) ?? ""}`;
+  const selSig = (s) => `${highlightSignature(s)}|${selectionSignature(s)}`;
   let lastSelSig = selSig(getState());
 
   return {

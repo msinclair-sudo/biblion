@@ -129,6 +129,45 @@ test("selectedNodeIds = highlight union ∪ single-selection matches", () => {
   assert.equal(cm.selectedNodeIds(none).size, 0);
 });
 
+test("selectedNodeIds unions the primary selection with Ctrl-click extras", () => {
+  const nc = Int32Array.from([0, 0, 1, 1, 2]);
+  const nodes = Array.from({ length: 5 }, (_, id) => ({ id, originId: id % 2 }));
+  const levels = [{ uid: "L0", clusterResult: { nodeCluster: nc } }];
+  const state = {
+    genResult: { nodes }, clusterLevels: levels,
+    selection:      { type: "cluster", level: 0, id: 0 },        // nodes 0,1
+    selectionExtra: [{ type: "cluster", level: 0, id: 2 }],      // node 4
+    highlights: { bySource: {} },
+  };
+  assert.deepEqual([...cm.selectedNodeIds(state)].sort((a, b) => a - b), [0, 1, 4]);
+});
+
+test("nodeColourFor dims everything outside the multi-selection union", () => {
+  const nodes = [{ id: 0, year: 1990 }, { id: 1, year: 2000 }, { id: 2, year: 2020 }];
+  const state = {
+    genResult: { nodes },
+    clusterLevels: [{ clusterResult: { nodeCluster: Int32Array.from([0, 1, 2]) } }],
+    citationResult: null,
+    selection:      { type: "cluster", level: 0, id: 0 },        // node 0
+    selectionExtra: [{ type: "cluster", level: 0, id: 2 }],      // node 2
+    highlights: { bySource: {} },
+  };
+  assert.equal(cm.nodeColourFor(nodes[0], state, "year"), cm.baseColourFor(nodes[0], state, "year")); // primary lit
+  assert.equal(cm.nodeColourFor(nodes[2], state, "year"), cm.baseColourFor(nodes[2], state, "year")); // extra lit
+  assert.equal(cm.nodeColourFor(nodes[1], state, "year"), cm.DIMMED_COLOUR);                          // outside union → grey
+});
+
+test("selectionSignature: empty, single, multi (extras change the fingerprint)", () => {
+  assert.equal(cm.selectionSignature({ selection: { type: null, id: null } }), "");
+  const single = cm.selectionSignature({ selection: { type: "node", id: 3 } });
+  const multi = cm.selectionSignature({
+    selection:      { type: "node", id: 3 },
+    selectionExtra: [{ type: "cluster", level: 1, id: 2 }],
+  });
+  assert.ok(single.length > 0);
+  assert.notEqual(single, multi);     // adding an extra must change the fingerprint
+});
+
 test("highlight signature changes on add / clear / membership", () => {
   const base = { highlights: { bySource: {} } };
   const a = cm.highlightSignature(base);

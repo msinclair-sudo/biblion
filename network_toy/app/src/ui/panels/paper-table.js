@@ -20,6 +20,7 @@ export const BASE_COLUMNS = [
   { key: "year",    label: "year",    kind: "int"   },
   { key: "venue",   label: "venue",   kind: "text"  },
   { key: "authors", label: "authors", kind: "text"  },
+  { key: "tags",    label: "tags",    kind: "text"  },
   { key: "inDeg",   label: "in-deg",  kind: "int"   },
   { key: "isGhost", label: "ghost",   kind: "text"  },
   { key: "pubType", label: "type",    kind: "text"  },
@@ -56,14 +57,17 @@ export function joinPaperRow(nodeId, state, levels, opts = {}) {
   const pos = state._basePos;
   const inDeg = (state.citationResult && state.citationResult.inDeg)
     ? state.citationResult.inDeg[nodeId] : null;
+  const pid = opts.paperId != null ? opts.paperId : (nd.paperId != null ? nd.paperId : null);
+  const paperTags = (pid != null && state.tags && state.tags[pid]) ? state.tags[pid] : null;
   const row = {
-    paperId: opts.paperId != null ? opts.paperId : (nd.paperId != null ? nd.paperId : null),
+    paperId: pid,
     nodeId,
     source:  opts.source ?? null,
     title:   rec.title ?? null,
     year:    rec.year ?? (Number.isFinite(nd.year) ? nd.year : null),
     venue:   rec.venue ?? null,
     authors: (rec.authors && rec.authors.length) ? rec.authors.join("; ") : null,
+    tags:    (paperTags && paperTags.length) ? paperTags.join("; ") : null,
     doi:     rec.doi ?? null,
     pubType: rec.pubType ?? null,
     isGhost: nd.isGhost ? (nd.ghostKind || "ghost") : "",

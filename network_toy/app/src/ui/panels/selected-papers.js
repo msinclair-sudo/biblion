@@ -1,20 +1,20 @@
 // Selected papers — a live table of every paper currently SELECTED in the viewer
 // (node-table cluster/node picks + scoring/search highlights, via selectedNodeIds).
-// Ticking a row PINS that paper white in both viewers (state.pinnedNodes), an
+// Clicking a row PINS that paper white in both viewers (state.pinnedNodes), an
 // emphasis layer on top of the normal selection colouring. Multiple pins at once;
 // pins persist until cleared, independent of the selection.
 //
 // Sibling of the Cart panel: same wide joinable table (reuses paper-table.js for
 // columns + join + format/sort + the cart-* CSS), but its rows come from the
-// current selection rather than state.cart, and its checkbox toggles a white pin
-// rather than a partial-commit selection.
+// current selection rather than state.cart, and clicking a row toggles a white
+// pin rather than a partial-commit selection.
 
 import {
   getState, togglePinnedNode, clearPinnedNodes, setTabConfig,
   addTag, autoOpenTagsListPanel,
 } from "../state.js";
 import {
-  selectedNodeIds, highlightSignature, pinnedSignature,
+  selectedNodeIds, highlightSignature, pinnedSignature, selectionSignature,
 } from "../viewer-shared/colour-modes.js";
 import {
   paperColumns, joinPaperRow, formatCell, compareBy,
@@ -26,12 +26,12 @@ import { preserveScroll } from "../widgets.js";
 
 export const ID = "selected-papers";
 export const LABEL = "Selected papers";
-export const DESCRIPTION = "Papers currently selected in the viewer. Tick a paper to pin it white (emphasis) in both viewers; multiple pins persist until cleared.";
+export const DESCRIPTION = "Papers currently selected in the viewer. Click a paper to pin it white (emphasis) in both viewers; Ctrl-click for several, Shift-click for a range. Pins persist until cleared.";
 export const SINGLETON = true;
 
 // Shown on first mount; everything else is opt-in via the column picker.
 const DEFAULT_VISIBLE = new Set([
-  "title", "year", "venue", "authors", "inDeg",
+  "title", "year", "venue", "authors", "tags", "inDeg",
 ]);
 
 export function mount(container, _state, config = {}, tabContext = null) {
@@ -51,6 +51,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let joinedRows = [];
   let columns = [];
   let clusterDefaulted = false;
+  // Index (within the current filteredSorted() order) of the last row a plain /
+  // Ctrl click pinned — the anchor for Shift-click range pinning.
+  let lastPinAnchor = null;
 
   // Change-detection fingerprints.
   let lastSelSig = null;
@@ -76,16 +79,16 @@ export function mount(container, _state, config = {}, tabContext = null) {
   });
   bar.appendChild(filterInput);
 
-  const colsBtn = document.createElement("button");
-  colsBtn.className = "cart-btn";
-  colsBtn.textContent = "Columns ▾";
-  bar.appendChild(colsBtn);
-
+  // Pin every shown row (replaces the old master "pin all" checkbox).
+  const pinAllBtn = mkBtn(bar, "Pin all shown", () => {
+    const rows = filteredSorted();
+    rangePin(rows, 0, rows.length - 1);
+  });
   const clearPinsBtn = mkBtn(bar, "Clear pins", () => clearPinnedNodes());
 
   // ── tagging ──────────────────────────────────────────────────────
   // Type a tag name, then apply it to all listed papers or just the
-  // tick-marked (pinned) ones. Tags write through to the project's live DB.
+  // pinned ones. Tags write through to the project's live DB.
   const tagInput = document.createElement("input");
   tagInput.className = "cart-filter";        // reuse styling
   tagInput.type = "text";
@@ -104,11 +107,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
     });
     if (n > 0 && !hadTags) autoOpenTagsListPanel();   // first tag → open the list
     tagInput.value = "";
-    updateCount();
+    // Re-join so the new tag shows in the tags column now (update() only
+    // re-joins on a selection/engine change, not on a tag write).
+    fullRender(getState());
   }
 
   const tagAllBtn = mkBtn(bar, "Tag all", () => applyTag(filteredSorted()));
-  const tagTickBtn = mkBtn(bar, "Tag tick-marked", () => {
+  const tagTickBtn = mkBtn(bar, "Tag pinned", () => {
     const pinned = getState().pinnedNodes;
     applyTag(filteredSorted().filter(r => pinned.has(r.nodeId)));
   });
@@ -117,13 +122,10 @@ export function mount(container, _state, config = {}, tabContext = null) {
   countEl.className = "cart-count";
   bar.appendChild(countEl);
 
+  // Column on/off toggles, always visible inline (no dropdown).
   const colsMenu = document.createElement("div");
   colsMenu.className = "cart-cols-menu";
-  colsMenu.style.display = "none";
   root.appendChild(colsMenu);
-  colsBtn.addEventListener("click", () => {
-    colsMenu.style.display = colsMenu.style.display === "none" ? "block" : "none";
-  });
 
   // ── table ───────────────────────────────────────────────────────
   const empty = document.createElement("div");
@@ -143,7 +145,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
   const hint = document.createElement("div");
   hint.className = "cart-hint";
-  hint.textContent = "Tick a paper to pin it white in the viewer. Select clusters in the Node table or highlight from a Scoring card to populate this list.";
+  hint.textContent = "Click a paper to pin it white in the viewer (Ctrl-click for several, Shift-click for a range). Select clusters in the Node table or highlight from a Scoring card to populate this list.";
   root.appendChild(hint);
 
   // ── data join ───────────────────────────────────────────────────
@@ -213,27 +215,6 @@ export function mount(container, _state, config = {}, tabContext = null) {
     thead.innerHTML = "";
     const tr = document.createElement("tr");
 
-    // Master checkbox pins / unpins all currently-visible rows.
-    const thCheck = document.createElement("th");
-    thCheck.className = "cart-th cart-th-check";
-    const master = document.createElement("input");
-    master.type = "checkbox";
-    master.title = "Pin / unpin all shown";
-    const pinned = getState().pinnedNodes;
-    const visRows = filteredSorted();
-    master.checked = visRows.length > 0 && visRows.every(r => pinned.has(r.nodeId));
-    master.addEventListener("change", () => {
-      // Toggle each shown row toward the master state (togglePinnedNode flips,
-      // so only flip rows that need flipping).
-      for (const r of visRows) {
-        const isPinned = getState().pinnedNodes.has(r.nodeId);
-        if (master.checked && !isPinned) togglePinnedNode(r.nodeId);
-        else if (!master.checked && isPinned) togglePinnedNode(r.nodeId);
-      }
-    });
-    thCheck.appendChild(master);
-    tr.appendChild(thCheck);
-
     // Action column header (per-row "abstract" button); empty label, kept
     // narrow so the table's resizable data columns stay aligned.
     const thAbs = document.createElement("th");
@@ -286,17 +267,26 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
     rows.forEach((r, i) => {
       const tr = document.createElement("tr");
-      tr.className = "cart-row" + (pinned.has(r.nodeId) ? " pinned" : "");
+      tr.className = "cart-row row-click" + (pinned.has(r.nodeId) ? " pinned" : "");
 
-      const tdCheck = document.createElement("td");
-      tdCheck.className = "cart-cell cart-cell-check";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.title = "Pin this paper white in the viewer";
-      cb.checked = pinned.has(r.nodeId);
-      cb.addEventListener("change", () => togglePinnedNode(r.nodeId));
-      tdCheck.appendChild(cb);
-      tr.appendChild(tdCheck);
+      // The row itself is the pin control (we dropped the checkbox column):
+      //   plain click  → pin ONLY this paper (clear the others)
+      //   Ctrl/Cmd     → toggle this paper's pin, keeping the rest
+      //   Shift        → pin the visual range from the last anchor to here
+      // Clicks on the abstract button (or any future control) never pin.
+      tr.addEventListener("click", (ev) => {
+        if (ev.target.closest("button")) return;
+        if (ev.metaKey || ev.ctrlKey) {
+          togglePinnedNode(r.nodeId);
+          lastPinAnchor = i;
+        } else if (ev.shiftKey && lastPinAnchor != null) {
+          rangePin(rows, lastPinAnchor, i);
+        } else {
+          clearPinnedNodes();
+          togglePinnedNode(r.nodeId);
+          lastPinAnchor = i;
+        }
+      });
 
       // Per-row "abstract" button → reader modal, paging across the shown rows.
       const tdAbs = document.createElement("td");
@@ -332,6 +322,18 @@ export function mount(container, _state, config = {}, tabContext = null) {
     updateCount();
   }
 
+  // Pin every row in the visual range [a, b] (inclusive), unioning onto the
+  // current pins — Shift-click extends, it never unpins.
+  function rangePin(rows, a, b) {
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const pinned = getState().pinnedNodes;
+    for (let i = lo; i <= hi; i++) {
+      const r = rows[i];
+      if (r && !pinned.has(r.nodeId)) togglePinnedNode(r.nodeId);
+    }
+  }
+
   function updateCount() {
     const n = joinedRows.length;
     const shown = filteredSorted().length;
@@ -339,6 +341,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const filt = filterText && shown !== n ? `, ${shown} shown` : "";
     countEl.textContent = `${n} selected${filt}${pins ? `, ${pins} pinned white` : ""}`;
     clearPinsBtn.disabled = pins === 0;
+    pinAllBtn.disabled = shown === 0;
     tagAllBtn.disabled = shown === 0;
     tagTickBtn.disabled = pins === 0;
   }
@@ -354,11 +357,11 @@ export function mount(container, _state, config = {}, tabContext = null) {
     renderTable();
   }
 
-  // Fingerprint of the current selection: highlight channel + the single
-  // selection. A change means the row set must be re-joined.
+  // Fingerprint of the current selection: highlight channel + the dimming
+  // selection (primary + Ctrl-click extras). A change means the row set must
+  // be re-joined.
   function selSig(s) {
-    const sel = s.selection || {};
-    return `${highlightSignature(s)}|${sel.type || ""}:${sel.id ?? ""}:${sel.level ?? ""}`;
+    return `${highlightSignature(s)}|${selectionSignature(s)}`;
   }
 
   // Initial paint.
@@ -378,7 +381,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
         fullRender(s);
         return;
       }
-      // Pins-only change → refresh checkboxes + count, no re-join.
+      // Pins-only change → refresh row pin-highlight + count, no re-join.
       const pinSig = pinnedSignature(s);
       if (pinSig !== lastPinSig) {
         lastPinSig = pinSig;

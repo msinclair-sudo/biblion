@@ -25,7 +25,7 @@ import { buildBaseEdges }                   from "../../base-edges.js";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive, pinnedSignature, tagsSignature,
+  anyHighlightActive, pinnedSignature, tagsSignature, selectionSignature,
   isGhostNode, ghostNodeColour, citationEdgeVisible,
 } from "../viewer-shared/colour-modes.js";
 
@@ -124,7 +124,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let Graph = null;
   let lastDataRevision = -1;
   let resizeObs = null;
-  let lastSelection = null;
+  let lastSelSig = "";
   let lastFusionBlend = null;
 
   // Settings overlay (gear button + popup with sliders).
@@ -176,7 +176,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   // host stays in #blend-control when no viewer is mounted.
   const fusionOverlay = buildFusionBlendOverlay(container);
 
-  // (Graph / lastDataRevision / resizeObs / lastSelection hoisted above)
+  // (Graph / lastDataRevision / resizeObs / lastSelSig hoisted above)
 
   function init() {
     if (!window.ForceGraph3D) {
@@ -480,7 +480,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
         rebuildData();
         lastDataRevision = s.engineRevision;
         lastViewSig      = viewSig;
-        lastSelection    = s.selection;
+        lastSelSig       = selectionSignature(s);
         if (dataChanged) {
           // New engine output may have added/removed cluster levels —
           // refresh the dropdown options.
@@ -512,10 +512,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
       // Selection-only OR highlight-only change: re-paint colours, no rebuild.
       // Both flow through the same cheap nodeColor accessor (repaintSelection),
       // which the shared resolver now composes the highlight glow into.
-      const selChanged =
-        !lastSelection ||
-        lastSelection.type !== s.selection.type ||
-        lastSelection.id   !== s.selection.id;
+      const selSig = selectionSignature(s);
+      const selChanged = selSig !== lastSelSig;
       const hlSig = highlightSignature(s);
       const hlChanged = hlSig !== lastHlSig;
       const pinSig = pinnedSignature(s);
@@ -523,7 +521,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const tagSig = tagsSignature(s);
       const tagChanged = tagSig !== lastTagSig;
       if (selChanged || hlChanged || pinChanged || tagChanged) {
-        lastSelection = s.selection;
+        lastSelSig = selSig;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
         lastTagSig    = tagSig;

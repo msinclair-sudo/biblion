@@ -61,7 +61,7 @@ export function isGhostNode(node, state) {
 export function ghostNodeColour(node, state) {
   if (state && state.pinnedNodes && state.pinnedNodes.has(node.id)) return PINNED_COLOUR;
   const base = ghostBaseColour(node, state);
-  const matched = nodeMatchesSelection(node, state, state.selection);
+  const matched = nodeMatchesAnySelection(node, state);
   if (anyHighlightActive(state)) {
     return (isNodeHighlighted(node, state) || matched === true) ? base : DIMMED_COLOUR;
   }
@@ -340,17 +340,43 @@ export function nodeMatchesSelection(node, state, sel) {
   return null;
 }
 
-// Memoised Set for a {type:"nodes", ids} selection. state.selection is a fresh
-// object per selection change, so a one-slot cache keyed on its identity is
-// enough to avoid rebuilding the Set for every node in nodeColourFor.
-let _selSetRef = null;
-let _selSet = null;
+// Memoised Set for a {type:"nodes", ids} selection. Selection descriptors are
+// fresh objects per selection change, so a WeakMap keyed on the descriptor
+// avoids rebuilding the Set for every node in nodeColourFor — and, unlike the
+// old one-slot cache, doesn't thrash when several "nodes" descriptors coexist
+// in the multi-selection union.
+const _selSetCache = new WeakMap();
 function selectionIdSet(sel) {
-  if (sel !== _selSetRef) {
-    _selSetRef = sel;
-    _selSet = new Set((sel && sel.ids) || []);
+  let set = _selSetCache.get(sel);
+  if (!set) {
+    set = new Set((sel && sel.ids) || []);
+    _selSetCache.set(sel, set);
   }
-  return _selSet;
+  return set;
+}
+
+// The active dimming-selection descriptors: the primary plus any Ctrl-click
+// extras, filtered to ones with a real type.
+function selectionList(state) {
+  const list = [state.selection, ...(state.selectionExtra || [])];
+  return list.filter((s) => s && s.type);
+}
+
+// Does this node match ANY descriptor in the multi-selection union? Mirrors
+// nodeMatchesSelection's tri-state, folded over the list:
+//   true   — matches at least one descriptor          (render at base colour)
+//   false  — some descriptor dims, node matches none   (render dimmed)
+//   null   — no active dimming-type descriptor         (use base, no dim)
+export function nodeMatchesAnySelection(node, state) {
+  const list = selectionList(state);
+  if (list.length === 0) return null;
+  let sawDimming = false;
+  for (const sel of list) {
+    const m = nodeMatchesSelection(node, state, sel);
+    if (m === true) return true;
+    if (m === false) sawDimming = true;
+  }
+  return sawDimming ? false : null;
 }
 
 // Selection focus (J25). The highlight channel (state.highlights.bySource) is
@@ -386,8 +412,9 @@ export function isNodeHighlighted(node, state) {
 // The set of node ids the viewer currently treats as SELECTED — the data
 // source for the Selected-papers panel. Mirrors nodeColourFor's "not greyed
 // when a selection is active" predicate: the union of every highlight source's
-// ids PLUS the nodes matching the single state.selection (cluster / node /
-// origin / nodes). Empty when nothing is selected (panel shows empty, matching the
+// ids PLUS the nodes matching the dimming selection — the primary state.selection
+// and any Ctrl-click extras (cluster / node / origin / nodes). Empty when nothing
+// is selected (panel shows empty, matching the
 // viewer colouring everything by colour-by).
 export function selectedNodeIds(state) {
   const ids = new Set();
@@ -398,25 +425,26 @@ export function selectedNodeIds(state) {
       if (g && g.ids) for (const id of g.ids) ids.add(id);
     }
   }
-  const sel = state.selection;
   const nodes = (state.genResult && state.genResult.nodes) || [];
-  if (sel && sel.type === "node") {
-    if (Number.isInteger(sel.id)) ids.add(sel.id);
-  } else if (sel && sel.type === "cluster") {
-    const levels = state.clusterLevels || [];
-    if (levels.length) {
-      const lvlIdx = (sel.level == null)
-        ? levels.length - 1
-        : Math.max(0, Math.min(levels.length - 1, sel.level));
-      const cr = levels[lvlIdx] && levels[lvlIdx].clusterResult;
-      const nc = cr && cr.nodeCluster;
-      if (nc) for (let id = 0; id < nc.length; id++) if (nc[id] === sel.id) ids.add(id);
+  for (const sel of selectionList(state)) {
+    if (sel.type === "node") {
+      if (Number.isInteger(sel.id)) ids.add(sel.id);
+    } else if (sel.type === "cluster") {
+      const levels = state.clusterLevels || [];
+      if (levels.length) {
+        const lvlIdx = (sel.level == null)
+          ? levels.length - 1
+          : Math.max(0, Math.min(levels.length - 1, sel.level));
+        const cr = levels[lvlIdx] && levels[lvlIdx].clusterResult;
+        const nc = cr && cr.nodeCluster;
+        if (nc) for (let id = 0; id < nc.length; id++) if (nc[id] === sel.id) ids.add(id);
+      }
+    } else if (sel.type === "origin") {
+      for (const nd of nodes) if (nd && nd.originId === sel.id) ids.add(nd.id);
+    } else if (sel.type === "nodes" && Array.isArray(sel.ids)) {
+      // Generic grouping/bin selection (year bins, …) carries its node ids.
+      for (const id of sel.ids) ids.add(id);
     }
-  } else if (sel && sel.type === "origin") {
-    for (const nd of nodes) if (nd && nd.originId === sel.id) ids.add(nd.id);
-  } else if (sel && sel.type === "nodes" && Array.isArray(sel.ids)) {
-    // Generic grouping/bin selection (year bins, …) carries its node ids.
-    for (const id of sel.ids) ids.add(id);
   }
   return ids;
 }
@@ -451,6 +479,18 @@ export function highlightSignature(state) {
   return parts.join("|");
 }
 
+// Cheap fingerprint of the dimming selection (primary + Ctrl-click extras), so
+// the viewers detect any change — including extras added/removed under an
+// unchanged primary, which a bare .type/.id compare would miss — and repaint
+// via the nodeColor accessor (no rebuildData). "" when nothing is selected.
+export function selectionSignature(state) {
+  const list = selectionList(state);
+  if (list.length === 0) return "";
+  return list
+    .map((s) => `${s.type}:${s.id ?? ""}:${s.level ?? ""}:${s.key ?? ""}`)
+    .join("|");
+}
+
 // Final node colour. The active colour mode is the PRIMARY colouring; node
 // selection only dims the rest. The single function each viewer calls per node
 // per frame.
@@ -469,7 +509,7 @@ export function nodeColourFor(node, state, mode) {
   // other node is unaffected (the pin is a top layer, not a focus filter).
   if (state.pinnedNodes && state.pinnedNodes.has(node.id)) return PINNED_COLOUR;
   const base = baseColourFor(node, state, mode);
-  const matched = nodeMatchesSelection(node, state, state.selection);   // true | false | null
+  const matched = nodeMatchesAnySelection(node, state);   // true | false | null
   if (anyHighlightActive(state)) {
     // Focus on the highlight selection set; also keep a single-selection match
     // visible when both mechanisms are in play.

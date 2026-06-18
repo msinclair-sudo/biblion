@@ -313,9 +313,16 @@ def _reset_page(page):
                     q.cancelJob(id);
                 }
             }
-            // Wait a tick so cancellations settle, then wipe the slot.
+            // Wait a tick so cancellations settle, then wipe the slot. Also
+            // clear the selection channels + white pins so a test that selects
+            // or pins doesn't leak into the next shared-page test.
             await new Promise(r => setTimeout(r, 50));
-            state.update({ jobs: { byId: {}, order: [], runningId: null } });
+            state.update({
+                jobs: { byId: {}, order: [], runningId: null },
+                selection: { type: null, id: null },
+                selectionExtra: [],
+                pinnedNodes: new Set(),
+            });
         }'''
     )
 

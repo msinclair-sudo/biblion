@@ -25,8 +25,8 @@
 //                                   the table view.
 
 import {
-  getState, setSelection, setTabConfig, setBridgeConfig,
-  addToCart, clearCart,
+  getState, setSelection, toggleSelection, sameSelectionDesc,
+  setTabConfig, setBridgeConfig, addToCart, clearCart,
 } from "../state.js";
 import { recomputeBridgeAnalysis } from "../engine.js";
 import { getIdByRow } from "../../datasource/sqlite.js";
@@ -400,13 +400,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const sorted = sortKey != null
       ? rows.slice().sort((a, b) => compareBy(a, b, sortKey, sortDir))
       : rows;
-    const sel = getState().selection;
+    const selList = selectionDescriptors(getState());
 
     for (const row of sorted) {
       const tr = document.createElement("tr");
       tr.className = "node-table-row";
       tr.dataset.rowKey = row._key;
-      const isSel = sel && selectionKey && selectionKey(row, sel);
+      const isSel = selectionKey && selList.some((d) => selectionKey(row, d));
       if (isSel) tr.classList.add("selected");
 
       for (const col of columns) {
@@ -423,11 +423,19 @@ export function mount(container, _state, config = {}, tabContext = null) {
         tr.appendChild(td);
       }
 
-      tr.addEventListener("click", () => {
+      tr.addEventListener("click", (ev) => {
         if (!row._select) return;
-        const cur = getState().selection;
         const proposed = row._select();
-        if (cur && sameSelection(cur, proposed)) {
+        if (ev.metaKey || ev.ctrlKey) {
+          // Extend the dimming selection: keep the existing rows lit and add
+          // (or toggle off) this one — the viewer dims everything outside the union.
+          toggleSelection(proposed);
+          return;
+        }
+        // Plain click replaces the whole selection, toggling off only when this
+        // is the sole selected row (no Ctrl-click extras in play).
+        const { selection: cur, selectionExtra = [] } = getState();
+        if (selectionExtra.length === 0 && cur && sameSelectionDesc(cur, proposed)) {
           setSelection({ type: null, id: null });
         } else {
           setSelection(proposed);
@@ -462,10 +470,10 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const s = getState();
     const data = buildTableData(s, effectiveSource(s, source));
     const selectionKey = data.selectionKey;
-    const sel = s.selection;
+    const selList = selectionDescriptors(s);
     for (const tr of tbody.querySelectorAll(".node-table-row")) {
       const matched = data.rows.find(r => r._key === tr.dataset.rowKey);
-      const isSel = sel && selectionKey && matched && selectionKey(matched, sel);
+      const isSel = selectionKey && matched && selList.some((d) => selectionKey(matched, d));
       tr.classList.toggle("selected", !!isSel);
     }
     refreshCartBar(s);
@@ -473,6 +481,13 @@ export function mount(container, _state, config = {}, tabContext = null) {
 }
 
 /* ── source resolution ────────────────────────────────────────────── */
+
+// The active dimming-selection descriptors: the primary plus Ctrl-click extras
+// (state.selectionExtra), filtered to real ones. A row highlights if it matches
+// any of them.
+function selectionDescriptors(s) {
+  return [s.selection, ...(s.selectionExtra || [])].filter((d) => d && d.type);
+}
 
 function effectiveSource(s, source) {
   if (source !== "auto") return source;
@@ -882,16 +897,6 @@ function formatCell(value, kind) {
     return value.toFixed(2);
   }
   return String(value);
-}
-
-function sameSelection(a, b) {
-  if (!a || !b) return false;
-  if (a.type !== b.type) return false;
-  if (a.type === "cluster") return a.level === b.level && a.id === b.id;
-  if (a.type === "origin")  return a.id === b.id;
-  if (a.type === "node")    return a.id === b.id;
-  if (a.type === "nodes")   return a.key === b.key;
-  return false;
 }
 
 // Test-only handle for the pure row-builders (real-year bins, in-degree
