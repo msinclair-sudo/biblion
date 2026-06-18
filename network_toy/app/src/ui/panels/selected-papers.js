@@ -22,6 +22,7 @@ import {
 import { makeColumnsResizable } from "./column-resize.js";
 import { openAbstractModal } from "../modals/abstract-modal.js";
 import { hasSqliteText } from "../../datasource/sqlite.js";
+import { preserveScroll } from "../widgets.js";
 
 export const ID = "selected-papers";
 export const LABEL = "Selected papers";
@@ -274,6 +275,10 @@ export function mount(container, _state, config = {}, tabContext = null) {
   }
 
   function renderBody() {
+    preserveScroll(scroll, renderBodyInner);
+  }
+
+  function renderBodyInner() {
     tbody.innerHTML = "";
     const cols = visibleColumns();
     const rows = filteredSorted();

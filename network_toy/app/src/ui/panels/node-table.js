@@ -35,6 +35,7 @@ import {
   tGradient, inDegGradient, boundaryScoreGradient,
   T_STOPS, INDEG_STOPS, BOUNDARY_STOPS, cssLinearGradient,
 } from "../gradients.js";
+import { preserveScroll } from "../widgets.js";
 
 export const ID = "node-table";
 export const LABEL = "Node table";
@@ -206,7 +207,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
     }
     renderGradient(data.gradient);
     renderHeader(data.columns);
-    renderRows(data.columns, data.rows, data.selectionKey);
+    preserveScroll(wrap, () => renderRows(data.columns, data.rows, data.selectionKey));
     footer.textContent = `${data.rows.length} ${data.unitLabel || "rows"}`;
     refreshCartBar(s);
   }

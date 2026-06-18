@@ -22,6 +22,7 @@ import {
   loadDatasets, getActiveDatasetId, getNodeByPaperId,
 } from "../../datasource/sqlite.js";
 import { runSearch, buildGuidedQuery, setSearchScope, DEFAULT_ROW_CAP } from "../../datasource/sql-search.js";
+import { preserveScroll } from "../widgets.js";
 
 export const ID = "search-results";
 export const LABEL = "Search";
@@ -228,6 +229,12 @@ export function mount(container, _state, config = {}, _tabContext = null) {
   }
 
   function renderResults() {
+    // The search panel has no inner overflow region (.search-scroll has no
+    // CSS); the whole panel scrolls at .panel-content — the mount container.
+    preserveScroll(container, renderResultsInner);
+  }
+
+  function renderResultsInner() {
     thead.innerHTML = "";
     tbody.innerHTML = "";
     const res = lastResult;

@@ -35,6 +35,22 @@ export function el(tag, opts = {}) {
   return node;
 }
 
+// preserveScroll(scrollEl, rebuild) — run rebuild() (which wipes and
+// repopulates scrollEl's content, e.g. `tbody.innerHTML = ""` + re-fill)
+// without losing the user's scroll position. The scroll wrapper persists
+// across rebuilds; only its children are replaced, so emptying it collapses
+// the content height to 0 and the browser clamps scrollTop to 0. Re-pin
+// scrollTop after the synchronous rebuild restores the height.
+export function preserveScroll(scrollEl, rebuild) {
+  if (!scrollEl) { rebuild(); return; }
+  const top = scrollEl.scrollTop;
+  const left = scrollEl.scrollLeft;
+  rebuild();
+  // Clamp so a now-shorter list doesn't restore past the new bottom.
+  scrollEl.scrollTop = Math.min(top, Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight));
+  scrollEl.scrollLeft = left;
+}
+
 // select(options, { value, onChange, className }) — a styled <select>.
 //   options: [{ value, label }] | [{ id, label }]  (id accepted as value)
 // Returns the <select> element; the caller decides where to mount it.

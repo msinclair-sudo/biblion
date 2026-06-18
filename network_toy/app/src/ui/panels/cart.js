@@ -23,6 +23,7 @@ import { formatBibtex } from "../../export/bibtex.js";
 import { getNodeFullRecord, hasSqliteText } from "../../datasource/sqlite.js";
 import { paperColumns, joinPaperRow, formatCell, compareBy } from "./paper-table.js";
 import { makeColumnsResizable } from "./column-resize.js";
+import { preserveScroll } from "../widgets.js";
 
 export const ID = "cart";
 export const LABEL = "Cart";
@@ -242,6 +243,10 @@ export function mount(container, _state, config = {}, tabContext = null) {
   }
 
   function renderBody() {
+    preserveScroll(scroll, renderBodyInner);
+  }
+
+  function renderBodyInner() {
     tbody.innerHTML = "";
     const cols = visibleColumns();
     const rows = filteredSorted();
