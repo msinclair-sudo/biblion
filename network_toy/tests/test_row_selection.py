@@ -183,3 +183,71 @@ def test_cart_row_click_selects_for_export(page):
     assert out["afterPlain"] == 1
     assert out["afterCtrl"] == 2
     assert out["afterReplace"] == 1
+
+
+def test_viewer_node_click_toggles_pin(page):
+    """Clicking a node in the 3D viewer toggles its white pin. We capture the
+    onNodeClick callback the viewer registers on its ForceGraph3D instance and
+    drive it directly (the canvas has no DOM nodes to click). Any click toggles;
+    pins accumulate one node at a time."""
+    out = page.evaluate(
+        '''async () => {
+            const state = await import("/app/src/ui/state.js");
+            if (!((state.getState().genResult || {}).nodes || []).length) {
+                return { skip: "no genResult" };
+            }
+            // Wrap the ForceGraph3D factory so the instance our viewer builds
+            // records the onNodeClick callback it registers.
+            if (!window.__nodeClickWrapped) {
+                const orig = window.ForceGraph3D;
+                if (!orig) return { skip: "ForceGraph3D unavailable" };
+                window.ForceGraph3D = function (...a) {
+                    const cfg = orig.apply(this, a);
+                    return function (div) {
+                        const inst = cfg(div);
+                        const real = inst.onNodeClick.bind(inst);
+                        inst.onNodeClick = (cb) => { window.__nodeClickCb = cb; return real(cb); };
+                        return inst;
+                    };
+                };
+                window.__nodeClickWrapped = true;
+            }
+            window.__nodeClickCb = null;
+
+            const v3d = await import("/app/src/ui/panels/viewer-3d.js");
+            state.update({ pinnedNodes: new Set() });
+            const host = document.createElement("div");
+            host.style.width = "400px"; host.style.height = "400px";
+            document.body.appendChild(host);
+            const inst = v3d.mount(host, state.getState(), {}, null);
+            await new Promise(r => setTimeout(r, 300));
+
+            const cb = window.__nodeClickCb;
+            if (typeof cb !== "function") {
+                try { inst.destroy(); } catch (_) {}
+                host.remove();
+                return { skip: "onNodeClick not captured" };
+            }
+            const has = (id) => state.getState().pinnedNodes.has(id);
+
+            cb({ id: 3 });  const afterFirst  = has(3);   // → pinned
+            cb({ id: 3 });  const afterSecond = has(3);   // → unpinned (toggle)
+            cb({ id: 7 });                                 // → second, independent
+            const seven = has(7), threeStill = has(3);
+            cb(null);       // malformed → ignored, no throw
+            const sizeAfterNull = state.getState().pinnedNodes.size;
+
+            try { inst.destroy(); } catch (_) {}
+            host.remove();
+            state.update({ pinnedNodes: new Set() });
+            return { afterFirst, afterSecond, seven, threeStill, sizeAfterNull };
+        }'''
+    )
+    if out.get("skip"):
+        import pytest
+        pytest.skip(out["skip"])
+    assert out["afterFirst"] is True       # first click pins node 3
+    assert out["afterSecond"] is False     # clicking it again unpins
+    assert out["seven"] is True            # clicking node 7 pins it
+    assert out["threeStill"] is False      # node 3 stays unpinned (independent)
+    assert out["sizeAfterNull"] == 1       # malformed click ignored

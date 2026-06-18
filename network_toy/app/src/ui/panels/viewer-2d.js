@@ -16,7 +16,7 @@
 // viewer just paints _basePos2d.
 
 import ForceGraph from "force-graph";
-import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
+import { getState, setTabConfig, clearAllHighlights, setSelection, togglePinnedNode } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
   anyHighlightActive, pinnedSignature, tagsSignature, selectionSignature, ghostBaseColour,
@@ -33,6 +33,14 @@ const DEFAULT_NODE_R = 3;
 
 // Node-radius multiplier driven by the viewer's size slider (state.view.nodeScale).
 function nodeScale() { return (getState().view || {}).nodeScale ?? 1; }
+
+// Click a node in the viewer to toggle its white pin (state.pinnedNodes). Any
+// click toggles — plain or Ctrl/Cmd — so pins accumulate one node at a time;
+// the existing pinnedSignature repaint path recolours automatically. Background
+// clicks are intentionally not handled.
+function onNodeClick(node) {
+  if (node && Number.isInteger(node.id)) togglePinnedNode(node.id);
+}
 
 export function mount(container, _state, config = {}, tabContext = null) {
   let colourMode = config.colourMode || DEFAULT_COLOUR_MODE;
@@ -122,7 +130,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
       .linkWidth(() => 0.5)
       .cooldownTicks(0)        // we pin positions; no simulation needed
       .warmupTicks(0)
-      .d3VelocityDecay(1.0);   // zero-out integration alongside our pinned x/y
+      .d3VelocityDecay(1.0)    // zero-out integration alongside our pinned x/y
+      .onNodeClick(onNodeClick);   // click a node to toggle its white pin
 
     // Disable d3-force forces — we own positions.
     const charge = Graph.d3Force("charge"); if (charge && charge.strength) charge.strength(0);

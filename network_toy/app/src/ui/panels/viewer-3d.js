@@ -22,7 +22,7 @@
 
 import { makeBlendForce }                  from "../../blend/blend.js";
 import { buildBaseEdges }                   from "../../base-edges.js";
-import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
+import { getState, setTabConfig, clearAllHighlights, setSelection, togglePinnedNode } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
   anyHighlightActive, pinnedSignature, tagsSignature, selectionSignature,
@@ -50,6 +50,14 @@ const COLOUR_KEY = {
 // Base sphere radius before the size-slider multiplier (state.view.nodeScale).
 const BASE_NODE_REL = 2;
 function nodeScale() { return (getState().view || {}).nodeScale ?? 1; }
+
+// Click a node in the viewer to toggle its white pin (state.pinnedNodes). Any
+// click toggles — plain or Ctrl/Cmd — so pins accumulate one node at a time;
+// the existing pinnedSignature repaint path recolours automatically. Background
+// clicks are intentionally not handled.
+function onNodeClick(node) {
+  if (node && Number.isInteger(node.id)) togglePinnedNode(node.id);
+}
 
 export const ID = "viewer-3d";
 export const LABEL = "3D viewer";
@@ -191,7 +199,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
       .nodeRelSize(BASE_NODE_REL * nodeScale())
       .nodeOpacity(1.0)
       .cooldownTicks(Infinity)        // keep ticking forever; blend needs it
-      .warmupTicks(60);
+      .warmupTicks(60)
+      .onNodeClick(onNodeClick);      // click a node to toggle its white pin
 
     // Disable default forces — blend hook owns positions.
     const charge = Graph.d3Force("charge"); if (charge && charge.strength) charge.strength(0);
