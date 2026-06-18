@@ -8,12 +8,10 @@ float32 `embeddings.npy` that the toy reads via datasource/sqlite.js.
 Contract: row i of embeddings.npy == row i of nodes.jsonl == paper_index["i"].
 Verified before writing.
 
-Text fed to the model is `title [SEP] abstract`, raw by default. Domain
-abbreviation expansion (text_normalization) is **off by default** and opt-in
-(`normalize=True` + a `domain`): the per-domain dictionaries contain always-fire
-entries for short, overloaded tokens (e.g. soil `as`->arsenic) that misfire on
-the English word "as" and across other fields, so raw text is the safe default
-and the only recipe that stays unionable into a cross-domain master.
+Text fed to the model is `title [SEP] abstract`, raw -- no domain abbreviation
+expansion. (That dictionary-substitution approach was removed: its always-fire
+entries for short overloaded tokens, e.g. soil `as`->arsenic, corrupted the
+English word "as" and misfired across fields.)
 
 torch / transformers / adapters are heavy and GPU-oriented, so they are an
 OPTIONAL dependency (`pip install 'biblion[embed]'`) imported lazily inside
@@ -21,8 +19,6 @@ _embed(); the rest of biblion never pulls them in.
 """
 import json
 from pathlib import Path
-
-from .text_normalization import normalize_text
 
 SPECTER2_MODEL = "allenai/specter2_base"
 SPECTER2_ADAPTER = "allenai/specter2"
@@ -50,7 +46,7 @@ def load_nodes(jsonl_path: Path):
     return nodes
 
 
-def _embed(nodes, batch_size, max_length, device=None, normalize=False, domain="soil"):
+def _embed(nodes, batch_size, max_length, device=None):
     try:
         import torch
         from transformers import AutoTokenizer
@@ -76,7 +72,7 @@ def _embed(nodes, batch_size, max_length, device=None, normalize=False, domain="
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    print(f"[embed] device={device}  n={len(nodes)}  normalize={normalize}  domain={domain}")
+    print(f"[embed] device={device}  n={len(nodes)}")
 
     try:
         from tqdm import tqdm
@@ -85,18 +81,7 @@ def _embed(nodes, batch_size, max_length, device=None, normalize=False, domain="
             return it
 
     sep = tok.sep_token
-    if normalize:
-        changed = 0
-        texts = []
-        for nd in nodes:
-            t_raw, a_raw = nd["title"], nd["abstract"]
-            t, a = normalize_text(t_raw, domain=domain), normalize_text(a_raw, domain=domain)
-            if t != t_raw or a != a_raw:
-                changed += 1
-            texts.append(f"{t} {sep} {a}")
-        print(f"[embed] abbreviation expansion changed {changed}/{len(nodes)} docs")
-    else:
-        texts = [f"{nd['title']} {sep} {nd['abstract']}" for nd in nodes]
+    texts = [f"{nd['title']} {sep} {nd['abstract']}" for nd in nodes]
 
     out = []
     for i in tqdm(range(0, len(texts), batch_size), desc="embedding"):
@@ -112,8 +97,7 @@ def _embed(nodes, batch_size, max_length, device=None, normalize=False, domain="
 
 def run_embed(db_path: Path, dataset: str | None = None, out_dir: Path | None = None,
               in_path: Path | None = None, out_path: Path | None = None,
-              batch=BATCH_SIZE, max_length=MAX_LENGTH, device=None,
-              normalize=False, domain="soil") -> Path:
+              batch=BATCH_SIZE, max_length=MAX_LENGTH, device=None) -> Path:
     """Embed the node set written by run_snapshot. Defaults mirror snapshot:
     out_dir = the DB's parent, reading nodes.jsonl and writing embeddings.npy
     there. Returns the path to the written .npy."""
@@ -129,7 +113,7 @@ def run_embed(db_path: Path, dataset: str | None = None, out_dir: Path | None = 
             f"input not found: {inp} (run `biblion advanced snapshot` first)")
 
     nodes = load_nodes(inp)
-    emb = _embed(nodes, batch, max_length, device, normalize=normalize, domain=domain)
+    emb = _embed(nodes, batch, max_length, device)
     if emb.shape[0] != len(nodes):
         raise ValueError(f"row count mismatch: emb={emb.shape[0]} nodes={len(nodes)}")
 
@@ -145,8 +129,6 @@ def run_embed(db_path: Path, dataset: str | None = None, out_dir: Path | None = 
             "embedding_model": SPECTER2_MODEL,
             "embedding_adapter": SPECTER2_ADAPTER,
             "embedding_dim": int(emb.shape[1]),
-            "embedding_normalized": normalize,
-            "embedding_domain": domain,
         })
         if man.get("n_nodes") not in (None, emb.shape[0]):
             print(f"[embed] WARNING manifest n_nodes={man['n_nodes']} != {emb.shape[0]}")

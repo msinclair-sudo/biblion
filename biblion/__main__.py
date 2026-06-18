@@ -819,6 +819,77 @@ def cmd_flag_retractions(args) -> int:
     return 0
 
 
+def cmd_clean_titles(args) -> int:
+    """Strip leftover JATS/HTML markup from existing titles and (by default)
+    salvage the marked-up species/gene names into paper_tags.
+
+    PaperRecord construction now cleans titles on the way in (titles.
+    clean_title), so this is a one-shot backfill for rows imported before that.
+    Dry-run by default; pass --apply to write. Writes paper_tags directly --
+    outside the MergeWriter, like serve.py -- so it never contends with the
+    merge substrate. Idempotent: clean_title is a no-op on clean titles and the
+    tag insert is INSERT OR IGNORE. No Redis needed."""
+    from datetime import datetime, timezone
+    from .titles import clean_title, title_keywords
+
+    do_keywords = not args.no_keywords
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = get_connection(args.db)
+    try:
+        init_db(conn)                       # ensure paper_tags exists on old DBs
+        # Only rows that could carry markup: a tag, an escaped tag, an entity,
+        # or an embedded newline. Keeps the scan off the clean majority.
+        rows = conn.execute(
+            "SELECT id, title FROM papers WHERE title IS NOT NULL AND ("
+            "title LIKE '%<%>%' OR title LIKE '%&lt;%' OR title LIKE '%&gt;%' "
+            "OR title LIKE '%&amp;%' OR title LIKE '%' || char(10) || '%')"
+        ).fetchall()
+
+        title_changes = []                  # (id, old, new)
+        tag_adds = []                       # (id, keyword)
+        for pid, title in rows:
+            cleaned = clean_title(title)
+            if cleaned != title:
+                title_changes.append((pid, title, cleaned))
+            if do_keywords:
+                for kw in title_keywords(title):
+                    tag_adds.append((pid, kw))
+
+        verb = "would change" if not args.apply else "changed"
+        print(f"\n[biblion clean-titles] {len(rows):,} candidate rows scanned")
+        print(f"  titles {verb:<13} {len(title_changes):>8,}")
+        if do_keywords:
+            distinct_kw = len({k.lower() for _, k in tag_adds})
+            print(f"  keyword tags {('to add' if not args.apply else 'added'):<7} "
+                  f"{len(tag_adds):>8,}  ({distinct_kw:,} distinct)")
+
+        sample = title_changes[: (args.limit if args.limit else 15)]
+        if sample:
+            print("\n  sample title changes:")
+            for pid, old, new in sample:
+                print(f"    [{pid}] {old[:80]!r}\n        -> {new[:80]!r}")
+
+        if not args.apply:
+            print("\n  dry run -- re-run with --apply to write these changes.")
+            return 0
+
+        with conn:                          # one transaction
+            for pid, _old, new in title_changes:
+                conn.execute("UPDATE papers SET title = ? WHERE id = ?", (new, pid))
+            applied_tags = 0
+            for pid, kw in tag_adds:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO paper_tags (paper_id, tag, added_at, "
+                    "added_by) VALUES (?, ?, ?, 'title-markup')", (pid, kw, now))
+                applied_tags += cur.rowcount
+        print(f"\n  applied: {len(title_changes):,} title updates, "
+              f"{applied_tags:,} new keyword tags.")
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_export(args) -> int:
     """Serialise papers out to BibTeX (.bib) or RIS (.ris). Read-only; needs an
     explicit selector so a 2M-row graph is never dumped by accident."""
@@ -2175,8 +2246,7 @@ def cmd_embedding(args) -> int:
     try:
         embed_mod.run_embed(Path(args.db), dataset=args.dataset, out_dir=out_dir,
                             batch=args.batch, max_length=args.max_length,
-                            device=args.device, normalize=args.normalize,
-                            domain=args.domain)
+                            device=args.device)
     except FileNotFoundError as e:
         print(f"[biblion embedding] {e}")
         return 2
@@ -2274,14 +2344,6 @@ def _add_advanced_subcommands(sub) -> None:
     sem.add_argument('--device', default=None, help='cuda / cpu (default: auto)')
     sem.add_argument('--subset', default=None,
         help='Embed a named subset (subsets/<name>/) instead of the full project')
-    sem.add_argument('--normalize', action='store_true',
-        help='Opt IN to domain abbreviation expansion (OFF by default). Risky: '
-             'the dictionaries always-fire on overloaded tokens (e.g. soil '
-             'as->arsenic) and misfire across fields — use only on a single, '
-             'vetted domain, never for a cross-domain master.')
-    from .text_normalization import DOMAIN_MAPS
-    sem.add_argument('--domain', default='soil', choices=sorted(DOMAIN_MAPS),
-        help='Dictionary domain used ONLY when --normalize is set (default: soil)')
 
     # ---- named subsets (nested: subset make | list | remove) ------------
     ssub = sub.add_parser('subset',
@@ -2413,6 +2475,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Only check the first N DOI papers (default: all)')
     sfr.add_argument('--verbose', action='store_true')
 
+    sct = sub.add_parser('clean-titles',
+        help='Strip leftover JATS/HTML markup from existing titles and salvage '
+             'marked-up species/gene names into paper_tags. Dry-run by default; '
+             'idempotent. One-shot; no Redis required.')
+    sct.add_argument('--apply', action='store_true',
+        help='Write the changes (default: dry-run preview only)')
+    sct.add_argument('--no-keywords', action='store_true',
+        help='Only clean titles; do not extract keyword tags')
+    sct.add_argument('--limit', type=int, default=None,
+        help='Number of sample title changes to print (default: 15)')
+
     sex = sub.add_parser('export',
         help='Serialise papers to a .bib or .ris file (read-only)')
     sex.add_argument('out', type=str, help='Destination .bib / .ris path')
@@ -2522,7 +2595,8 @@ def main(argv: list[str] = None) -> int:
     # Commands that touch the producer cache fail fast with a clear message if
     # Redis is down. `init` and `qc` never touch Redis; the read-only advanced
     # commands `list` / `plan` don't either.
-    _NO_REDIS = {'init', 'qc', 'backup', 'migrate', 'export', 'flag-retractions'}
+    _NO_REDIS = {'init', 'qc', 'backup', 'migrate', 'export', 'flag-retractions',
+                 'clean-titles'}
     _NO_REDIS_ADVANCED = {'list', 'plan', 'backfill-observations',
                           'snapshot', 'embedding', 'subset'}
     needs_redis = args.cmd not in _NO_REDIS and not (
@@ -2540,6 +2614,7 @@ def main(argv: list[str] = None) -> int:
         'backup': cmd_backup,
         'migrate': cmd_migrate,
         'flag-retractions': cmd_flag_retractions,
+        'clean-titles': cmd_clean_titles,
         'export': cmd_export,
     }
     if args.cmd == 'advanced':

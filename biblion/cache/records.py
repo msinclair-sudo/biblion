@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Optional
 import json
 
+from ..titles import clean_title
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -83,6 +85,16 @@ class PaperRecord:
 
     # Free-form payload for forensics (e.g. raw OA work JSON) — optional
     raw:           Optional[str] = None
+
+    def __post_init__(self):
+        # Single choke point for title hygiene: every producer (OA, S2, NCBI,
+        # bulk, RIS import, citation expansion) builds its PaperRecord here, and
+        # from_json reconstructs through the same path, so a title carrying
+        # JATS/HTML markup is flattened the moment it is observed -- before it
+        # ever reaches Redis or the merge writer. clean_title is a no-op on
+        # already-clean titles (markup-free fast path), so this is cheap.
+        if self.title is not None:
+            self.title = clean_title(self.title)
 
     # ----- helpers -----
 
