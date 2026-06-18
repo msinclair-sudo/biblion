@@ -1311,7 +1311,15 @@ td.cart-cell {
 }
 td.cart-cell-int, td.cart-cell-float { text-align: right; }
 .cart-cell-check, .cart-th-check, .cart-cell-rm, .cart-th-rm { width: 1%; text-align: center; }
-.cart-cell-abs, .cart-th-abs { width: 1%; text-align: center; white-space: nowrap; }
+/* The abstract action cell holds a text button. A 1%-width column lets the
+   auto-layout collapse it below the button's min-content (clipping "abstract"
+   to "ab" when the table is crowded), and .cart-cell's overflow:hidden hides
+   the rest. Reserve a fixed width so the flexible (ellipsised) data columns
+   absorb the squeeze instead, and clear the inherited clip/max-width. */
+td.cart-cell.cart-cell-abs, th.cart-th.cart-th-abs {
+  width: 72px; min-width: 72px; max-width: none;
+  overflow: visible; text-align: center; white-space: nowrap;
+}
 /* Selected-papers panel: a pinned (white-emphasis) row reads as white-tinted,
    echoing the pure-white node in the viewer. */
 tr.cart-row.pinned td.cart-cell {
