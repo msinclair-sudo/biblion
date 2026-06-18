@@ -19,7 +19,10 @@
 //   {type: "cluster", level: N, id: cid}
 //   {type: "origin",  id: oid}
 //   {type: "node",    id: nodeId}
-//   {type: "tBin",    binIdx: i}        (no viewer effect yet)
+//   {type: "nodes",   key, ids}   — any grouping/bin row (e.g. year bins):
+//                                   carries the resolved node ids directly so
+//                                   selecting it selects those nodes, whatever
+//                                   the table view.
 
 import {
   getState, setSelection, setTabConfig, setBridgeConfig,
@@ -803,16 +806,20 @@ function timeBinRows(s) {
   const hasYears = Number.isFinite(yMin) && yMax > yMin;
   const span = hasYears ? (yMax - yMin) : 1;
 
-  const counts = new Array(T_BINS).fill(0);
   const frac = (n) => hasYears
     ? (Number.isFinite(n.year) ? (n.year - yMin) / span : 0)
     : (+n.t || 0);
-  for (const n of nodes) {
-    let b = Math.floor(frac(n) * T_BINS);
+  // Collect the node ids per bin (not just counts) so selecting a bin row
+  // resolves to its nodes — same as a cluster row. The id is the node's index,
+  // the canonical id space used by selectedNodeIds and the cluster nodeCluster.
+  const binIds = Array.from({ length: T_BINS }, () => []);
+  for (let k = 0; k < nodes.length; k++) {
+    let b = Math.floor(frac(nodes[k]) * T_BINS);
     if (b >= T_BINS) b = T_BINS - 1;
     if (b < 0) b = 0;
-    counts[b]++;
+    binIds[b].push(k);
   }
+  const counts = binIds.map((a) => a.length);
   const rows = counts.map((cnt, i) => {
     const loF = i / T_BINS, hiF = (i + 1) / T_BINS, mid = (loF + hiF) / 2;
     const range = hasYears
@@ -820,7 +827,7 @@ function timeBinRows(s) {
       : `${loF.toFixed(1)}–${hiF.toFixed(1)}`;
     return {
       _key:    `tBin:${i}`,
-      _select: () => ({ type: "tBin", binIdx: i }),
+      _select: () => ({ type: "nodes", key: `tBin:${i}`, ids: binIds[i] }),
       colour:  tGradient(mid),
       bin:     i,
       range,
@@ -838,7 +845,7 @@ function timeBinRows(s) {
     ],
     rows,
     defaultSort: { key: "bin", dir: "asc" },
-    selectionKey: (row, sel) => sel.type === "tBin" && sel.binIdx === row.bin,
+    selectionKey: (row, sel) => sel.type === "nodes" && sel.key === `tBin:${row.bin}`,
     gradient: hasYears
       ? { stops: T_STOPS, min: yMin, max: yMax, label: "year" }
       : { stops: T_STOPS, min: 0, max: 1, label: "t" },
@@ -882,7 +889,7 @@ function sameSelection(a, b) {
   if (a.type === "cluster") return a.level === b.level && a.id === b.id;
   if (a.type === "origin")  return a.id === b.id;
   if (a.type === "node")    return a.id === b.id;
-  if (a.type === "tBin")    return a.binIdx === b.binIdx;
+  if (a.type === "nodes")   return a.key === b.key;
   return false;
 }
 

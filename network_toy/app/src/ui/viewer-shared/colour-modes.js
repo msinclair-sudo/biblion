@@ -258,7 +258,7 @@ export function baseColourFor(node, state, mode) {
 // Does this node match the user's current selection? Returns
 //   true   — match, render at base colour
 //   false  — non-match, render dimmed
-//   null   — selection type doesn't dim (e.g. tBin), use base
+//   null   — selection has no type / not a dimming type, use base
 export function nodeMatchesSelection(node, state, sel) {
   if (!sel || !sel.type) return null;
   if (sel.type === "cluster") {
@@ -277,7 +277,25 @@ export function nodeMatchesSelection(node, state, sel) {
   if (sel.type === "node") {
     return node.id === sel.id;
   }
+  if (sel.type === "nodes") {
+    // Generic grouping/bin selection (node-table year bins, etc.) — carries its
+    // resolved ids. Memoise the Set since this runs per node on every repaint.
+    return selectionIdSet(sel).has(node.id);
+  }
   return null;
+}
+
+// Memoised Set for a {type:"nodes", ids} selection. state.selection is a fresh
+// object per selection change, so a one-slot cache keyed on its identity is
+// enough to avoid rebuilding the Set for every node in nodeColourFor.
+let _selSetRef = null;
+let _selSet = null;
+function selectionIdSet(sel) {
+  if (sel !== _selSetRef) {
+    _selSetRef = sel;
+    _selSet = new Set((sel && sel.ids) || []);
+  }
+  return _selSet;
 }
 
 // Selection focus (J25). The highlight channel (state.highlights.bySource) is
@@ -314,7 +332,7 @@ export function isNodeHighlighted(node, state) {
 // source for the Selected-papers panel. Mirrors nodeColourFor's "not greyed
 // when a selection is active" predicate: the union of every highlight source's
 // ids PLUS the nodes matching the single state.selection (cluster / node /
-// origin). Empty when nothing is selected (panel shows empty, matching the
+// origin / nodes). Empty when nothing is selected (panel shows empty, matching the
 // viewer colouring everything by colour-by).
 export function selectedNodeIds(state) {
   const ids = new Set();
@@ -341,6 +359,9 @@ export function selectedNodeIds(state) {
     }
   } else if (sel && sel.type === "origin") {
     for (const nd of nodes) if (nd && nd.originId === sel.id) ids.add(nd.id);
+  } else if (sel && sel.type === "nodes" && Array.isArray(sel.ids)) {
+    // Generic grouping/bin selection (year bins, …) carries its node ids.
+    for (const id of sel.ids) ids.add(id);
   }
   return ids;
 }
