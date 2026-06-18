@@ -175,21 +175,42 @@ test("isGhostNode resolves the structural flag off genResult.nodes", () => {
   assert.ok(typeof cm.GHOST_COLOUR === "string" && cm.GHOST_COLOUR !== cm.UNKNOWN_COLOUR);
 });
 
-test("ghostNodeColour: flat marker, dims under a selection, white when pinned", () => {
+test("ghostNodeColour: kind-aware flat marker, dims under a selection, white when pinned", () => {
   const base = {
-    genResult: { nodes: [{ id: 0, isGhost: true }, { id: 1 }, { id: 2, isGhost: true }] },
+    genResult: { nodes: [
+      { id: 0, isGhost: true, ghostKind: "pending" },
+      { id: 1 },
+      { id: 2, isGhost: true, ghostKind: "missing-data" },
+    ] },
     clusterLevels: [{ clusterResult: { nodeCluster: Int32Array.from([0, 0, 1]) } }],
   };
   const ghost = { id: 0 };
-  // nothing selected → distinct flat ghost colour
-  assert.equal(cm.ghostNodeColour(ghost, { ...base, selection: { type: null } }), cm.GHOST_COLOUR);
+  // nothing selected → the ghost's kind tone (pending = the shared GHOST_COLOUR)
+  assert.equal(cm.ghostNodeColour(ghost, { ...base, selection: { type: null } }), cm.GHOST_COLOUR_PENDING);
   // a cluster selection the ghost is NOT in → dimmed
   const sel = { ...base, selection: { type: "cluster", level: 0, id: 1 } };
   assert.equal(cm.ghostNodeColour(ghost, sel), cm.DIMMED_COLOUR);
-  // the same selection the ghost IS in → keeps the ghost colour
+  // the same selection the ghost IS in → keeps the kind tone
   const selIn = { ...base, selection: { type: "cluster", level: 0, id: 0 } };
-  assert.equal(cm.ghostNodeColour(ghost, selIn), cm.GHOST_COLOUR);
+  assert.equal(cm.ghostNodeColour(ghost, selIn), cm.GHOST_COLOUR_PENDING);
   // pinned → white emphasis wins
   const pinned = { ...base, selection: { type: null }, pinnedNodes: new Set([0]) };
   assert.equal(cm.ghostNodeColour(ghost, pinned), cm.PINNED_COLOUR);
+
+  // missing-data ghost gets its own (distinct) tone; absent kind falls back to it
+  const md = { id: 2 };
+  assert.equal(cm.ghostNodeColour(md, { ...base, selection: { type: null } }), cm.GHOST_COLOUR_MISSING);
+  assert.notEqual(cm.GHOST_COLOUR_MISSING, cm.GHOST_COLOUR_PENDING);
+});
+
+test("citationEdgeVisible: all citation edges obey showCitations; ghosts also need showGhosts", () => {
+  // Citations OFF → nothing draws, ghost-incident or not.
+  assert.equal(cm.citationEdgeVisible(true, false, true), false);
+  assert.equal(cm.citationEdgeVisible(false, false, true), false);
+  // Citations ON: ghost-incident edge additionally gated by showGhosts.
+  assert.equal(cm.citationEdgeVisible(true, true, true), true);
+  assert.equal(cm.citationEdgeVisible(true, true, false), false);  // ghosts hidden → not drawn
+  // Citations ON: real↔real edge draws regardless of showGhosts.
+  assert.equal(cm.citationEdgeVisible(false, true, true), true);
+  assert.equal(cm.citationEdgeVisible(false, true, false), true);
 });

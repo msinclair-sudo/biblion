@@ -26,7 +26,7 @@ import { getState, setTabConfig, clearAllHighlights, setSelection } from "../sta
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
   anyHighlightActive, pinnedSignature, tagsSignature,
-  isGhostNode, ghostNodeColour,
+  isGhostNode, ghostNodeColour, citationEdgeVisible,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
@@ -276,9 +276,15 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
     const linkOk = (a, b) => showGhosts || (!isGhostId(a) && !isGhostId(b));
     const links = [];
-    if (view.showCitations && s.citationResult && s.citationResult.citations) {
+    // Citation edges all obey the "Show citations" toggle (and its colour /
+    // opacity); ghost-incident ones additionally require ghosts to be shown, so a
+    // ghost's connecting edges appear when citations are viewed and vanish with
+    // either toggle. See citationEdgeVisible.
+    if (s.citationResult && s.citationResult.citations) {
       for (const c of s.citationResult.citations) {
-        if (linkOk(c.source, c.target)) links.push({ source: c.source, target: c.target, kind: "citation" });
+        const touchesGhost = isGhostId(c.source) || isGhostId(c.target);
+        if (!citationEdgeVisible(touchesGhost, view.showCitations, showGhosts)) continue;
+        links.push({ source: c.source, target: c.target, kind: "citation" });
       }
     }
     if (view.showStructure && s.clusterResult && s.clusterResult.structureEdges) {

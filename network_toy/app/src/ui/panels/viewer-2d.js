@@ -19,7 +19,8 @@ import ForceGraph from "force-graph";
 import { getState, setTabConfig, clearAllHighlights, setSelection } from "../state.js";
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
-  anyHighlightActive, pinnedSignature, tagsSignature,
+  anyHighlightActive, pinnedSignature, tagsSignature, ghostBaseColour,
+  citationEdgeVisible,
 } from "../viewer-shared/colour-modes.js";
 
 export const ID = "viewer-2d";
@@ -115,6 +116,10 @@ export function mount(container, _state, config = {}, tabContext = null) {
       .nodeCanvasObjectMode(ghostMode)
       .nodeCanvasObject(ghostCanvas)
       .nodeLabel((n) => `#${n.id} · cluster ${n.clusterId} · t=${(n.t ?? 0).toFixed(2)}`)
+      // Only ghost-incident citation edges are added (see rebuildData); a faint
+      // neutral line so a ghost visibly connects to the real papers citing it.
+      .linkColor(() => "rgba(150,150,150,0.45)")
+      .linkWidth(() => 0.5)
       .cooldownTicks(0)        // we pin positions; no simulation needed
       .warmupTicks(0)
       .d3VelocityDecay(1.0);   // zero-out integration alongside our pinned x/y
@@ -160,10 +165,23 @@ export function mount(container, _state, config = {}, tabContext = null) {
       });
     }
 
-    // Citation links: drop for now. Adding directed arrows in 2D is
-    // doable but clutters the canvas at any density. Could surface as
-    // a toggle later.
+    // Citation links: only the GHOST-INCIDENT ones, and only when ghosts are
+    // shown — so a ghost connects visibly to the real papers citing it without
+    // cluttering the canvas with the full citation graph (real↔real edges stay
+    // a 3D-only concern). No arrows.
     const links = [];
+    const showCit = (s.view || {}).showCitations;
+    if (s.citationResult && s.citationResult.citations) {
+      const isGhost = (id) => !!(s.genResult.nodes[id] && s.genResult.nodes[id].isGhost);
+      for (const c of s.citationResult.citations) {
+        const touchesGhost = isGhost(c.source) || isGhost(c.target);
+        // 2D intentionally renders only the ghost-incident edges (real↔real edges
+        // clutter the canvas); like 3D they obey the Show-citations + ghost toggles.
+        if (touchesGhost && citationEdgeVisible(touchesGhost, showCit, ghostsShown())) {
+          links.push({ source: c.source, target: c.target });
+        }
+      }
+    }
 
     Graph.graphData({ nodes, links });
     // Re-centre the view on the data extents so a fresh layout fills
@@ -187,7 +205,8 @@ export function mount(container, _state, config = {}, tabContext = null) {
   function ghostCanvas(n, ctx, scale) {
     if (!n.isGhost) return;
     const R = DEFAULT_NODE_R * nodeScale();
-    const col = nodeColourFor(n, getState(), colourMode);
+    const col = nodeColourFor(n, getState(), colourMode);   // stripes: cluster/dim lean
+    const ringCol = ghostBaseColour(n, getState());          // ring: ghost-kind tone
     const lw = Math.max(0.4, 0.7 / (scale || 1));
     ctx.save();
     ctx.beginPath();
@@ -205,9 +224,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
       ctx.stroke();
     }
     ctx.restore();
-    ctx.beginPath();                  // ring so the disc edge stays crisp
+    ctx.beginPath();                  // ring (in the kind tone) keeps the edge crisp
     ctx.arc(n.x, n.y, R, 0, 2 * Math.PI);
-    ctx.strokeStyle = col;
+    ctx.strokeStyle = ringCol;
     ctx.lineWidth = lw;
     ctx.stroke();
   }
@@ -231,6 +250,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let lastPinSig = pinnedSignature(getState());
   let lastTagSig = tagsSignature(getState());
   let lastShowGhosts = ghostsShown();
+  let lastShowCit = (getState().view || {}).showCitations === true;
   let lastNodeScale = nodeScale();
 
   return {
@@ -260,19 +280,25 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const tagChanged = tagSig !== lastTagSig;
       const showGhosts = (s.view || {}).showGhosts !== false;
       const ghostChanged = showGhosts !== lastShowGhosts;
+      const showCit = (s.view || {}).showCitations === true;
+      const citChanged = showCit !== lastShowCit;
       const ns = (s.view || {}).nodeScale ?? 1;
       const nodeScaleChanged = ns !== lastNodeScale;
-      if (selChanged || hlChanged || pinChanged || tagChanged || ghostChanged || nodeScaleChanged) {
+      if (selChanged || hlChanged || pinChanged || tagChanged || ghostChanged || citChanged || nodeScaleChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
         lastTagSig    = tagSig;
         lastShowGhosts = showGhosts;
+        lastShowCit   = showCit;
         if (nodeScaleChanged) {
           lastNodeScale = ns;
           // Re-render at the new radius; ghost hatch reads the scale on repaint.
           Graph.nodeRelSize(DEFAULT_NODE_R * ns);
         }
+        // Ghost-incident links depend on showGhosts + showCitations, so either
+        // toggle must rebuild the link set (node visibility is reactive, links not).
+        if (ghostChanged || citChanged) rebuildData();
         if (tagChanged) colourOverlay.refreshOptions();
         repaintSelection();
       }

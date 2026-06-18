@@ -833,6 +833,21 @@ html, body {
 }
 #edge-controls-host .lr-swatch::-webkit-color-swatch-wrapper { padding: 0; }
 #edge-controls-host .lr-swatch::-webkit-color-swatch { border: none; border-radius: 2px; }
+#edge-controls-host .lr-legend-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+#edge-controls-host .lr-legend-note .lr-swatch-dot:not(:first-child) { margin-left: 8px; }
+#edge-controls-host .lr-swatch-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
 #edge-controls-host .lr-swatch::-moz-color-swatch    { border: none; border-radius: 2px; }
 #edge-controls-host .lr-readout {
   font-family: var(--font-mono);

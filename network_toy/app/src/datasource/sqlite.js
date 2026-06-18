@@ -41,6 +41,20 @@ const NODE_SET_WHERE =
 const STRUCTURAL_WHERE =
   "is_rejected = 0 AND title IS NOT NULL AND (is_stub = 1 OR abstract IS NULL)";
 
+// Ghost keep-thresholds (real-partner degree = distinct embedded papers linked
+// by a citation in EITHER direction). A ghost earns its place only by connecting
+// to the real network; is_seed is irrelevant.
+const GHOST_STUB_MIN_DEGREE = 2;   // is_stub=1 identifier-only co-cited stubs ("pending")
+const GHOST_META_MIN_DEGREE = 1;   // is_stub=0 real paper missing an abstract ("missing-data")
+
+// Keep decision + kind for one ghost candidate. Returns "pending" | "missing-data"
+// when kept, or null when the ghost is too weakly connected to keep. Pure, so the
+// rule is unit-testable independent of the sql.js load path.
+export function ghostKeepKind(isStub, realPartnerDegree) {
+  if (isStub) return realPartnerDegree >= GHOST_STUB_MIN_DEGREE ? "pending" : null;
+  return realPartnerDegree >= GHOST_META_MIN_DEGREE ? "missing-data" : null;
+}
+
 // id → {label, sqlitePath, embeddingsPath, indexPath}. No longer hardcoded:
 // the list is fetched from serve.py /api/datasets (which scans data/*/ for
 // loadable datasets), then this map is populated by datasetEntry()/loadDatasets().
@@ -242,14 +256,53 @@ export async function produceSqlite(params = {}) {
     // Structural ("ghost") nodes: surfaced only when the snapshot was carved
     // with --include-structural. They are NOT in the .npy; we append them as the
     // last n-m node indices. On a legacy (embedded-only) snapshot this query
-    // returns nothing and the node set is unchanged.
-    const ghostRes = db.exec(`SELECT id, year FROM papers WHERE ${STRUCTURAL_WHERE} ORDER BY id`);
+    // returns nothing and the node set is unchanged. is_stub discriminates the
+    // two ghost kinds (see the prune step below).
+    const ghostRes = db.exec(`SELECT id, year, is_stub FROM papers WHERE ${STRUCTURAL_WHERE} ORDER BY id`);
     ghostRows = ghostRes.length ? ghostRes[0].values : [];
   }
-  const n = m + ghostRows.length;
+  // Citations, read once: needed both to prune isolated ghosts (below) and to
+  // build the edge list (further down). biblion stores canonical citing→cited.
+  const edgeRes = db.exec("SELECT citing_id, cited_id FROM citations");
+  const edgeVals = edgeRes.length ? edgeRes[0].values : [];
+
+  // ── Ghost pruning ────────────────────────────────────────────────
+  // A ghost earns its place only by connecting to the REAL (embedded) network.
+  // Real-partner degree = distinct embedded papers linked by a citation in
+  // EITHER direction. ghostKeepKind() decides keep + kind (see its floors).
+  // is_seed is irrelevant. An isolated no-abstract paper is dropped.
+  const embIdSet = new Set();
+  for (let i = 0; i < m; i++) embIdSet.add(embRows[i][0]);
+  const ghostStub = new Map();           // ghost papers.id → is_stub (0/1)
+  for (let i = 0; i < ghostRows.length; i++) ghostStub.set(ghostRows[i][0], ghostRows[i][2] ? 1 : 0);
+  const ghostPartners = new Map();       // ghost papers.id → Set(embedded id)
+  const addPartner = (gid, eid) => {
+    let s = ghostPartners.get(gid); if (!s) ghostPartners.set(gid, s = new Set()); s.add(eid);
+  };
+  for (let k = 0; k < edgeVals.length; k++) {
+    const a = edgeVals[k][0], b = edgeVals[k][1];
+    if (ghostStub.has(a) && embIdSet.has(b)) addPartner(a, b);
+    if (ghostStub.has(b) && embIdSet.has(a)) addPartner(b, a);
+  }
+  // ghost papers.id → kept kind ("pending" | "missing-data"); pruned ids absent.
+  const ghostKindById = new Map();
+  const keptGhostRows = [];
+  let nGhostMissingData = 0, nGhostPending = 0, nGhostDroppedIsolated = 0;
+  for (let i = 0; i < ghostRows.length; i++) {
+    const ps = ghostPartners.get(ghostRows[i][0]);
+    const kind = ghostKeepKind(ghostRows[i][2] ? 1 : 0, ps ? ps.size : 0);
+    if (kind) {
+      keptGhostRows.push(ghostRows[i]);
+      ghostKindById.set(ghostRows[i][0], kind);
+      if (kind === "pending") nGhostPending++; else nGhostMissingData++;
+    } else {
+      nGhostDroppedIsolated++;
+    }
+  }
+  const n = m + keptGhostRows.length;
 
   // Year range → t ∈ [0,1] (newest = 1), matching real.js's FR time anchor.
-  // Computed over all nodes (embedded + ghost) so ghosts share the timeline.
+  // Computed over all kept nodes (embedded + ghost) so ghosts share the timeline.
   let yrMin = Infinity, yrMax = -Infinity;
   const noteYear = (y) => {
     if (Number.isFinite(y)) {
@@ -258,19 +311,19 @@ export async function produceSqlite(params = {}) {
     }
   };
   for (let i = 0; i < m; i++) noteYear(embRows[i][1]);
-  for (let i = 0; i < ghostRows.length; i++) noteYear(ghostRows[i][1]);
+  for (let i = 0; i < keptGhostRows.length; i++) noteYear(keptGhostRows[i][1]);
   const yrRange = yrMax > yrMin ? yrMax - yrMin : 0;
 
   const rowById = new Map();
   const nodes = new Array(n);
-  const mkNode = (idx, id, y, isGhost) => {
+  const mkNode = (idx, id, y, isGhost, ghostKind = null) => {
     rowById.set(id, idx);
     let t = 0, year = null;
     if (Number.isFinite(y)) {
       year = y;
       t = yrRange > 0 ? (y - yrMin) / yrRange : 0;
     }
-    nodes[idx] = { id: idx, t, year, paperId: id, isGhost };
+    nodes[idx] = { id: idx, t, year, paperId: id, isGhost, ghostKind };
   };
   // Embedded nodes occupy rows 0..m-1, in .npy order.
   for (let i = 0; i < m; i++) {
@@ -280,14 +333,16 @@ export async function produceSqlite(params = {}) {
     }
     mkNode(i, id, embRows[i][1], false);
   }
-  // Ghosts occupy rows m..n-1 (NO embedding row). Skip any structural id that
-  // somehow already appeared in the embedded set (defensive — the predicates
-  // are disjoint, but a malformed snapshot must not double-insert a node).
+  // Kept ghosts occupy rows m..n-1 (NO embedding row). ghostKind is keyed off
+  // is_stub: identifier-only stubs are "pending" (co-cited endpoints), titled-
+  // but-abstractless papers are "missing-data" (enrichment candidates). Skip any
+  // structural id that somehow already appeared in the embedded set (defensive —
+  // the predicates are disjoint, but a malformed snapshot must not double-insert).
   let ghostIdx = m;
-  for (let i = 0; i < ghostRows.length; i++) {
-    const id = ghostRows[i][0];
+  for (let i = 0; i < keptGhostRows.length; i++) {
+    const id = keptGhostRows[i][0];
     if (rowById.has(id)) continue;
-    mkNode(ghostIdx++, id, ghostRows[i][1], true);
+    mkNode(ghostIdx++, id, keptGhostRows[i][1], true, ghostKindById.get(id));
   }
   // Compact away any skipped duplicate slots so node ids stay contiguous 0..n-1.
   if (ghostIdx !== n) nodes.length = ghostIdx;
@@ -299,12 +354,10 @@ export async function produceSqlite(params = {}) {
   const rowOf = new Int32Array(nFinal);
   for (let i = 0; i < nFinal; i++) rowOf[i] = nodes[i].isGhost ? -1 : i;
 
-  // Citation edges → flat [src, dst, …] in node-index space. biblion stores
-  // canonical citing→cited, which already IS the toy's "source cites target",
-  // so NO direction flip. Edges to ghosts are KEPT (the whole point — they carry
-  // the A→ghost→B bridge). Drop only edges whose endpoint is in neither set.
-  const edgeRes = db.exec("SELECT citing_id, cited_id FROM citations");
-  const edgeVals = edgeRes.length ? edgeRes[0].values : [];
+  // Citation edges → flat [src, dst, …] in node-index space. No direction flip
+  // (citing→cited already IS source-cites-target). Edges to kept ghosts are KEPT
+  // (they carry the A→ghost→B bridge); edges to a pruned ghost fall away here as
+  // "endpoint not in set".
   const citationEdges = [];
   let droppedEdges = 0;
   let ghostEdges = 0;
@@ -342,6 +395,10 @@ export async function produceSqlite(params = {}) {
       edgesDropped: droppedEdges,
       nEmbedded: m,
       nGhost: nFinal - m,
+      nGhostMissingData,
+      nGhostPending,
+      nGhostDroppedIsolated,
+      ghostMinDegree: { missingData: GHOST_META_MIN_DEGREE, pending: GHOST_STUB_MIN_DEGREE },
       ghostEdges,
     },
     nodes,

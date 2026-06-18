@@ -13,11 +13,37 @@ export const DEFAULT_COLOUR_MODE = "cluster:finest";
 export const DIMMED_COLOUR       = "#3a3f4a";
 export const UNKNOWN_COLOUR      = "#888";
 export const PINNED_COLOUR       = "#ffffff";   // white-emphasis pin (top layer)
-// Ghost (structure-only) marker. A distinct muted slate — NOT the noise grey
+// Ghost (structure-only) markers. Distinct muted tones — NOT the noise grey
 // (#888) nor a vivid cluster hue — so a ghost never reads as a real paper. The
 // 2D viewer hatches in the node's real colour over this; the 3D viewer (spheres
 // can't hatch cheaply) falls back to this as a flat fill.
-export const GHOST_COLOUR        = "#6b6f7a";
+//   missing-data — a real paper missing only an abstract (enrichment candidate):
+//                  a warm muted tan, reading as "almost real".
+//   pending      — an identifier-only co-cited stub: cool slate, more peripheral.
+export const GHOST_COLOUR          = "#6b6f7a";   // default / pending (back-compat)
+export const GHOST_COLOUR_PENDING  = "#6b6f7a";
+export const GHOST_COLOUR_MISSING  = "#9a8a63";
+
+// Whether a citation edge should be drawn, given the two view toggles and
+// whether the edge touches a ghost. All citation edges obey the global "Show
+// citations" toggle (and share its colour/opacity); ghost-incident edges
+// additionally require ghosts to be shown, so hiding ghosts also hides their
+// edges. Pure, so the viewers and their tests share one source of truth.
+export function citationEdgeVisible(touchesGhost, showCitations, showGhosts) {
+  if (!showCitations) return false;
+  return touchesGhost ? !!showGhosts : true;
+}
+
+// The ghost's base tone by kind, read off the canonical node entry. Falls back
+// to the missing-data tone for legacy nodes that predate ghostKind (most ghosts
+// are missing-data), and to the shared default if the node can't be resolved.
+export function ghostBaseColour(node, state) {
+  const nd = state && state.genResult && state.genResult.nodes[node.id];
+  const kind = nd && nd.ghostKind;
+  if (kind === "pending") return GHOST_COLOUR_PENDING;
+  if (kind === "missing-data") return GHOST_COLOUR_MISSING;
+  return GHOST_COLOUR_MISSING;
+}
 
 // True when this node is a structural "ghost" (no embedding/metadata — see
 // doc/ghost-nodes.md). The viewer node projection only carries an id, so we
@@ -34,12 +60,13 @@ export function isGhostNode(node, state) {
 // excludes it, rather than popping at its distinct colour.
 export function ghostNodeColour(node, state) {
   if (state && state.pinnedNodes && state.pinnedNodes.has(node.id)) return PINNED_COLOUR;
+  const base = ghostBaseColour(node, state);
   const matched = nodeMatchesSelection(node, state, state.selection);
   if (anyHighlightActive(state)) {
-    return (isNodeHighlighted(node, state) || matched === true) ? GHOST_COLOUR : DIMMED_COLOUR;
+    return (isNodeHighlighted(node, state) || matched === true) ? base : DIMMED_COLOUR;
   }
   if (matched === false) return DIMMED_COLOUR;
-  return GHOST_COLOUR;
+  return base;
 }
 
 // Categorical palette for the "tag" colour mode (Tableau-10). Shared with the

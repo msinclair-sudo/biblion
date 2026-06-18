@@ -181,8 +181,12 @@
     <div class="lr-section-title">Nodes</div>
     <div class="lr-row lr-row-toggles">
       <label class="lr-inline-check"
-             title="Show structural ghost nodes (no metadata). Hatched in 2D, distinct colour in 3D.">
+             title="Show structural ghost nodes (no embedding). Hatched in 2D, distinct colour in 3D. Tan = missing-data (real paper, no abstract — enrichable); slate = pending (co-cited stub).">
         <input type="checkbox" id="ec-ghosts" checked> Ghosts</label>
+    </div>
+    <div class="lr-row lr-legend-note">
+      <span class="lr-swatch-dot" style="background:#9a8a63"></span> missing-data
+      <span class="lr-swatch-dot" style="background:#6b6f7a"></span> pending
     </div>
     <div class="lr-row lr-row-slider">
       <label for="ec-node-scale">Size</label>

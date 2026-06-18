@@ -66,7 +66,7 @@ export function joinPaperRow(nodeId, state, levels, opts = {}) {
     authors: (rec.authors && rec.authors.length) ? rec.authors.join("; ") : null,
     doi:     rec.doi ?? null,
     pubType: rec.pubType ?? null,
-    isGhost: nd.isGhost ? "ghost" : "",
+    isGhost: nd.isGhost ? (nd.ghostKind || "ghost") : "",
     inDeg:   inDeg == null ? null : inDeg,
     x: pos ? round3(pos[nodeId * 3])     : null,
     y: pos ? round3(pos[nodeId * 3 + 1]) : null,
