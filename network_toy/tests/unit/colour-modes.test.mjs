@@ -156,3 +156,40 @@ test("year mode maps real publication years across the gradient", () => {
   assert.equal(new Set([cOld, cMid, cNew]).size, 3);                 // three years → three colours
   assert.ok(typeof cNull === "string" && cNull.length > 0);
 });
+
+test("isGhostNode resolves the structural flag off genResult.nodes", () => {
+  const state = {
+    genResult: { nodes: [
+      { id: 0, isGhost: false },
+      { id: 1 },                    // no flag → real
+      { id: 2, isGhost: true },     // ghost
+    ] },
+  };
+  assert.equal(cm.isGhostNode({ id: 0 }, state), false);
+  assert.equal(cm.isGhostNode({ id: 1 }, state), false);
+  assert.equal(cm.isGhostNode({ id: 2 }, state), true);
+  // robust to missing state / node
+  assert.equal(cm.isGhostNode(null, state), false);
+  assert.equal(cm.isGhostNode({ id: 0 }, {}), false);
+  // a distinct ghost colour exists and isn't the noise grey
+  assert.ok(typeof cm.GHOST_COLOUR === "string" && cm.GHOST_COLOUR !== cm.UNKNOWN_COLOUR);
+});
+
+test("ghostNodeColour: flat marker, dims under a selection, white when pinned", () => {
+  const base = {
+    genResult: { nodes: [{ id: 0, isGhost: true }, { id: 1 }, { id: 2, isGhost: true }] },
+    clusterLevels: [{ clusterResult: { nodeCluster: Int32Array.from([0, 0, 1]) } }],
+  };
+  const ghost = { id: 0 };
+  // nothing selected → distinct flat ghost colour
+  assert.equal(cm.ghostNodeColour(ghost, { ...base, selection: { type: null } }), cm.GHOST_COLOUR);
+  // a cluster selection the ghost is NOT in → dimmed
+  const sel = { ...base, selection: { type: "cluster", level: 0, id: 1 } };
+  assert.equal(cm.ghostNodeColour(ghost, sel), cm.DIMMED_COLOUR);
+  // the same selection the ghost IS in → keeps the ghost colour
+  const selIn = { ...base, selection: { type: "cluster", level: 0, id: 0 } };
+  assert.equal(cm.ghostNodeColour(ghost, selIn), cm.GHOST_COLOUR);
+  // pinned → white emphasis wins
+  const pinned = { ...base, selection: { type: null }, pinnedNodes: new Set([0]) };
+  assert.equal(cm.ghostNodeColour(ghost, pinned), cm.PINNED_COLOUR);
+});

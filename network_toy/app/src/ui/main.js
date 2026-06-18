@@ -92,6 +92,7 @@ function mountEdgeControls() {
   const baseCol      = document.getElementById("ec-base-colour");
   const skel         = document.getElementById("ec-structure");
   const skelCol      = document.getElementById("ec-structure-colour");
+  const ghosts       = document.getElementById("ec-ghosts");
   if (!cite || !citOpa || !arrows || !base || !baseDens || !skel) return;
 
   // Seed widgets from state.
@@ -105,6 +106,7 @@ function mountEdgeControls() {
   if (baseCol)       baseCol.value    = v0.baseColour      || "#5a6878";
   skel.checked       = !!v0.showStructure;
   if (skelCol)       skelCol.value    = v0.structureColour || "#5dd39e";
+  if (ghosts)        ghosts.checked   = v0.showGhosts !== false;
   if (citOpaRead)    citOpaRead.textContent   = (+v0.citOpacity).toFixed(2);
   if (baseDensRead)  baseDensRead.textContent = (+v0.baseDensity).toFixed(3);
 
@@ -112,6 +114,7 @@ function mountEdgeControls() {
   arrows.addEventListener("change",   () => setView({ citArrows:     arrows.checked }));
   base.addEventListener("change",     () => setView({ showBase:      base.checked }));
   skel.addEventListener("change",     () => setView({ showStructure: skel.checked }));
+  if (ghosts) ghosts.addEventListener("change", () => setView({ showGhosts: ghosts.checked }));
   citOpa.addEventListener("input",    () => {
     const v = +citOpa.value;
     setView({ citOpacity: v });
@@ -133,6 +136,7 @@ function mountEdgeControls() {
     if (arrows.checked   !== !!v.citArrows)     arrows.checked   = !!v.citArrows;
     if (base.checked     !== !!v.showBase)      base.checked     = !!v.showBase;
     if (skel.checked     !== !!v.showStructure) skel.checked     = !!v.showStructure;
+    if (ghosts && ghosts.checked !== (v.showGhosts !== false)) ghosts.checked = v.showGhosts !== false;
     if (Math.abs(+citOpa.value   - v.citOpacity)  > 1e-6) {
       citOpa.value = String(v.citOpacity);
       if (citOpaRead) citOpaRead.textContent = (+v.citOpacity).toFixed(2);

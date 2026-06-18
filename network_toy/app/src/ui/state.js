@@ -278,11 +278,14 @@ const state = {
   //   citArrows     — directional arrowheads on citation edges only
   //   citOpacity    — 0..1 linear opacity for citation links
   //   baseDensity   — 0..1 fraction of all n*(n-1)/2 pairs to draw as base edges
+  //   showGhosts    — render structural "ghost" nodes (hatched 2D / distinct 3D);
+  //                   off hides them and (3D) their links
   view: {
     showCitations: false,
     showBase:      false,
     showStructure: false,
     citArrows:     false,
+    showGhosts:    true,
     citOpacity:    0.15,
     baseDensity:   0.02,
     // Per-edge-kind colours. Defaults match the EDGE_STYLE table in

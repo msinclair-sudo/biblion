@@ -26,6 +26,7 @@ import { getState, setTabConfig, clearAllHighlights, setSelection } from "../sta
 import {
   getColourModeOptions, nodeColourFor, DEFAULT_COLOUR_MODE, highlightSignature,
   anyHighlightActive, pinnedSignature, tagsSignature,
+  isGhostNode, ghostNodeColour,
 } from "../viewer-shared/colour-modes.js";
 
 // Per-edge-kind static styling. Widths + default colours + arrow
@@ -240,9 +241,17 @@ export function mount(container, _state, config = {}, tabContext = null) {
     }
     hideEmptyState();
 
+    const view = s.view || {};
+    // Ghosts off → drop the structural nodes entirely (and, below, any link
+    // touching one). A ghost with no embedding still carries citation edges,
+    // so hiding the node without its links would orphan-create it.
+    const showGhosts = view.showGhosts !== false;
+    const isGhostId = (id) => !!(s.genResult.nodes[id] && s.genResult.nodes[id].isGhost);
+
     const nodes = [];
     const liveById = readLivePositions(Graph);
     for (const n of s.genResult.nodes) {
+      if (!showGhosts && n.isGhost) continue;
       const cid = s.clusterResult ? s.clusterResult.nodeCluster[n.id] : -1;
       const seed = liveById.get(n.id);
       // Carry whatever per-node fields the colour modes / labels need.
@@ -254,29 +263,30 @@ export function mount(container, _state, config = {}, tabContext = null) {
         t:         n.t,
         originId:  n.originId,
         clusterId: cid,
+        isGhost:   !!n.isGhost,
         x: seed ? seed.x : (s._basePos ? s._basePos[n.id*3]   : 0),
         y: seed ? seed.y : (s._basePos ? s._basePos[n.id*3+1] : 0),
         z: seed ? seed.z : (s._basePos ? s._basePos[n.id*3+2] : 0),
       });
     }
 
-    const view = s.view || {};
+    const linkOk = (a, b) => showGhosts || (!isGhostId(a) && !isGhostId(b));
     const links = [];
     if (view.showCitations && s.citationResult && s.citationResult.citations) {
       for (const c of s.citationResult.citations) {
-        links.push({ source: c.source, target: c.target, kind: "citation" });
+        if (linkOk(c.source, c.target)) links.push({ source: c.source, target: c.target, kind: "citation" });
       }
     }
     if (view.showStructure && s.clusterResult && s.clusterResult.structureEdges) {
       for (const e of s.clusterResult.structureEdges) {
-        links.push({ source: e[0], target: e[1], kind: "structure-edge" });
+        if (linkOk(e[0], e[1])) links.push({ source: e[0], target: e[1], kind: "structure-edge" });
       }
     }
     if (view.showBase && s.genResult && s._basePos) {
       // buildBaseEdges reads basePos per node; ensure each node carries
       // it as the helper expects (engine syncs this on every dimred).
       for (const e of buildBaseEdges(s.genResult, view.baseDensity)) {
-        links.push({ source: e.source, target: e.target, kind: "base" });
+        if (linkOk(e.source, e.target)) links.push({ source: e.source, target: e.target, kind: "base" });
       }
     }
 
@@ -348,6 +358,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
       v.showBase      ? "1" : "0",
       v.showStructure ? "1" : "0",
       v.citArrows     ? "1" : "0",
+      v.showGhosts === false ? "0" : "1",
       (+v.citOpacity  || 0).toFixed(3),
       (+v.baseDensity || 0).toFixed(4),
       v.citColour       || "",
@@ -356,9 +367,15 @@ export function mount(container, _state, config = {}, tabContext = null) {
     ].join(":");
   }
 
-  // Single delegation to the shared resolver (mode + selection dim).
+  // Single delegation to the shared resolver (mode + selection dim). Ghosts are
+  // the exception: spheres can't hatch cheaply (the 2D viewer does the real
+  // hatch), so a ghost renders in a distinct flat GHOST_COLOUR — but still
+  // pinned/dimmed via the same envelope as nodeColourFor so a selection focus
+  // greys non-selected ghosts too.
   function nodeColour(n) {
-    return nodeColourFor(n, getState(), colourMode);
+    const s = getState();
+    if (isGhostNode(n, s)) return ghostNodeColour(n, s);
+    return nodeColourFor(n, s, colourMode);
   }
 
   // Re-evaluate node colours without rebuilding graphData. Cheap;

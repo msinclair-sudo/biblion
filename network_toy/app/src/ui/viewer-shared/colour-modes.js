@@ -13,6 +13,34 @@ export const DEFAULT_COLOUR_MODE = "cluster:finest";
 export const DIMMED_COLOUR       = "#3a3f4a";
 export const UNKNOWN_COLOUR      = "#888";
 export const PINNED_COLOUR       = "#ffffff";   // white-emphasis pin (top layer)
+// Ghost (structure-only) marker. A distinct muted slate — NOT the noise grey
+// (#888) nor a vivid cluster hue — so a ghost never reads as a real paper. The
+// 2D viewer hatches in the node's real colour over this; the 3D viewer (spheres
+// can't hatch cheaply) falls back to this as a flat fill.
+export const GHOST_COLOUR        = "#6b6f7a";
+
+// True when this node is a structural "ghost" (no embedding/metadata — see
+// doc/ghost-nodes.md). The viewer node projection only carries an id, so we
+// resolve the flag off the canonical genResult.nodes entry.
+export function isGhostNode(node, state) {
+  if (!node || !state || !state.genResult) return false;
+  const nd = state.genResult.nodes[node.id];
+  return !!(nd && nd.isGhost);
+}
+
+// Flat colour for a ghost in renderers that can't hatch (the 3D sphere viewer;
+// the 2D canvas does the real hatch). Applies the SAME pin/selection-dim
+// envelope as nodeColourFor so a ghost greys out when a selection focus
+// excludes it, rather than popping at its distinct colour.
+export function ghostNodeColour(node, state) {
+  if (state && state.pinnedNodes && state.pinnedNodes.has(node.id)) return PINNED_COLOUR;
+  const matched = nodeMatchesSelection(node, state, state.selection);
+  if (anyHighlightActive(state)) {
+    return (isNodeHighlighted(node, state) || matched === true) ? GHOST_COLOUR : DIMMED_COLOUR;
+  }
+  if (matched === false) return DIMMED_COLOUR;
+  return GHOST_COLOUR;
+}
 
 // Categorical palette for the "tag" colour mode (Tableau-10). Shared with the
 // tags-list panel's swatches so a tag's colour matches across viewer + panel.

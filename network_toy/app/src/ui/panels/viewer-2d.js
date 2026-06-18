@@ -108,6 +108,9 @@ export function mount(container, _state, config = {}, tabContext = null) {
       .backgroundColor("#06080c")
       .nodeRelSize(DEFAULT_NODE_R)
       .nodeColor(nodeColour)
+      .nodeVisibility(ghostVisible)
+      .nodeCanvasObjectMode(ghostMode)
+      .nodeCanvasObject(ghostCanvas)
       .nodeLabel((n) => `#${n.id} · cluster ${n.clusterId} · t=${(n.t ?? 0).toFixed(2)}`)
       .cooldownTicks(0)        // we pin positions; no simulation needed
       .warmupTicks(0)
@@ -148,6 +151,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
         t:         n.t,
         originId:  n.originId,
         clusterId: cid,
+        isGhost:   !!n.isGhost,                  // structural ghost → hatched marker
         fx:        s._basePos2d[n.id * 2],       // fx/fy pin position in force-graph
         fy:        s._basePos2d[n.id * 2 + 1],
       });
@@ -171,6 +175,40 @@ export function mount(container, _state, config = {}, tabContext = null) {
     return nodeColourFor(n, getState(), colourMode);
   }
 
+  // Ghost markers: hidden when the toggle is off; otherwise drawn as a hatched
+  // disc so a structural node never reads as a real paper. The stripes use the
+  // node's normal mode colour (so it still conveys cluster lean / dim state).
+  function ghostsShown() { return (getState().view || {}).showGhosts !== false; }
+  function ghostVisible(n) { return ghostsShown() || !n.isGhost; }
+  function ghostMode(n) { return n.isGhost ? "replace" : undefined; }
+  function ghostCanvas(n, ctx, scale) {
+    if (!n.isGhost) return;
+    const R = DEFAULT_NODE_R;
+    const col = nodeColourFor(n, getState(), colourMode);
+    const lw = Math.max(0.4, 0.7 / (scale || 1));
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, R, 0, 2 * Math.PI);
+    ctx.fillStyle = "#0b0e13";        // dark fill so the stripes read
+    ctx.fill();
+    ctx.clip();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = lw;
+    const step = 1.6;
+    for (let d = -2 * R; d <= 2 * R; d += step) {   // 45° diagonal hatch
+      ctx.beginPath();
+      ctx.moveTo(n.x - R + d, n.y - R);
+      ctx.lineTo(n.x + R + d, n.y + R);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.beginPath();                  // ring so the disc edge stays crisp
+    ctx.arc(n.x, n.y, R, 0, 2 * Math.PI);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = lw;
+    ctx.stroke();
+  }
+
   function repaintSelection() {
     if (!Graph) return;
     Graph.nodeColor(nodeColour);
@@ -189,6 +227,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
   let lastHlSig = highlightSignature(getState());
   let lastPinSig = pinnedSignature(getState());
   let lastTagSig = tagsSignature(getState());
+  let lastShowGhosts = ghostsShown();
 
   return {
     update(s) {
@@ -215,11 +254,14 @@ export function mount(container, _state, config = {}, tabContext = null) {
       const pinChanged = pinSig !== lastPinSig;
       const tagSig = tagsSignature(s);
       const tagChanged = tagSig !== lastTagSig;
-      if (selChanged || hlChanged || pinChanged || tagChanged) {
+      const showGhosts = (s.view || {}).showGhosts !== false;
+      const ghostChanged = showGhosts !== lastShowGhosts;
+      if (selChanged || hlChanged || pinChanged || tagChanged || ghostChanged) {
         lastSelection = s.selection;
         lastHlSig     = hlSig;
         lastPinSig    = pinSig;
         lastTagSig    = tagSig;
+        lastShowGhosts = showGhosts;
         if (tagChanged) colourOverlay.refreshOptions();
         repaintSelection();
       }
