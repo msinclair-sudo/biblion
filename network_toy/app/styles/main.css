@@ -1311,6 +1311,7 @@ td.cart-cell {
 }
 td.cart-cell-int, td.cart-cell-float { text-align: right; }
 .cart-cell-check, .cart-th-check, .cart-cell-rm, .cart-th-rm { width: 1%; text-align: center; }
+.cart-cell-abs, .cart-th-abs { width: 1%; text-align: center; white-space: nowrap; }
 /* Selected-papers panel: a pinned (white-emphasis) row reads as white-tinted,
    echoing the pure-white node in the viewer. */
 tr.cart-row.pinned td.cart-cell {
@@ -1662,6 +1663,26 @@ tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--ac
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* ── abstract reader modal ──────────────────────────────────────────── */
+
+.abstract-modal-body { min-width: 360px; max-width: 560px; }
+.abstract-modal-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.abstract-modal-counter { color: var(--text-dim); font-size: 11px; }
+.abstract-modal-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.abstract-modal-meta { color: var(--text-dim); font-size: 11px; margin-bottom: 10px; }
+.abstract-modal-text {
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 50vh;
+  overflow: auto;
+}
+.abstract-modal-text.empty { color: var(--text-dim); font-style: italic; }
 
 /* ── panel-picker modal ─────────────────────────────────────────────── */
 

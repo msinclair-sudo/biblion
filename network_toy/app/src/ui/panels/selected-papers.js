@@ -20,6 +20,8 @@ import {
   paperColumns, joinPaperRow, formatCell, compareBy,
 } from "./paper-table.js";
 import { makeColumnsResizable } from "./column-resize.js";
+import { openAbstractModal } from "../modals/abstract-modal.js";
+import { hasSqliteText } from "../../datasource/sqlite.js";
 
 export const ID = "selected-papers";
 export const LABEL = "Selected papers";
@@ -231,6 +233,12 @@ export function mount(container, _state, config = {}, tabContext = null) {
     thCheck.appendChild(master);
     tr.appendChild(thCheck);
 
+    // Action column header (per-row "abstract" button); empty label, kept
+    // narrow so the table's resizable data columns stay aligned.
+    const thAbs = document.createElement("th");
+    thAbs.className = "cart-th cart-th-abs";
+    tr.appendChild(thAbs);
+
     for (const col of visibleColumns()) {
       const th = document.createElement("th");
       th.className = "cart-th sortable";
@@ -271,7 +279,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
     const rows = filteredSorted();
     const pinned = getState().pinnedNodes;
 
-    for (const r of rows) {
+    rows.forEach((r, i) => {
       const tr = document.createElement("tr");
       tr.className = "cart-row" + (pinned.has(r.nodeId) ? " pinned" : "");
 
@@ -285,6 +293,22 @@ export function mount(container, _state, config = {}, tabContext = null) {
       tdCheck.appendChild(cb);
       tr.appendChild(tdCheck);
 
+      // Per-row "abstract" button → reader modal, paging across the shown rows.
+      const tdAbs = document.createElement("td");
+      tdAbs.className = "cart-cell cart-cell-abs";
+      const absBtn = document.createElement("button");
+      absBtn.className = "cart-btn";
+      absBtn.textContent = "abstract";
+      if (!hasSqliteText()) {
+        absBtn.disabled = true;
+        absBtn.title = "Abstracts need the connected snapshot database. Re-open the dataset to read them.";
+      } else {
+        const here = i;        // index within the current filteredSorted() list
+        absBtn.addEventListener("click", () => openAbstractModal(rows, here));
+      }
+      tdAbs.appendChild(absBtn);
+      tr.appendChild(tdAbs);
+
       for (const col of cols) {
         const td = document.createElement("td");
         td.className = `cart-cell cart-cell-${col.kind}`;
@@ -294,7 +318,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
-    }
+    });
 
     const isEmpty = joinedRows.length === 0;
     empty.style.display = isEmpty ? "block" : "none";

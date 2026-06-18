@@ -409,3 +409,125 @@ def test_dim_sweep_panel_saved_mode(page):
     assert out["bars"] == 2
     assert out["hasRunBtn"] is False
     assert out["hasSaveBtn"] is False
+
+
+# ── selected-papers abstract modal ──────────────────────────────────────
+
+
+def test_abstract_modal_shows_and_navigates(page):
+    """The Selected-papers per-row 'abstract' button opens a reader modal that
+    pulls the abstract from the live snapshot DB and pages across the rows it
+    was handed. Mirrors test_export_bibtex's live-corpus reconnect/cleanup."""
+    out = page.evaluate(r'''async () => {
+        const sq    = await import("/app/src/datasource/sqlite.js");
+        const state = await import("/app/src/ui/state.js");
+        const pt    = await import("/app/src/ui/panels/paper-table.js");
+        const am    = await import("/app/src/ui/modals/abstract-modal.js");
+        const nodes = (state.getState().genResult || {}).nodes || [];
+        const ok = await sq.reconnectSqliteCorpus("fallworm", nodes);
+        try {
+            if (!ok || !sq.hasSqliteText()) return { sqliteLoaded: false };
+            const levels = state.getState().clusterLevels || [];
+            const rows = [];
+            for (let i = 0; i < 3; i++) rows.push(pt.joinPaperRow(i, state.getState(), levels));
+            const modal = am.openAbstractModal(rows, 0);
+            const dialog = document.querySelector("#modal-root .modal-dialog");
+            const title0 = dialog.querySelector(".abstract-modal-title").textContent;
+            const counter0 = dialog.querySelector(".abstract-modal-counter").textContent;
+            const hasText = !!dialog.querySelector(".abstract-modal-text");
+            const prevDisabled0 = dialog.querySelector(".abstract-modal-nav button").disabled;
+
+            // Page forward.
+            const navBtns = dialog.querySelectorAll(".abstract-modal-nav button");
+            navBtns[navBtns.length - 1].click();   // Next ›
+            const title1 = dialog.querySelector(".abstract-modal-title").textContent;
+            const counter1 = dialog.querySelector(".abstract-modal-counter").textContent;
+
+            modal.close();
+            const closed = !document.querySelector("#modal-root .modal-dialog");
+            return {
+                sqliteLoaded: true, hasText, prevDisabled0,
+                title0, title1, counter0, counter1, closed,
+                titleChanged: title0 !== title1,
+            };
+        } finally {
+            sq.clearSqliteCorpus();
+        }
+    }''')
+    if out.get("sqliteLoaded") is not True:
+        pytest.skip("fallworm snapshot DB unavailable in this environment")
+    assert out["hasText"] is True
+    assert out["prevDisabled0"] is True           # Prev disabled on the first row
+    assert out["counter0"] == "1 of 3"
+    assert out["counter1"] == "2 of 3"
+    assert out["titleChanged"] is True
+    assert out["closed"] is True
+
+
+# ── panel-system re-entrancy guard ─────────────────────────────────────
+
+
+def test_secondary_slot_survives_state_writing_panel_teardown(page):
+    """Regression: switching away from a panel whose destroy() writes state
+    (e.g. tags-list clearing its 'tags' highlight) must NOT double-mount the
+    incoming secondary panel. The teardown's synchronous state.update() re-
+    enters the panel-system subscribe; without the slot-tracker guard in
+    renderActivePanel that recursion re-ran the render and mounted the
+    incoming panel twice, wiping its DOM and leaving the slot unresponsive."""
+    out = page.evaluate(r'''async () => {
+        const state = await import("/app/src/ui/state.js");
+        const reg   = await import("/app/src/ui/panels/registry.js");
+
+        const cartMeta = reg.getPanelType("cart");
+        const tagsMeta = reg.getPanelType("tags-list");
+        const origCart = cartMeta.mount;
+        const origTags = tagsMeta.mount;
+        const priorSecondary = state.getState().panels.secondary;
+
+        // Outgoing panel whose instance.destroy() writes state — mimics
+        // tags-list.destroy() -> clearHighlight("tags").
+        cartMeta.mount = (c, s, cfg, tc) => {
+            const inst = origCart(c, s, cfg, tc);
+            return {
+                update: inst && inst.update ? (x) => inst.update(x) : undefined,
+                destroy() { state.clearHighlight("tags"); if (inst && inst.destroy) inst.destroy(); },
+            };
+        };
+        let mounts = 0;
+        tagsMeta.mount = (...a) => { mounts++; return origTags(...a); };
+
+        try {
+            const cur = state.getState().panels;
+            state.update({ panels: { ...cur, secondary: {
+                activeTabId: "reentryA",
+                tabs: [ { id: "reentryA", type: "cart", config: {} },
+                        { id: "reentryB", type: "tags-list", config: {} } ],
+            }}});
+            // Populate the channel the outgoing destroy clears, so its
+            // clearHighlight actually fires update() (the re-entrancy trigger).
+            state.addHighlight("tags", [0], "#ffffff");
+
+            mounts = 0;
+            state.setActiveTab("secondary", "reentryB");
+            const switchMounts = mounts;
+
+            const contentEl = document.querySelector('.panel-slot[data-slot="secondary"] .panel-content');
+            const childCount = contentEl ? contentEl.children.length : -1;
+
+            // Slot still responsive afterwards?
+            state.setActiveTab("secondary", "reentryA");
+            const back = state.getState().panels.secondary.activeTabId;
+            state.setActiveTab("secondary", "reentryB");
+            const fwd = state.getState().panels.secondary.activeTabId;
+
+            return { switchMounts, childCount, back, fwd };
+        } finally {
+            cartMeta.mount = origCart;
+            tagsMeta.mount = origTags;
+            state.clearHighlight("tags");
+            state.update({ panels: { ...state.getState().panels, secondary: priorSecondary } });
+        }
+    }''')
+    assert out["switchMounts"] == 1, "incoming panel double-mounted (re-entrancy guard missing)"
+    assert out["childCount"] == 1
+    assert out["back"] == "reentryA" and out["fwd"] == "reentryB"
