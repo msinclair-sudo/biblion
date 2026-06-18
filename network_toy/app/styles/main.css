@@ -1349,6 +1349,219 @@ tr.cart-row.row-selected td.cart-cell {
   background: rgba(120, 170, 255, 0.14);
 }
 
+/* ── SQL search panel ─────────────────────────────────────────────────
+   Controls (scope / guided / editor / actions) form a fixed stack on the
+   darker tier; only the results table scrolls. Editor reads as a code card
+   with an accent focus ring; "Run query" is the accent CTA. */
+.search-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+/* Fixed control sections above the scroll region. */
+.search-scope,
+.search-guided,
+.search-editor-box,
+.search-actions {
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.search-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.search-scope-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.search-scope-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.search-guided-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 6px 10px;
+  margin-bottom: 8px;
+}
+.search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.search-field > span {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.search-field-input {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.search-field-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* The distinct piece: the SQL editor as a monospace code card. */
+.search-editor {
+  display: block;
+  width: 100%;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.search-editor::placeholder { color: var(--text-faint); }
+.search-editor:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(97, 175, 239, 0.20);
+}
+
+.search-templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0;
+}
+.search-tpl-btn {
+  background: var(--bg-3);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+.search-tpl-btn:hover { background: var(--border); color: var(--text); }
+
+.search-schema-hint {
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+}
+
+.search-runbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Shared button style for scope/guided/action bars. */
+.search-btn {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.search-btn:hover:not(:disabled) { background: var(--border); }
+.search-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* The primary call-to-action — accent fill, dark text. */
+.search-btn.search-run {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+.search-btn.search-run:hover:not(:disabled) { background: var(--accent-dim); }
+
+.search-status {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.search-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* The only scroll region — the results table. */
+.search-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+table.search-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+table.search-table th.search-th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+table.search-table th.search-th.sortable { cursor: pointer; }
+table.search-table th.search-th.sortable:hover {
+  color: var(--text);
+  background: var(--border);
+}
+th.search-th-check, td.search-cell-check { width: 1%; text-align: center; }
+td.search-cell {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+tr.search-row { cursor: pointer; }
+tr.search-row:hover { background: var(--bg-3); }
+.search-empty-cell {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
 /* SQL search: a result row whose paper is currently selected in the graph
    (by any source) — accent rail + tint, matching the scoring-block treatment. */
 tr.search-row.selected td { background: rgba(97, 175, 239, 0.12); }

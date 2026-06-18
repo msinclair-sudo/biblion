@@ -229,9 +229,9 @@ export function mount(container, _state, config = {}, _tabContext = null) {
   }
 
   function renderResults() {
-    // The search panel has no inner overflow region (.search-scroll has no
-    // CSS); the whole panel scrolls at .panel-content — the mount container.
-    preserveScroll(container, renderResultsInner);
+    // The controls are pinned and only the results table scrolls, so the scroll
+    // region is .search-scroll (not the mount container / .panel-content).
+    preserveScroll(scroll, renderResultsInner);
   }
 
   function renderResultsInner() {
