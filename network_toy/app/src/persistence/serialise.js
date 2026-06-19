@@ -33,6 +33,8 @@ const PASS_THROUGH_KEYS = [
   "cart",
   "tags",          // user tags {paperId:[tag]} — DB is source of truth on reload;
                    // this copy is offline-save fidelity when serve.py is unreachable
+  "tagCategories", // {tag:category} label->category map (DB is source of truth)
+  "tagVocabulary", // fixed category list, for offline rendering of the picker
   "filter",
   "fusionBlend",
   "bridgeConfig",

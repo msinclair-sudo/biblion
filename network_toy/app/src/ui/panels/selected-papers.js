@@ -21,6 +21,7 @@ import {
 } from "./paper-table.js";
 import { makeColumnsResizable } from "./column-resize.js";
 import { openAbstractModal } from "../modals/abstract-modal.js";
+import { openTagsModal } from "../modals/tags-modal.js";
 import { hasSqliteText } from "../../datasource/sqlite.js";
 import { preserveScroll } from "../widgets.js";
 
@@ -95,12 +96,43 @@ export function mount(container, _state, config = {}, tabContext = null) {
   tagInput.placeholder = "tag name…";
   bar.appendChild(tagInput);
 
+  // Category picker: "" (uncategorised) + the fixed server vocabulary. The
+  // options are rebuilt whenever state.tagVocabulary changes (it loads async
+  // with the dataset's tags).
+  const tagCat = document.createElement("select");
+  tagCat.className = "cart-filter";
+  let lastVocabSig = null;
+  function syncCatOptions(s) {
+    const vocab = s.tagVocabulary || [];
+    const sig = vocab.join("");
+    if (sig === lastVocabSig) return;
+    lastVocabSig = sig;
+    const keep = tagCat.value;
+    tagCat.innerHTML = "";
+    for (const [val, label] of [["", "(uncategorised)"], ...vocab.map(c => [c, c])]) {
+      const o = document.createElement("option");
+      o.value = val; o.textContent = label;
+      tagCat.appendChild(o);
+    }
+    tagCat.value = keep;                       // preserve the pick across rebuilds
+  }
+  syncCatOptions(getState());
+  bar.appendChild(tagCat);
+
+  // Typing a label that already has a category snaps the picker to it, so the
+  // controlled vocabulary stays consistent (the user can still re-home it).
+  tagInput.addEventListener("input", () => {
+    const known = (getState().tagCategories || {})[tagInput.value.trim()];
+    if (known != null) tagCat.value = known;
+  });
+
   function applyTag(rows) {
     const tag = tagInput.value.trim();
     if (!tag || rows.length === 0) return;
     const hadTags = Object.keys(getState().tags || {}).length > 0;
     const paperIds = rows.map(r => r.paperId).filter(p => p != null);
     const n = addTag(paperIds, tag, {
+      category: tagCat.value,
       onError: (e) => window.alert(
         "Tag write failed (the dataset may be snapshot-only, or the DB is busy): "
         + (e.message || e)),
@@ -308,8 +340,25 @@ export function mount(container, _state, config = {}, tabContext = null) {
         const td = document.createElement("td");
         td.className = `cart-cell cart-cell-${col.kind}`;
         const val = formatCell(r[col.key], col.kind);
-        td.textContent = val;
         if (col.kind === "text" && val !== "—") td.title = val;
+        // A pinned row's tags become editable: a small button (kept first so the
+        // cell's overflow:hidden never clips it) opens a per-paper edit modal.
+        // The row click handler ignores button clicks, so this never
+        // pins/unpins. Category seeds from the toolbar picker.
+        if (col.key === "tags" && pinned.has(r.nodeId)) {
+          const edit = document.createElement("button");
+          edit.className = "cart-tag-edit";
+          edit.textContent = "tags";
+          edit.title = "Edit this paper's tags";
+          edit.addEventListener("click", () => openTagsModal(r, {
+            defaultCategory: tagCat.value,
+            onChange: () => fullRender(getState()),
+          }));
+          td.appendChild(edit);
+          td.appendChild(document.createTextNode(val));
+        } else {
+          td.textContent = val;
+        }
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -373,6 +422,7 @@ export function mount(container, _state, config = {}, tabContext = null) {
 
   return {
     update(s) {
+      syncCatOptions(s);                        // refresh picker when vocab loads
       const selSigNow = selSig(s);
       if (selSigNow !== lastSelSig || s.engineRevision !== lastEngineRev) {
         lastSelSig = selSigNow;

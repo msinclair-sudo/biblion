@@ -95,6 +95,56 @@ def test_tag_read_write_round_trip(tmp_path):
     live.close()
 
 
+def test_tag_category_write_and_read_back(tmp_path):
+    serve = _load_serve()
+    serve.DATA = tmp_path
+    _make_dataset(tmp_path, "proj", with_live_db=True)
+    httpd, port = _server(serve)
+    tags = f"http://127.0.0.1:{port}/api/datasets/proj/tags"
+    cats = f"http://127.0.0.1:{port}/api/datasets/proj/tag-categories"
+    try:
+        # a categorised add and an unknown-category add (rejected)
+        status, resp = _req(tags, "POST", {"adds": [
+            {"paperId": 1, "tag": "Canis lupus", "category": "species"},
+            {"paperId": 1, "tag": "nope", "category": "not-a-category"},
+        ]})
+        assert status == 200 and resp["applied"] == 1
+        # tags map shape is unchanged (no category in it)
+        assert _req(tags) == (200, {"1": ["Canis lupus"]})
+        # categories endpoint carries the fixed vocab + this dataset's mapping
+        status, resp = _req(cats)
+        assert status == 200
+        assert resp["vocabulary"] == serve.TAG_CATEGORIES
+        assert resp["byTag"] == {"Canis lupus": "species"}
+    finally:
+        httpd.shutdown()
+
+
+def test_tag_category_is_label_consistent(tmp_path):
+    # Re-adding the same label with a category re-homes every row of that label.
+    serve = _load_serve()
+    serve.DATA = tmp_path
+    ds = _make_dataset(tmp_path, "proj", with_live_db=True)
+    # second paper so a label can span rows
+    live = sqlite3.connect(str(ds / "proj.db"))
+    live.execute("INSERT INTO papers (id, title, abstract, year, is_seed, is_stub, "
+                 "is_rejected, discovery_count, created_at) "
+                 "VALUES (2, 'T2', 'A', 2021, 0, 0, 0, 1, datetime('now'))")
+    live.commit()
+    live.close()
+    httpd, port = _server(serve)
+    tags = f"http://127.0.0.1:{port}/api/datasets/proj/tags"
+    cats = f"http://127.0.0.1:{port}/api/datasets/proj/tag-categories"
+    try:
+        # paper 1 gets the label uncategorised, paper 2 gets it as a method
+        _req(tags, "POST", {"adds": [{"paperId": 1, "tag": "PCR"}]})
+        _req(tags, "POST", {"adds": [{"paperId": 2, "tag": "PCR", "category": "method"}]})
+        # both rows now read as 'method' (one row per label, no ambiguity)
+        assert _req(cats)[1]["byTag"] == {"PCR": "method"}
+    finally:
+        httpd.shutdown()
+
+
 def test_snapshot_only_dataset_reads_empty_and_rejects_writes(tmp_path):
     serve = _load_serve()
     serve.DATA = tmp_path

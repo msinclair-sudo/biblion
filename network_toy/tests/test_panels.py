@@ -531,3 +531,44 @@ def test_secondary_slot_survives_state_writing_panel_teardown(page):
     assert out["switchMounts"] == 1, "incoming panel double-mounted (re-entrancy guard missing)"
     assert out["childCount"] == 1
     assert out["back"] == "reentryA" and out["fwd"] == "reentryB"
+
+
+# ── tags-list category grouping (§ tag-categories) ─────────────────────
+
+
+def test_tags_list_groups_by_category(page):
+    """The tags-list panel renders a header per category in vocabulary order
+    (uncategorised last) and files each tag under its category."""
+    out = page.evaluate(
+        '''async () => {
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            const state = await import("/app/src/ui/state.js");
+            const prev = {
+                tags: state.getState().tags,
+                tagCategories: state.getState().tagCategories,
+                tagVocabulary: state.getState().tagVocabulary,
+            };
+            state.update({
+                tags: { 1: ["Canis lupus", "to-read"], 2: ["BRCA1"] },
+                tagCategories: { "Canis lupus": "species", "BRCA1": "gene" },
+                tagVocabulary: ["species", "gene", "method", "theme"],
+            });
+            try {
+                const { mount } = await import("/app/src/ui/panels/tags-list.js");
+                mount(host, state.getState(), {});
+                await new Promise(r => setTimeout(r, 50));
+                const headers = [...host.querySelectorAll(".tags-group-header")]
+                    .map(h => h.textContent);
+                const names = [...host.querySelectorAll(".tags-name")]
+                    .map(n => n.textContent);
+                return { headers, names };
+            } finally {
+                state.update(prev);
+            }
+        }'''
+    )
+    # species before gene (vocab order); Uncategorised last
+    assert out["headers"] == ["species", "gene", "Uncategorised"], out["headers"]
+    # BRCA1 sits under gene, to-read under Uncategorised
+    assert set(out["names"]) == {"Canis lupus", "BRCA1", "to-read"}

@@ -76,6 +76,13 @@ export function loadTags(datasetId) {
   return getJson(`${BASE}/${encodeURIComponent(datasetId)}/tags`);
 }
 
+// { vocabulary: ["species", ...], byTag: { "<tag>": "<category>" } } for the
+// dataset. vocabulary is the fixed server-side list (same for every dataset);
+// byTag is this dataset's current label->category assignments.
+export function loadTagCategories(datasetId) {
+  return getJson(`${BASE}/${encodeURIComponent(datasetId)}/tag-categories`);
+}
+
 // Batch add/remove tags. `adds`/`removes` are [{paperId:int, tag:string}].
 // Returns the server's {ok, applied}; throws on HTTP error (e.g. 409 when the
 // dataset is snapshot-only, 503 when the DB write-lock times out) so the caller

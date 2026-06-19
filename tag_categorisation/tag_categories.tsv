@@ -1,0 +1,269 @@
+tag	category	datasets	note
+(Spodoptera frugiperda		fallworm	
+(Spodoptera frugiperda)		fallworm	
+16S	gene	PhD_proposal	marker gene used as a method? (gene/method)
+ac78	gene	fallworm	
+ace-1	gene	fallworm	
+AcMNPV	species	fallworm	
+Acropora	species	microalgae	
+Acropora millepora	species	microalgae	
+Aeschynanthus longicaulis	species	microalgae	
+Agaricia lamarcki	species	microalgae	
+Agrotis ipsilon	species	fallworm	
+Anabaena	species	microalgae	
+anti-shortread	theme	PhD_proposal	
+Arabidopsis	species	microalgae	
+Arabidopsis thaliana	species	microalgae	
+Arachis hypogaea	species	fallworm	
+ARCHAIAS ANGULATUS	species	microalgae	
+Ariolimax columbianus	species	fallworm	
+Arthrospira	species	microalgae	
+Arthrospira platensis	species	microalgae	
+Astrangia poculata	species	fallworm	
+Autographa californica	species	fallworm	
+Azadirachta indica	species	fallworm	
+b 6 f	gene	microalgae	
+B. thuringiensis	species	fallworm	
+Bacillus amyloliquefaciens	species	fallworm	
+Bacillus Thuringiensis	species	fallworm	
+Bacillus thuringiensis	species	fallworm	
+Bacillus thuringiensis Vip3Aa	gene	fallworm	species+gene combo -> tagged gene
+Bathymodiolus	species	fallworm	
+Beauveria bassiana	species	fallworm	
+Bifidobacterium spp	species	fallworm	
+Brachyspira	species	fallworm	
+Bracon brevicornis	species	fallworm	
+Bradyrhizobium	species	PhD_proposal	
+Bt‐resistant	theme	fallworm	
+C. tuberculostearicum	species	fallworm	
+Callgonum mongolicum	species	microalgae	
+Candidatus		fallworm	taxonomic rank prefix only -> left blank
+Carapa guianensis	species	fallworm	
+Carassius auratus gibelio	species	microalgae	
+Carica papaya	species	fallworm	
+Caspase-	gene	fallworm	truncated gene name
+Caulerpa cylindracea	species	microalgae	
+Chelonus	species	fallworm	
+Chelonus formosanus	species	fallworm	
+Chlamydomonas	species	microalgae	
+Chlamydomonas moewusii	species	microalgae	
+Chlamydomonas reinhardtii	species	microalgae	
+Chlorella	species	microalgae	
+Chlorella minutissima	species	microalgae	
+Chlorella sorokiniana	species	microalgae	
+Chlorella Vulgaris	species	microalgae	
+Chlorella vulgaris	species	microalgae	
+CHS2	gene	fallworm	
+Cistanche deserticola	species	microalgae	
+Citrus junos	species	microalgae	
+Cladocora caespitosa	species	microalgae	
+CO2	theme	microalgae	substrate/concept -> theme (or blank)
+community-roles	theme	PhD_proposal	
+Corallina	species	microalgae	
+Cordyceps fumosorosea	species	fallworm	
+Cotesia flavipes	species	fallworm	
+Craterostigma pumilum	species	microalgae	
+cry	gene	fallworm	
+Cry1Ab	gene	fallworm	
+Cry1Ca	gene	fallworm	
+Cry1Fa	gene	fallworm	
+Cry2Aa	gene	fallworm	
+Cry2Ab	gene	fallworm	
+Cymodocea nodosa	species	microalgae	
+CYP321A8	gene	fallworm	
+CYP321A9	gene	fallworm	
+CYP450	gene	fallworm	
+CYP9A58	gene	fallworm	
+data-coverage	theme	PhD_proposal	
+Dermatophagoides farinae	species	microalgae	
+Desmodesmus sp	species	microalgae	
+Diabrotica speciosa	species	fallworm	
+Diaphorencyrtus aligarhensis	species	fallworm	
+Diaphorina citri	species	fallworm	
+Diatraea saccharalis	species	fallworm	
+DNMTs	gene	fallworm	
+Drosophila melanogaster	species	fallworm	
+dunaliella	species	microalgae	genus, lowercased -> species
+Durvillaea antarctica	species	microalgae	
+Ecklonia radiata	species	microalgae	
+ecological model	method	PhD_proposal	modelling approach -> method (or theme)
+Eiphosoma	species	fallworm	
+Elaphoglossum luridum	species	microalgae	
+emalionopsis tortuosa		microalgae	
+Endomicrobia	species	fallworm	
+Enterococcus	species	fallworm	
+Enterococcus casseliflavus	species	fallworm	
+Episyrphus balteatus	species	fallworm	
+etraselmis suecica		microalgae	
+Euglena gracilis	species	microalgae	
+Eunicella singularis	species	microalgae	
+Europe		fallworm	
+Festuca subverticillata	species	fallworm	
+FIRe	method	microalgae	
+Fucus serratus	species	microalgae	
+Fucus vesiculosus	species	microalgae	
+Fungi‐Mediated	theme	fallworm	
+Galaxea fascicularis	species	microalgae	
+Geminigera cryophila	species	microalgae	
+Glehnia littoralis	species	PhD_proposal	
+Gossypium hirsutum	species	fallworm	
+Gracilaria lemaneiformis	species	microalgae	
+growth model	method	PhD_proposal	modelling approach -> method (or theme)
+GSTe2	gene	fallworm	
+GSTs4	gene	fallworm	
+guild theory	theme	PhD_proposal	
+Haematococcus pluvialis	species	microalgae	
+Halichondria panicea	species	fallworm	
+Haloxylon ammodendron	species	microalgae	
+Helicobacter pylori	species	fallworm	
+Helicoverpa armigera	species	fallworm	
+Helicoverpa zea	species	fallworm	
+Heterorhabditis indica	species	fallworm	
+Hevea Brasiliensis	species	fallworm	
+hlorella		microalgae	
+Hydrodictyon reticulatum	species	microalgae	
+ie2	gene	fallworm	
+In silico	method	PhD_proposal	
+In situ	method	microalgae	
+in situ	method	microalgae	
+In Vivo	method	fallworm	
+J E SMITH		fallworm	
+key-dataset	theme	PhD_proposal	
+Klebsiella	species	PhD_proposal,fallworm	
+kurstaki	species	fallworm	
+Leave‐One‐Out Cross‐Validation	method	PhD_proposal	
+Lemna minor	species	microalgae	
+Lepidoptera: Noctuidae	species	fallworm	
+lexandrium ostenfeldii		microalgae	
+Lolium arundinaceum	species	fallworm	
+Marchantia	species	microalgae	
+Marinifilaceae	species	PhD_proposal	
+metabolic model	method	PhD_proposal	modelling approach -> method (or theme)
+Metagenomics	method	PhD_proposal	
+Metarhizium acridum	species	fallworm	
+Metarhizium rileyi	species	fallworm	
+Microcystis	species	microalgae	
+microRNA	gene	fallworm	
+Myzus persicae	species	fallworm	
+Nannochloropsis	species	microalgae	
+Nannochloropsis oceanica	species	microalgae	
+Nannochloropsis oculata	species	microalgae	
+Nannochloropsis salina	species	microalgae	
+Nasonia	species	fallworm	
+nif	gene	PhD_proposal	
+nirK	gene	PhD_proposal	
+nirS	gene	PhD_proposal	
+Nitrobacter winogradskyi	species	PhD_proposal	
+Nitrosomonas europaea	species	PhD_proposal	
+Nostoc flagelliforme	species	microalgae	
+Ocimum sanctum	species	microalgae	
+odv‐e66	gene	fallworm	
+of Vallisneria asiatica		microalgae	
+Oncorhynchus mykiss	species	microalgae	
+Oscillatoria spongeliae	species	fallworm	
+Osedax	species	fallworm	
+Osedax mucofloris	species	fallworm	
+Ottelia acuminata	species	microalgae	
+P450s	gene	fallworm	
+PACMan	method	microalgae	
+Pelargonium graveolens	species	fallworm	
+Penicillium brefeldianum	species	fallworm	
+Peridinium umbonatum	species	microalgae	
+Periplocae cortex	species	fallworm	botanical drug term -> species (uncertain)
+Phaeocystis antarctica	species	microalgae	
+Phaeodactylum tricornutum	species	microalgae	
+Phenacoccus solenopsis	species	microalgae	
+Physcomitrella patens	species	microalgae	
+Physcomitrium patens	species	microalgae	
+Piper hispidinervum	species	fallworm	
+Plutella xylostella	species	fallworm	
+Podisus nigrispinus	species	fallworm	
+Porites lutea	species	microalgae	
+Posidonia oceanica	species	microalgae	
+Potamogeton crispus	species	microalgae	
+Prasiola stipitata	species	microalgae	
+Pristomerus vulnerator	species	fallworm	
+Prochlorococcus	species	microalgae	
+Propithecus edwardsi	species	fallworm	
+Pseudomonas	species	PhD_proposal	
+Purpureocillium lilacinum	species	fallworm	
+Pyemotes zhonghuajia	species	fallworm	
+quadricauda		microalgae	
+Quercus alba	species	microalgae	
+repat	gene	fallworm	
+Rhizophagus irregularis	species	PhD_proposal	
+Rhizophora mucronata	species	microalgae	
+Rhodomyrtus tomento	species	microalgae	
+Rhodomyrtus tomento sa	species	microalgae	OCR split of tomentosa -> species
+rochloron		microalgae	
+S podoptera frugiperda		fallworm	
+S. litura	species	fallworm	
+Saccharomyces cerevisiae	species	PhD_proposal	
+salina		microalgae	
+salt tolerance	theme	PhD_proposal	
+Scenedesmus	species	microalgae	
+Scenedesmus abundans	species	microalgae	
+Scenedesmus dimorphus	species	microalgae	
+Scenedesmus obliquus	species	microalgae	
+Scenedesmus obtusiusculus	species	microalgae	
+Scenedesmus quadricauda	species	microalgae	
+ScWIP5	gene	fallworm	
+Sep38	gene	fallworm	protein? -> gene (uncertain)
+SfGSTe11	gene	fallworm	
+SfGSTs2	gene	fallworm	
+SfREPAT38	gene	fallworm	
+SfruOBP18	gene	fallworm	
+SfVipR1	gene	fallworm	
+Sinosenecio jishouensis	species	microalgae	
+Skeletonema	species	microalgae	
+software	method	PhD_proposal	tooling -> method (or theme)
+Solanum lycopersicum	species	PhD_proposal	
+Solea aegyptiaca	species	microalgae	
+Spilosoma obliqua	species	fallworm	
+Spirulina	species	microalgae	
+Spirulina platensis	species	microalgae	
+Spodoptera	species	fallworm	
+Spodoptera exigua	species	fallworm	
+Spodoptera Frugiperda	species	fallworm	
+Spodoptera frugiperda	species	fallworm	
+Spodoptera Frugiperda)		fallworm	
+Spodoptera literal		fallworm	OCR of littoralis/litura -> left blank
+Spodoptera littoralis	species	fallworm	
+Spodoptera Litura	species	fallworm	
+Spodoptera litura	species	fallworm	
+SqME	gene	microalgae	
+Steinernema carpocapsae-Xenorhabdus nematophila	species	fallworm	
+Steinernema siamkayai	species	fallworm	
+Stenotrophomonas maltophilia	species	fallworm	
+Streptococcus agalactiae	species	PhD_proposal	
+Streptomyces	species	PhD_proposal	
+Stylophora pistillata	species	microalgae	
+Swietenia macrophylla	species	fallworm	
+Symbiodinium	species	microalgae	
+Synechococcus	species	microalgae	
+Synechococcus elongatus	species	microalgae	
+Synechocystis	species	microalgae	
+Syzygium aromaticum	species	fallworm	
+Tamarixia radiata	species	fallworm	
+Telenomus remus	species	fallworm	
+Tetrastichus howardi	species	fallworm	
+Thalassia hemprichii	species	microalgae	
+Thalassia testudinum	species	microalgae	
+Thalassiosira oceanica	species	microalgae	
+Thalassiosira pseudonana	species	microalgae	
+Trentepohlia	species	microalgae	
+Trichogramma	species	fallworm	
+Triticum aestivum	species	microalgae	
+Turbinaria reniformis	species	microalgae	
+Vallisneria natans	species	microalgae	
+versus		fallworm	
+via		microalgae	
+Vip3Aa	gene	fallworm	
+Vip3Af	gene	fallworm	
+Wolbachia	species	fallworm	
+WRKY36	gene	fallworm	
+Xanthophyllomyces dendrorhous	species	microalgae	
+Zanthoxylum zanthoxyloides	species	fallworm	
+Zea mays	species	fallworm	
+Zostera marina	species	microalgae	
+Zymoseptoria tritici	species	PhD_proposal	

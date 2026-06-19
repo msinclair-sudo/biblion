@@ -140,6 +140,45 @@ class TestTagsExport:
         assert 'KW  - fieldwork' in out.read_text()
 
 
+class TestCategoryTagsExport:
+    """--category-tags prefixes a tag's keyword with its category; uncategorised
+    tags stay plain, and the prefix only appears when the flag is on."""
+
+    def _tag(self, db_conn, pid, tag, category=None):
+        db_conn.execute(
+            "INSERT INTO paper_tags (paper_id, tag, added_at, added_by, category) "
+            "VALUES (?, ?, datetime('now'), 'network_toy', ?)", (pid, tag, category))
+        db_conn.commit()
+
+    def test_bibtex_prefixes_categorised_tag(self, tmp_path, db_conn, insert_paper):
+        pid = insert_paper(doi='10.5/c', pub_type='article', title='Cat',
+                           year=2021, authors=json.dumps(['Vega, Ana']))
+        self._tag(db_conn, pid, 'Canis lupus', 'species')
+        self._tag(db_conn, pid, 'to-read')                 # uncategorised
+        out = tmp_path / 'c.bib'
+        export(db_conn, out, 'bib', '1=1', (), category_tags=True)
+        kw = next(l for l in out.read_text().splitlines() if 'keywords' in l)
+        assert 'species:Canis lupus' in kw and 'to-read' in kw
+        assert 'species:to-read' not in kw                 # uncategorised stays plain
+
+    def test_flag_off_keeps_plain(self, tmp_path, db_conn, insert_paper):
+        pid = insert_paper(doi='10.6/c', pub_type='article', title='Plain',
+                           year=2021, authors=json.dumps(['Vega, Ana']))
+        self._tag(db_conn, pid, 'Canis lupus', 'species')
+        out = tmp_path / 'p.bib'
+        export(db_conn, out, 'bib', '1=1', ())             # no flag
+        kw = next(l for l in out.read_text().splitlines() if 'keywords' in l)
+        assert 'Canis lupus' in kw and 'species:' not in kw
+
+    def test_ris_prefixes_categorised_tag(self, tmp_path, db_conn, insert_paper):
+        pid = insert_paper(doi='10.7/c', pub_type='article', title='RisCat',
+                           year=2021, authors=json.dumps(['Vega, Ana']))
+        self._tag(db_conn, pid, 'BRCA1', 'gene')
+        out = tmp_path / 'c.ris'
+        export(db_conn, out, 'ris', '1=1', (), category_tags=True)
+        assert 'KW  - gene:BRCA1' in out.read_text()
+
+
 class TestExportRoundTrip:
     def test_bib_round_trip(self, tmp_path, db_conn, insert_paper):
         _populate(db_conn, insert_paper)

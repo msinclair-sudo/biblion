@@ -46,6 +46,12 @@ export function mount(container, _state, _config = {}, _tabContext = null) {
   let activeTag = null;       // tag currently driving the highlight channel
   let lastSig = null;
 
+  // Re-render fingerprint: the tag set OR the label->category assignments. The
+  // latter changes when a tag is re-homed without the tag set itself changing.
+  function sig(s) {
+    return tagsSignature(s) + "|" + JSON.stringify(s.tagCategories || {});
+  }
+
   function highlightTag(tag, tags) {
     if (activeTag === tag) {  // toggle off
       activeTag = null;
@@ -63,60 +69,84 @@ export function mount(container, _state, _config = {}, _tabContext = null) {
     addHighlight("tags", nodeIds, colour);
   }
 
+  function tagRow(tag, count, palette) {
+    const row = document.createElement("div");
+    row.className = "tags-row" + (tag === activeTag ? " tags-row-active" : "");
+
+    const sw = document.createElement("span");
+    sw.className = "tags-swatch";
+    sw.style.background = palette.get(tag) || "#888";
+    row.appendChild(sw);
+
+    const label = document.createElement("span");
+    label.className = "tags-name";
+    label.textContent = tag;
+    label.title = "Highlight papers tagged “" + tag + "”";
+    label.addEventListener("click", () => { highlightTag(tag, getState().tags || {}); render(); });
+    row.appendChild(label);
+
+    const cnt = document.createElement("span");
+    cnt.className = "tags-count";
+    cnt.textContent = String(count);
+    row.appendChild(cnt);
+
+    const rm = document.createElement("button");
+    rm.className = "cart-rm-btn";
+    rm.textContent = "×";
+    rm.title = "Remove this tag from all papers";
+    rm.addEventListener("click", () => {
+      if (tag === activeTag) { activeTag = null; clearHighlight("tags"); }
+      removeTagEverywhere(tag, {
+        onError: (e) => window.alert("Tag removal failed: " + (e.message || e)),
+      });
+    });
+    row.appendChild(rm);
+    return row;
+  }
+
   function render() {
-    const tags = getState().tags || {};
+    const s = getState();
+    const tags = s.tags || {};
+    const cats = s.tagCategories || {};
     const counts = tagCounts(tags);
     const names = [...counts.keys()].sort();
-    const palette = tagColourMap(getState());
+    const palette = tagColourMap(s);
 
     list.innerHTML = "";
     empty.style.display = names.length ? "none" : "block";
     list.style.display = names.length ? "block" : "none";
 
+    // Group by category in vocabulary order, then any stray categories not in
+    // the vocab, then uncategorised ("") last. A category header only shows when
+    // it has tags, so an empty dataset stays clean.
+    const byCat = new Map();
     for (const tag of names) {
-      const row = document.createElement("div");
-      row.className = "tags-row" + (tag === activeTag ? " tags-row-active" : "");
-
-      const sw = document.createElement("span");
-      sw.className = "tags-swatch";
-      sw.style.background = palette.get(tag) || "#888";
-      row.appendChild(sw);
-
-      const label = document.createElement("span");
-      label.className = "tags-name";
-      label.textContent = tag;
-      label.title = "Highlight papers tagged “" + tag + "”";
-      label.addEventListener("click", () => { highlightTag(tag, getState().tags || {}); render(); });
-      row.appendChild(label);
-
-      const count = document.createElement("span");
-      count.className = "tags-count";
-      count.textContent = String(counts.get(tag));
-      row.appendChild(count);
-
-      const rm = document.createElement("button");
-      rm.className = "cart-rm-btn";
-      rm.textContent = "×";
-      rm.title = "Remove this tag from all papers";
-      rm.addEventListener("click", () => {
-        if (tag === activeTag) { activeTag = null; clearHighlight("tags"); }
-        removeTagEverywhere(tag, {
-          onError: (e) => window.alert("Tag removal failed: " + (e.message || e)),
-        });
-      });
-      row.appendChild(rm);
-
-      list.appendChild(row);
+      const c = cats[tag] || "";
+      if (!byCat.has(c)) byCat.set(c, []);
+      byCat.get(c).push(tag);
     }
-    lastSig = tagsSignature(getState());
+    const order = [...(s.tagVocabulary || [])];
+    for (const c of byCat.keys()) if (c && !order.includes(c)) order.push(c);
+    order.push("");                            // uncategorised last
+
+    for (const cat of order) {
+      const group = byCat.get(cat);
+      if (!group || !group.length) continue;
+      const header = document.createElement("div");
+      header.className = "tags-group-header";
+      header.textContent = cat || "Uncategorised";
+      list.appendChild(header);
+      for (const tag of group) list.appendChild(tagRow(tag, counts.get(tag), palette));
+    }
+    lastSig = sig(s);
   }
 
   render();
 
   return {
     update(s) {
-      // Re-render only when the tag set actually changed (cheap fingerprint).
-      if (tagsSignature(s) !== lastSig) render();
+      // Re-render only when the tag set or categories actually changed.
+      if (sig(s) !== lastSig) render();
     },
     destroy() {
       if (activeTag) { clearHighlight("tags"); activeTag = null; }

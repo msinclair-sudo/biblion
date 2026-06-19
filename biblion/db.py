@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS paper_tags (
     tag      TEXT    NOT NULL,
     added_at TEXT    NOT NULL,
     added_by TEXT,                             -- 'network_toy' | 'cli' | NULL
+    category TEXT,                             -- fixed vocab (species/gene/...); NULL = uncategorised
     PRIMARY KEY (paper_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_paper_tags_tag ON paper_tags(tag);
@@ -488,6 +489,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             WHERE doi IS NOT NULL AND is_rejected = 0
               AND (volume IS NULL OR first_page IS NULL OR publisher IS NULL)
     """)
+    _migrate_paper_tags_columns(conn)
+    # category index must follow the migration, like idx_papers_citekey above:
+    # on a pre-existing DB the column is added by the migration, not the CREATE.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_tags_category "
+        "ON paper_tags(category)"
+    )
     _seed_resolution_tables(conn)
     conn.commit()
 
@@ -525,6 +533,15 @@ def _migrate_papers_columns(conn: sqlite3.Connection) -> None:
     for col, sql_type in _PAPERS_LATE_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE papers ADD COLUMN {col} {sql_type}")
+
+
+def _migrate_paper_tags_columns(conn: sqlite3.Connection) -> None:
+    """Add the `category` column to a pre-existing paper_tags table. Cheap when
+    up-to-date. Kept separate so network_toy's serve.py can mirror this exact
+    migration on the live DB it writes tags into."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(paper_tags)").fetchall()}
+    if 'category' not in existing:
+        conn.execute("ALTER TABLE paper_tags ADD COLUMN category TEXT")
 
 
 # Backfill map: promoted papers column <- bib field name(s) as deposited in

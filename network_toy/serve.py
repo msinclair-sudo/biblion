@@ -29,7 +29,8 @@ API:
     POST   /api/datasets/<id>/saves/<name>     -> atomic write of the body
     DELETE /api/datasets/<id>/saves/<name>     -> unlink
     GET    /api/datasets/<id>/tags             -> {"<paperId>": ["tag", ...], ...}
-    POST   /api/datasets/<id>/tags             -> {adds:[{paperId,tag}], removes:[...]}
+    POST   /api/datasets/<id>/tags             -> {adds:[{paperId,tag,category?}], removes:[...]}
+    GET    /api/datasets/<id>/tag-categories   -> {vocabulary:[...], byTag:{"<tag>":"<category>"}}
 
 User tags are read/written against the dataset's LIVE project DB (data/<project>/
 <project>.db, stripping any "::subset"), NOT the read-only snapshot — so a tag
@@ -115,12 +116,19 @@ def _saves_dir(dataset_id):
 # ── tags (read/write against the live project DB) ────────────────────────────
 _TAG_NAME_MAX = 64
 
+# Fixed tag-category vocabulary. A category is a property of the tag *label*
+# (BRCA1 is always a gene), surfaced to the UI via /api/tag-categories so the
+# picker can't drift from what the server will accept. "" / None = uncategorised.
+# Mirrored by biblion's paper_tags schema; add a category by editing this list.
+TAG_CATEGORIES = ["species", "gene", "method", "theme"]
+
 _PAPER_TAGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_tags (
     paper_id INTEGER NOT NULL REFERENCES papers(id),
     tag      TEXT    NOT NULL,
     added_at TEXT    NOT NULL,
     added_by TEXT,
+    category TEXT,
     PRIMARY KEY (paper_id, tag)
 )
 """
@@ -149,6 +157,12 @@ def _open_live_db(dataset_id):
     # The table is in biblion's _SCHEMA, but a live DB created before this
     # feature won't have it; CREATE IF NOT EXISTS is cheap and idempotent.
     conn.execute(_PAPER_TAGS_SCHEMA)
+    # A table created before the category feature lacks the column; add it.
+    # Mirrors biblion.db._migrate_paper_tags_columns (ALTER can't be conditional
+    # in SQL, so check table_info first).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(paper_tags)").fetchall()}
+    if "category" not in cols:
+        conn.execute("ALTER TABLE paper_tags ADD COLUMN category TEXT")
     return conn
 
 
@@ -163,6 +177,16 @@ def _clean_tag(raw):
     return t
 
 
+def _clean_category(raw):
+    """Normalise a tag category: '' / None / missing -> '' (uncategorised); a
+    value in TAG_CATEGORIES passes through; anything else is rejected (None)."""
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, str) and raw in TAG_CATEGORIES:
+        return raw
+    return None
+
+
 def read_tags(dataset_id):
     """{ '<paperId>': ['tag', ...] } from the live DB; {} if snapshot-only."""
     conn = _open_live_db(dataset_id)
@@ -172,6 +196,23 @@ def read_tags(dataset_id):
         out = {}
         for r in conn.execute("SELECT paper_id, tag FROM paper_tags ORDER BY paper_id, tag"):
             out.setdefault(str(r["paper_id"]), []).append(r["tag"])
+        return out
+    finally:
+        conn.close()
+
+
+def read_tag_categories(dataset_id):
+    """{ '<tag>': '<category>' } for tags that carry one, from the live DB; {}
+    if snapshot-only. Category is a property of the label, so one row per tag."""
+    conn = _open_live_db(dataset_id)
+    if conn is None:
+        return {}
+    try:
+        out = {}
+        for r in conn.execute(
+            "SELECT DISTINCT tag, category FROM paper_tags "
+            "WHERE category IS NOT NULL AND category != '' ORDER BY tag"):
+            out[r["tag"]] = r["category"]
         return out
     finally:
         conn.close()
@@ -312,14 +353,26 @@ class Handler(SimpleHTTPRequestHandler):
                         continue
                     tag = _clean_tag(item.get("tag"))
                     pid = item.get("paperId")
-                    if tag is None or not isinstance(pid, int):
-                        continue
+                    category = _clean_category(item.get("category"))
+                    if tag is None or category is None or not isinstance(pid, int):
+                        continue             # bad tag/unknown category -> skip
                     if not conn.execute("SELECT 1 FROM papers WHERE id = ?", (pid,)).fetchone():
                         continue             # unknown paper -> skip (clean, no FK trap)
                     cur = conn.execute(
-                        "INSERT OR IGNORE INTO paper_tags (paper_id, tag, added_at, added_by) "
-                        "VALUES (?, ?, ?, 'network_toy')", (pid, tag, now))
+                        "INSERT OR IGNORE INTO paper_tags "
+                        "(paper_id, tag, added_at, added_by, category) "
+                        "VALUES (?, ?, ?, 'network_toy', ?)",
+                        (pid, tag, now, category or None))
                     applied += cur.rowcount
+                    # Category is a property of the label: when an explicit
+                    # (non-empty) category is given, keep every row of this tag
+                    # consistent. Also re-homes the INSERT-OR-IGNORE no-op case
+                    # (tag already present) onto the chosen category.
+                    if category:
+                        conn.execute(
+                            "UPDATE paper_tags SET category = ? WHERE tag = ? "
+                            "AND (category IS NULL OR category != ?)",
+                            (category, tag, category))
                 for item in (body.get("removes") or []):
                     if not isinstance(item, dict):
                         continue
@@ -354,6 +407,16 @@ class Handler(SimpleHTTPRequestHandler):
             if dataset_id not in {d["id"] for d in discover_datasets()}:
                 return self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown dataset {dataset_id!r}")
             return self._send_json(read_tags(dataset_id))
+        if len(parts) == 2 and parts[1] == "tag-categories":
+            dataset_id = parts[0]
+            if dataset_id not in {d["id"] for d in discover_datasets()}:
+                return self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown dataset {dataset_id!r}")
+            # vocabulary is the fixed list (same for every dataset); byTag is this
+            # dataset's current label->category assignments.
+            return self._send_json({
+                "vocabulary": TAG_CATEGORIES,
+                "byTag": read_tag_categories(dataset_id),
+            })
         resolved = self._resolve_save_path(parts)
         if resolved is None:
             return

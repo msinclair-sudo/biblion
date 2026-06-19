@@ -85,15 +85,18 @@ def _load_rows(conn: sqlite3.Connection, where: str, params: tuple) -> list:
     return conn.execute(sql, params).fetchall()
 
 
-def _load_aux(conn: sqlite3.Connection, paper_ids: list[int]) -> tuple[dict, dict, dict]:
+def _load_aux(conn: sqlite3.Connection, paper_ids: list[int]) -> tuple[dict, dict, dict, dict]:
     """Return ({paper_id: {field: value}} of long-tail observations,
     {paper_id: {scheme: [values]}} of identifiers,
-    {paper_id: [tag, ...]} of user tags) for the given papers."""
+    {paper_id: [tag, ...]} of user tags,
+    {tag: category} of tag categories — a tag's category is a label property,
+    so this is global, not per-paper) for the given papers."""
     eav: dict[int, dict] = {}
     ids: dict[int, dict] = {}
     tags: dict[int, list] = {}
+    tag_cats: dict[str, str] = {}
     if not paper_ids:
-        return eav, ids, tags
+        return eav, ids, tags, tag_cats
     for i in range(0, len(paper_ids), 500):
         chunk = paper_ids[i:i + 500]
         ph = ','.join('?' * len(chunk))
@@ -114,15 +117,26 @@ def _load_aux(conn: sqlite3.Connection, paper_ids: list[int]) -> tuple[dict, dic
             ids.setdefault(r['paper_id'], {}).setdefault(
                 r['scheme'], []).append(r['value'])
         # paper_tags is a recent table; tolerate its absence in an old DB.
+        # The category column is newer still — fall back to a category-less
+        # query if it's missing so old DBs still export their tags.
         try:
             for r in conn.execute(
-                f"SELECT paper_id, tag FROM paper_tags "
+                f"SELECT paper_id, tag, category FROM paper_tags "
                 f"WHERE paper_id IN ({ph}) ORDER BY tag", chunk,
             ):
                 tags.setdefault(r['paper_id'], []).append(r['tag'])
+                if r['category']:
+                    tag_cats[r['tag']] = r['category']
         except sqlite3.OperationalError:
-            pass
-    return eav, ids, tags
+            try:
+                for r in conn.execute(
+                    f"SELECT paper_id, tag FROM paper_tags "
+                    f"WHERE paper_id IN ({ph}) ORDER BY tag", chunk,
+                ):
+                    tags.setdefault(r['paper_id'], []).append(r['tag'])
+            except sqlite3.OperationalError:
+                pass
+    return eav, ids, tags, tag_cats
 
 
 def _pages(row) -> Optional[str]:
@@ -193,9 +207,22 @@ def _esc(v) -> str:
     return s
 
 
-def paper_to_bibtex(row, eav: dict, ids: dict, key: str, tags: dict | None = None) -> str:
+def _kw(tag: str, tag_cats: dict, category_tags: bool) -> str:
+    """A tag rendered for a keywords field: 'category:tag' when category_tags is
+    on and the tag carries one, else the bare tag. Tags reject ',' and ';' at
+    write time, so a 'category:value' prefix round-trips on .bib/.ris re-import."""
+    if category_tags:
+        cat = tag_cats.get(tag)
+        if cat:
+            return f"{cat}:{tag}"
+    return tag
+
+
+def paper_to_bibtex(row, eav: dict, ids: dict, key: str, tags: dict | None = None,
+                    tag_cats: dict | None = None, category_tags: bool = False) -> str:
     btype = _PUBTYPE_TO_BIBTYPE.get(_canon_type(row['pub_type']), 'misc')
     tags = tags or {}
+    tag_cats = tag_cats or {}
     fields: list[tuple[str, str]] = []
 
     def put(name, value):
@@ -248,8 +275,9 @@ def paper_to_bibtex(row, eav: dict, ids: dict, key: str, tags: dict | None = Non
     if eav_kw:
         kw_parts += [k.strip() for k in re.split(r'[;,]', eav_kw) if k.strip()]
     for t in tags.get(row['id'], []):
-        if t not in kw_parts:
-            kw_parts.append(t)
+        kw = _kw(t, tag_cats, category_tags)
+        if kw not in kw_parts:
+            kw_parts.append(kw)
     if kw_parts:
         put('keywords', ', '.join(kw_parts))
     for obs_field, bibname in _EAV_BIB_FIELDS.items():
@@ -265,9 +293,11 @@ def paper_to_bibtex(row, eav: dict, ids: dict, key: str, tags: dict | None = Non
 # RIS emission
 # ---------------------------------------------------------------------------
 
-def paper_to_ris(row, eav: dict, ids: dict, tags: dict | None = None) -> str:
+def paper_to_ris(row, eav: dict, ids: dict, tags: dict | None = None,
+                 tag_cats: dict | None = None, category_tags: bool = False) -> str:
     ty = _PUBTYPE_TO_RISTYPE.get(_canon_type(row['pub_type']), 'GEN')
     tags = tags or {}
+    tag_cats = tag_cats or {}
     lines: list[str] = [f"TY  - {ty}"]
 
     def put(tag, value):
@@ -305,9 +335,10 @@ def paper_to_ris(row, eav: dict, ids: dict, tags: dict | None = None) -> str:
                 kw_seen.add(k)
                 put('KW', k)
     for t in tags.get(row['id'], []):       # user tags as extra KW lines
-        if t not in kw_seen:
-            kw_seen.add(t)
-            put('KW', t)
+        kw = _kw(t, tag_cats, category_tags)
+        if kw not in kw_seen:
+            kw_seen.add(kw)
+            put('KW', kw)
     note_parts = []
     if row['editorial_status']:
         note_parts.append(str(row['editorial_status']).upper())
@@ -331,10 +362,12 @@ _REDACTED_STATUSES = ('retracted', 'withdrawn')
 
 
 def export(conn: sqlite3.Connection, out_path: Path, fmt: str,
-           where: str, params: tuple, include_redacted: bool = False) -> int:
+           where: str, params: tuple, include_redacted: bool = False,
+           category_tags: bool = False) -> int:
     """Write all papers matching `where` to out_path in `fmt` ('bib'|'ris').
     Redacted (retracted/withdrawn) papers are excluded unless include_redacted
-    is True. Returns the number of entries written."""
+    is True. When category_tags is True, user tags carrying a category are
+    emitted as 'category:tag' keywords. Returns the number of entries written."""
     if not include_redacted:
         ph = ','.join('?' * len(_REDACTED_STATUSES))
         where = (f"({where}) AND (editorial_status IS NULL "
@@ -342,7 +375,7 @@ def export(conn: sqlite3.Connection, out_path: Path, fmt: str,
         params = tuple(params) + _REDACTED_STATUSES
     rows = _load_rows(conn, where, params)
     paper_ids = [r['id'] for r in rows]
-    eav, ids, tags = _load_aux(conn, paper_ids)
+    eav, ids, tags, tag_cats = _load_aux(conn, paper_ids)
 
     used_keys: set = set()
     # Pre-seed used keys with the stored citekeys so synthesized ones can't
@@ -354,10 +387,10 @@ def export(conn: sqlite3.Connection, out_path: Path, fmt: str,
     chunks: list[str] = []
     for r in rows:
         if fmt == 'ris':
-            chunks.append(paper_to_ris(r, eav, ids, tags))
+            chunks.append(paper_to_ris(r, eav, ids, tags, tag_cats, category_tags))
         else:
             key = r['citekey'] or _synth_citekey(r, used_keys)
-            chunks.append(paper_to_bibtex(r, eav, ids, key, tags))
+            chunks.append(paper_to_bibtex(r, eav, ids, key, tags, tag_cats, category_tags))
 
     out_path.write_text(''.join(chunks), encoding='utf-8')
     return len(rows)

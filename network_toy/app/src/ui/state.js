@@ -13,7 +13,7 @@
 // Tags write through to the live project DB; these are the only cross-module
 // imports state.js needs (neither imports state.js back, so no cycle).
 import { getActiveDatasetId } from "../datasource/sqlite.js";
-import { writeTags, loadTags } from "../persistence/projects-api.js";
+import { writeTags, loadTags, loadTagCategories } from "../persistence/projects-api.js";
 
 const state = {
   // ── data source ──────────────────────────────────────────────
@@ -265,6 +265,13 @@ const state = {
   // Persisted (PASS_THROUGH_KEYS) for offline-save fidelity; the DB stays the
   // source of truth on reload.
   tags: {},
+  // Tag categories. A category is a property of the tag *label* (BRCA1 is always
+  // a gene), so this is a flat { [tag]: "species" } map, NOT keyed by paper — it
+  // sits alongside `tags` rather than changing its shape. `tagVocabulary` is the
+  // fixed server-side list of allowed categories (for the picker). Both loaded
+  // with the tags on dataset open (refreshTagsForActiveDataset). Persisted.
+  tagCategories: {},
+  tagVocabulary: [],
   filter: null,
   // Fusion-comparison slider (Layer 1.5 A/B). Interpolates basePos
   // between pre-fusion (semantic-only) and post-fusion (citation-aware)
@@ -534,13 +541,26 @@ export function setTagsFromDb(map) {
   update({ tags: next });
 }
 
-// Add `tag` to each paperId. Optimistic: state updates first, then POSTs to
-// serve.py; on failure the prior map is restored and onError (if given) is
-// called. Returns the number of (paperId) entries that gained the tag.
-export function addTag(paperIds, tag, { onError } = {}) {
+// Replace the tag-category state from a /tag-categories load:
+// { vocabulary: [...], byTag: { tag: category } }.
+export function setTagCategoriesFromDb(payload) {
+  const p = payload || {};
+  update({
+    tagVocabulary: Array.isArray(p.vocabulary) ? p.vocabulary.slice() : [],
+    tagCategories: (p.byTag && typeof p.byTag === "object") ? { ...p.byTag } : {},
+  });
+}
+
+// Add `tag` to each paperId, optionally under `category` (one of state's
+// tagVocabulary, or "" for uncategorised). Optimistic: state updates first, then
+// POSTs to serve.py; on failure the prior maps are restored and onError (if
+// given) is called. Returns the number of (paperId) entries that gained the tag.
+export function addTag(paperIds, tag, { category = "", onError } = {}) {
   const clean = String(tag || "").trim();
   if (!clean) return 0;
+  const cat = String(category || "").trim();
   const prev = state.tags;
+  const prevCats = state.tagCategories;
   const next = { ...prev };
   const adds = [];
   for (const pid of paperIds) {
@@ -549,14 +569,16 @@ export function addTag(paperIds, tag, { onError } = {}) {
     if (cur.includes(clean)) continue;
     cur.push(clean);
     next[pid] = cur;
-    adds.push({ paperId: pid, tag: clean });
+    adds.push({ paperId: pid, tag: clean, category: cat });
   }
   if (adds.length === 0) return 0;
-  update({ tags: next });
+  // Category is a label property: a non-empty pick (re)homes the label globally.
+  const nextCats = cat ? { ...prevCats, [clean]: cat } : prevCats;
+  update({ tags: next, tagCategories: nextCats });
   const ds = getActiveDatasetId();
   if (ds) {
     writeTags(ds, { adds }).catch((e) => {
-      update({ tags: prev });                 // rollback to pre-add map
+      update({ tags: prev, tagCategories: prevCats });   // rollback both maps
       if (onError) onError(e); else console.error("[tags] add failed:", e);
     });
   }
@@ -570,9 +592,12 @@ export function addTag(paperIds, tag, { onError } = {}) {
 // failure (serve.py down) leaves the existing/persisted tags in place.
 export function refreshTagsForActiveDataset() {
   const ds = getActiveDatasetId();
-  if (!ds) { setTagsFromDb({}); return; }
+  if (!ds) { setTagsFromDb({}); setTagCategoriesFromDb({}); return; }
   loadTags(ds).then(setTagsFromDb).catch((e) => {
     console.warn("[tags] could not load from DB:", e.message || e);
+  });
+  loadTagCategories(ds).then(setTagCategoriesFromDb).catch((e) => {
+    console.warn("[tags] could not load categories from DB:", e.message || e);
   });
 }
 
@@ -612,11 +637,18 @@ export function removeTagEverywhere(tag, { onError } = {}) {
     }
   }
   if (removes.length === 0) return 0;
-  update({ tags: next });
+  // The label is gone everywhere, so drop its category too (no orphan mapping).
+  const prevCats = state.tagCategories;
+  let nextCats = prevCats;
+  if (tag in prevCats) {
+    nextCats = { ...prevCats };
+    delete nextCats[tag];
+  }
+  update({ tags: next, tagCategories: nextCats });
   const ds = getActiveDatasetId();
   if (ds) {
     writeTags(ds, { removes }).catch((e) => {
-      update({ tags: prev });
+      update({ tags: prev, tagCategories: prevCats });
       if (onError) onError(e); else console.error("[tags] remove-all failed:", e);
     });
   }

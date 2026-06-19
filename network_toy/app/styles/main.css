@@ -1349,6 +1349,74 @@ tr.cart-row.row-selected td.cart-cell {
   background: rgba(120, 170, 255, 0.14);
 }
 
+/* Selected-papers: pinned rows expose a compact "tags" edit button in the tags
+   cell (a smaller .cart-btn variant). Kept first in the cell so the cell's
+   overflow:hidden never clips it; a right margin separates it from the text. */
+.cart-tag-edit {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0 5px;
+  margin-right: 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+.cart-tag-edit:hover { background: var(--bg-1); }
+
+/* ── Edit-tags modal ──────────────────────────────────────────────────
+   Current tags as removable pills, plus an add row (label + category). */
+.tags-modal-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.tags-modal-empty {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+.tags-modal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 4px 2px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.tags-modal-chip-rm {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.tags-modal-chip-rm:hover { color: var(--text); }
+.tags-modal-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.tags-modal-add input,
+.tags-modal-add select {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.tags-modal-add input { flex: 1; min-width: 0; }
+
 /* ── SQL search panel ─────────────────────────────────────────────────
    Controls (scope / guided / editor / actions) form a fixed stack on the
    darker tier; only the results table scrolls. Editor reads as a code card
@@ -1604,6 +1672,18 @@ tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--ac
 /* ── tags-list panel ──────────────────────────────────────────────── */
 
 .tags-list { overflow-y: auto; min-height: 0; flex: 1; }
+.tags-group-header {
+  padding: 5px 10px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+}
 .tags-row {
   display: flex;
   align-items: center;
