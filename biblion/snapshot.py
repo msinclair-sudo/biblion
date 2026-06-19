@@ -87,10 +87,15 @@ def _snapshot_db(src: Path, dst: Path) -> None:
     finally:
         src_conn.close()
     # Fold any -wal/-shm a fresh connection might leave behind, so the toy gets
-    # one self-contained file.
-    with sqlite3.connect(str(dst)) as d:
+    # one self-contained file. NB: a sqlite3 connection used as a context manager
+    # commits the transaction but does NOT close the connection — close it
+    # explicitly or it leaks (a GC-time ResourceWarning, fatal under -W error).
+    d = sqlite3.connect(str(dst))
+    try:
         d.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         d.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        d.close()
 
 
 def _edge_survival(conn: sqlite3.Connection, where: str = NODE_SET_WHERE) -> dict:
