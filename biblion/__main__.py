@@ -914,11 +914,81 @@ def cmd_export(args) -> int:
         # Redacted (retracted/withdrawn) papers are dropped by default;
         # --include-redacted keeps them.
         n = export_mod.export(conn, out, fmt, where, params,
-                              include_redacted=args.include_redacted)
+                              include_redacted=args.include_redacted,
+                              category_tags=args.category_tags)
     finally:
         conn.close()
 
     print(f"[biblion export] wrote {n} entries to {out} ({fmt})")
+    return 0
+
+
+def cmd_sql(args) -> int:
+    """Run a single SQL statement against the main DB.
+
+    Read-only by default (PRAGMA query_only) so it honours the invariant that
+    the MergeWriter is the only intended writer; --write opts into read-write.
+    SQL comes from the positional arg or, if omitted/'-', from stdin. Row-
+    returning statements print as a table (default), JSON, or CSV.
+
+    Read-only is enforced via PRAGMA query_only rather than a mode=ro URI: the
+    main DB is WAL and may have live writers, and a read-only connection to a
+    WAL DB needs write access to its -shm/-wal sidecars (so mode=ro fails in
+    exactly the live case). query_only rejects writes at the SQL layer while
+    still reading committed WAL state. We deliberately do NOT run init_db():
+    read-only must not issue DDL, and --write callers may run their own.
+    """
+    import csv
+
+    sql = args.sql
+    if sql is None or sql == '-':
+        sql = sys.stdin.read()
+    sql = sql.strip()
+    if not sql:
+        print("biblion sql: no SQL provided (pass a statement or pipe via stdin)")
+        return 2
+
+    conn = get_connection(args.db)
+    if not args.write:
+        conn.execute("PRAGMA query_only = ON")
+    try:
+        cur = conn.execute(sql)
+    except sqlite3.Error as e:
+        print(f"biblion sql: {e}")
+        conn.close()
+        return 1
+
+    if cur.description is not None:
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        if args.format == 'json':
+            print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        elif args.format == 'csv':
+            w = csv.writer(sys.stdout)
+            w.writerow(cols)
+            for r in rows:
+                w.writerow([r[c] for c in cols])
+        else:
+            cells = [[('' if r[c] is None else str(r[c])) for c in cols]
+                     for r in rows]
+            widths = [len(c) for c in cols]
+            for row in cells:
+                for i, val in enumerate(row):
+                    widths[i] = max(widths[i], len(val))
+            fmt = '  '.join(f'{{:<{w}}}' for w in widths)
+            print(fmt.format(*cols))
+            print('  '.join('-' * w for w in widths))
+            for row in cells:
+                print(fmt.format(*row))
+        # Count to stderr so it never pollutes piped json/csv on stdout.
+        print(f"-- {len(rows)} row(s)", file=sys.stderr)
+    else:
+        # No result set: a write under --write (under query_only the execute
+        # above would already have raised).
+        conn.commit()
+        print(f"-- {cur.rowcount} row(s) affected", file=sys.stderr)
+
+    conn.close()
     return 0
 
 
@@ -2501,6 +2571,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Comma-separated papers.id list to export')
     sex.add_argument('--include-redacted', action='store_true',
         help='Include retracted/withdrawn papers (excluded by default)')
+    sex.add_argument('--category-tags', action='store_true',
+        help='Prefix exported tag keywords with their category '
+             '(e.g. species:Canis lupus); uncategorised tags stay plain')
 
     sbk = sub.add_parser('backup',
         help='Snapshot the DB (+ claims sidecar) to a file (safe while running)')
@@ -2510,6 +2583,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Skip backing up the _claims.db sidecar')
     sbk.add_argument('--force', action='store_true',
         help='Overwrite the destination if it exists')
+
+    ssql = sub.add_parser('sql',
+        help='Run SQL against the DB (read-only unless --write)')
+    ssql.add_argument('sql', nargs='?', default=None,
+        help='SQL statement. If omitted or "-", read from stdin.')
+    ssql.add_argument('--write', action='store_true',
+        help='Open read-write (default: read-only via PRAGMA query_only). '
+             'The merge writer is the only intended writer — use with care.')
+    ssql.add_argument('--format', choices=['table', 'json', 'csv'],
+        default='table', help='Output format for row-returning statements')
 
     # ---- advanced (nested, less prominent) ------------------------------
 
@@ -2596,7 +2679,7 @@ def main(argv: list[str] = None) -> int:
     # Redis is down. `init` and `qc` never touch Redis; the read-only advanced
     # commands `list` / `plan` don't either.
     _NO_REDIS = {'init', 'qc', 'backup', 'migrate', 'export', 'flag-retractions',
-                 'clean-titles'}
+                 'clean-titles', 'sql'}
     _NO_REDIS_ADVANCED = {'list', 'plan', 'backfill-observations',
                           'snapshot', 'embedding', 'subset'}
     needs_redis = args.cmd not in _NO_REDIS and not (
@@ -2616,6 +2699,7 @@ def main(argv: list[str] = None) -> int:
         'flag-retractions': cmd_flag_retractions,
         'clean-titles': cmd_clean_titles,
         'export': cmd_export,
+        'sql':    cmd_sql,
     }
     if args.cmd == 'advanced':
         fn_name = _ADVANCED_DISPATCH[args.advanced_cmd]
