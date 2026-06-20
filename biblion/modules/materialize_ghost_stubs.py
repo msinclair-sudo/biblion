@@ -14,7 +14,14 @@ resolvable pending edges to real citations — no merge-side code needed here.
 It makes NO network calls: it reads the DB read-only and pushes stubs to the
 cache like any other producer. A degree-1 endpoint (cited by exactly one
 in-corpus paper) is a pendant that adds no inter-paper structure, so the default
-threshold is 2; pass min_degree=1 to materialize everything.
+threshold is 2; pass ghost_min_degree=1 to materialize everything.
+
+IMPORTANT — degree is only meaningful once endpoints are DOI-unified. An external
+paper cited by one in-corpus paper via its OpenAlex id and by another via its S2
+id shows up here as TWO degree-1 endpoints (different ghost_keys) until their DOIs
+are resolved and collapse them into one degree-2 endpoint. So this >=2 gate (the
+network_toy ghost threshold) is only correct after the pending endpoints have had
+their DOIs resolved — see resolve_pending_dois.
 """
 from ..cache.records import PaperRecord
 from ..framework import Module, ModuleResult, ValidationResult

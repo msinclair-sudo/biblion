@@ -39,7 +39,7 @@ def _attempt(conn, paper_id, service, field, status, finished_at='2020-01-01T00:
 def test_abstract_still_eligible_for_oa_after_s2_succeeded(insert_paper, claims_conn):
     """The core regression: S2 filled author/venue/year but no abstract.
     OpenAlex must still be offered the paper to fetch the abstract."""
-    pid = insert_paper(doi='10.1/a', title='T', authors='["A"]',
+    pid = insert_paper(doi='10.1/a', title='T', authors='["A"]', is_seed=1,
                        venue='J', year=2020, abstract=None, pub_type='article')
     # S2 succeeded on the non-abstract fields, failed (recently) on abstract.
     for f in ('authors', 'venue', 'year'):
@@ -79,7 +79,7 @@ def test_service_does_not_retry_recent_failed_field(insert_paper, claims_conn):
 
 def test_failed_field_retriable_after_interval(insert_paper, claims_conn):
     """An OLD failed attempt becomes retriable (sources backfill over time)."""
-    pid = insert_paper(doi='10.1/d', title='T', authors='["A"]', venue='J',
+    pid = insert_paper(doi='10.1/d', title='T', authors='["A"]', venue='J', is_seed=1,
                        year=2020, abstract=None, pub_type='article')
     _attempt(claims_conn, pid, 'oa', 'abstract', 'failed',
              finished_at='2020-01-01T00:00:00+00:00')  # very old
@@ -94,7 +94,7 @@ def test_succeeded_field_never_retried(insert_paper, claims_conn):
     (Abstract is NULL on the paper but OA already 'succeeded' — meaning OA's
     response simply had no abstract; we don't keep re-asking the same source.
     Other still-wanted fields keep the paper eligible.)"""
-    pid = insert_paper(doi='10.1/e', title='T', authors=None, venue='J',
+    pid = insert_paper(doi='10.1/e', title='T', authors=None, venue='J', is_seed=1,
                        year=2020, abstract=None, pub_type='article')
     _attempt(claims_conn, pid, 'oa', 'abstract', 'succeeded',
              finished_at='2000-01-01T00:00:00+00:00')  # ancient, still no retry

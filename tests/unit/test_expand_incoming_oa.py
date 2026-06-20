@@ -72,7 +72,7 @@ def test_pushes_incoming_edge_only(monkeypatch):
     assert e.citing_doi == '10.1/citer'
     # Edge-only: NO stub papers pushed for the citer.
     assert cache.papers == []
-    assert (1, '_all') in captured['succeeded']
+    assert (1, 'cites') in captured['succeeded']
 
 
 def test_paginates_all_citers(monkeypatch):
@@ -98,4 +98,4 @@ def test_paper_with_no_citers_is_noop_but_marked(monkeypatch):
     res = ExpandIncomingOa().run(_Ctx(cache, {'loop': False}))
     assert res.stats['edges_pushed'] == 0
     # Still marked succeeded — we DID check; nothing to do isn't a failure.
-    assert (5, '_all') in captured['succeeded']
+    assert (5, 'cites') in captured['succeeded']

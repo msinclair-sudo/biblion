@@ -533,22 +533,66 @@ def test_secondary_slot_survives_state_writing_panel_teardown(page):
     assert out["back"] == "reentryA" and out["fwd"] == "reentryB"
 
 
+
 # ── tags-list category grouping (§ tag-categories) ─────────────────────
 
+# Groups render collapsed on open; this JS helper clicks every collapsed
+# header (category + genus) until the whole tree is expanded.
+_EXPAND_ALL = """
+        const expandAll = () => {
+          for (let i = 0; i < 12; i++) {
+            const c = [...host.querySelectorAll(".tags-group-toggle")]
+              .filter(h => h.querySelector(".tags-group-chevron").textContent === "▸");
+            if (!c.length) break;
+            c.forEach(h => h.click());
+          }
+        };
+"""
 
-def test_tags_list_groups_by_category(page):
-    """The tags-list panel renders a header per category in vocabulary order
-    (uncategorised last) and files each tag under its category."""
+
+def test_tags_list_starts_collapsed(page):
+    """On open every group is collapsed: headers show ▸ and no tag rows render."""
     out = page.evaluate(
         '''async () => {
             const host = document.createElement("div");
             document.body.appendChild(host);
             const state = await import("/app/src/ui/state.js");
-            const prev = {
-                tags: state.getState().tags,
-                tagCategories: state.getState().tagCategories,
-                tagVocabulary: state.getState().tagVocabulary,
-            };
+            const prev = { tags: state.getState().tags, tagCategories: state.getState().tagCategories,
+                           tagVocabulary: state.getState().tagVocabulary };
+            state.update({
+                tags: { 1: ["Canis lupus"], 2: ["BRCA1"] },
+                tagCategories: { "Canis lupus": "species", "BRCA1": "gene" },
+                tagVocabulary: ["species", "gene", "method", "theme"],
+            });
+            try {
+                const { mount } = await import("/app/src/ui/panels/tags-list.js");
+                mount(host, state.getState(), {});
+                await new Promise(r => setTimeout(r, 30));
+                return {
+                    headers: [...host.querySelectorAll(".tags-group-header")]
+                        .map(h => h.textContent.replace(/^[▸▾] */, "")),
+                    chevrons: [...host.querySelectorAll(".tags-group-header .tags-group-chevron")]
+                        .map(c => c.textContent),
+                    nameCount: host.querySelectorAll(".tags-name").length,
+                };
+            } finally { state.update(prev); }
+        }'''
+    )
+    assert out["nameCount"] == 0                       # nothing expanded
+    assert set(out["chevrons"]) == {"▸"}               # all collapsed
+    assert any("species" in h for h in out["headers"]) # headers still listed
+
+
+def test_tags_list_groups_by_category(page):
+    """After expanding, a header per category (default name-asc → alphabetical,
+    uncategorised last) files each tag under its category."""
+    out = page.evaluate(
+        '''async () => {
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            const state = await import("/app/src/ui/state.js");
+            const prev = { tags: state.getState().tags, tagCategories: state.getState().tagCategories,
+                           tagVocabulary: state.getState().tagVocabulary };
             state.update({
                 tags: { 1: ["Canis lupus", "to-read"], 2: ["BRCA1"] },
                 tagCategories: { "Canis lupus": "species", "BRCA1": "gene" },
@@ -557,18 +601,177 @@ def test_tags_list_groups_by_category(page):
             try {
                 const { mount } = await import("/app/src/ui/panels/tags-list.js");
                 mount(host, state.getState(), {});
-                await new Promise(r => setTimeout(r, 50));
+                await new Promise(r => setTimeout(r, 30));
+                ''' + _EXPAND_ALL + '''
+                expandAll();
+                await new Promise(r => setTimeout(r, 10));
                 const headers = [...host.querySelectorAll(".tags-group-header")]
-                    .map(h => h.textContent);
-                const names = [...host.querySelectorAll(".tags-name")]
-                    .map(n => n.textContent);
+                    .map(h => h.textContent.replace(/^[▸▾] */, ""));
+                const names = [...host.querySelectorAll(".tags-name")].map(n => n.textContent);
                 return { headers, names };
-            } finally {
-                state.update(prev);
-            }
+            } finally { state.update(prev); }
         }'''
     )
-    # species before gene (vocab order); Uncategorised last
-    assert out["headers"] == ["species", "gene", "Uncategorised"], out["headers"]
-    # BRCA1 sits under gene, to-read under Uncategorised
+    assert out["headers"] == ["gene (1)", "species (1)", "Uncategorised (1)"], out["headers"]
     assert set(out["names"]) == {"Canis lupus", "BRCA1", "to-read"}
+
+
+def test_tags_list_category_sort_reorders_groups(page):
+    """The Count sort reorders the category headers themselves (by aggregate
+    occurrence sum), not just the tags within them; Name sort is alphabetical."""
+    out = page.evaluate(
+        '''async () => {
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            const state = await import("/app/src/ui/state.js");
+            const prev = { tags: state.getState().tags, tagCategories: state.getState().tagCategories,
+                           tagVocabulary: state.getState().tagVocabulary };
+            // "gene" sorts before "method" by name, but "method" has the larger
+            // aggregate count (3 vs 1), so Count flips their order.
+            state.update({
+                tags: { 1: ["Mmm"], 2: ["Mmm"], 3: ["Mmm", "Ggg"] },
+                tagCategories: { "Ggg": "gene", "Mmm": "method" },
+                tagVocabulary: ["species", "gene", "method", "theme"],
+            });
+            try {
+                const { mount } = await import("/app/src/ui/panels/tags-list.js");
+                mount(host, state.getState(), {});
+                await new Promise(r => setTimeout(r, 30));
+                const headers = () => [...host.querySelectorAll(".tags-group-header")]
+                    .map(h => h.textContent.replace(/^[▸▾] */, ""));
+                const btn = (label) => [...host.querySelectorAll(".tags-sort-btn")]
+                    .find(b => b.textContent.startsWith(label));
+                const byNameAsc = headers();
+                btn("Count").click(); await new Promise(r => setTimeout(r, 10));
+                const byCountDesc = headers();
+                return { byNameAsc, byCountDesc };
+            } finally { state.update(prev); }
+        }'''
+    )
+    assert out["byNameAsc"] == ["gene (1)", "method (1)"], out["byNameAsc"]
+    assert out["byCountDesc"] == ["method (1)", "gene (1)"], out["byCountDesc"]
+
+
+def test_tags_list_filter_and_collapse(page):
+    """Filter narrows the list; collapsing the species category hides its rows."""
+    out = page.evaluate(
+        '''async () => {
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            const state = await import("/app/src/ui/state.js");
+            const prev = { tags: state.getState().tags, tagCategories: state.getState().tagCategories,
+                           tagVocabulary: state.getState().tagVocabulary };
+            state.update({
+                tags: { 1: ["Canis lupus", "Felis catus"], 2: ["BRCA1"] },
+                tagCategories: { "Canis lupus": "species", "Felis catus": "species", "BRCA1": "gene" },
+                tagVocabulary: ["species", "gene", "method", "theme"],
+            });
+            try {
+                const { mount } = await import("/app/src/ui/panels/tags-list.js");
+                mount(host, state.getState(), {});
+                await new Promise(r => setTimeout(r, 30));
+                ''' + _EXPAND_ALL + '''
+                const names = () => [...host.querySelectorAll(".tags-name")].map(n => n.textContent);
+                const input = host.querySelector(".tags-filter-bar input");
+
+                // filter forces expansion regardless of collapse state
+                input.value = "can"; input.dispatchEvent(new Event("input"));
+                await new Promise(r => setTimeout(r, 10));
+                const filtered = names();
+
+                input.value = ""; input.dispatchEvent(new Event("input"));
+                await new Promise(r => setTimeout(r, 10));
+                expandAll(); await new Promise(r => setTimeout(r, 10));
+                const speciesHeader = [...host.querySelectorAll(".tags-group-header")]
+                    .find(h => h.textContent.includes("species"));
+                const chevBefore = speciesHeader.querySelector(".tags-group-chevron").textContent;
+                speciesHeader.click();
+                await new Promise(r => setTimeout(r, 10));
+                const afterCollapse = names();
+                const chevAfter = [...host.querySelectorAll(".tags-group-header")]
+                    .find(h => h.textContent.includes("species"))
+                    .querySelector(".tags-group-chevron").textContent;
+                return { filtered, afterCollapse, chevBefore, chevAfter };
+            } finally { state.update(prev); }
+        }'''
+    )
+    assert out["filtered"] == ["Canis lupus"], out["filtered"]
+    assert out["afterCollapse"] == ["BRCA1"], out["afterCollapse"]
+    assert out["chevBefore"] == "▾" and out["chevAfter"] == "▸"
+
+
+def test_tags_list_genus_subgroups(page):
+    """Species sub-group by genus; each genus sub-header collapses independently."""
+    out = page.evaluate(
+        '''async () => {
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            const state = await import("/app/src/ui/state.js");
+            const prev = { tags: state.getState().tags, tagCategories: state.getState().tagCategories,
+                           tagVocabulary: state.getState().tagVocabulary };
+            state.update({
+                tags: { 1: ["Spodoptera frugiperda", "Spodoptera litura"], 2: ["Chlorella vulgaris"] },
+                tagCategories: { "Spodoptera frugiperda": "species", "Spodoptera litura": "species",
+                                 "Chlorella vulgaris": "species" },
+                tagVocabulary: ["species", "gene", "method", "theme"],
+            });
+            try {
+                const { mount } = await import("/app/src/ui/panels/tags-list.js");
+                mount(host, state.getState(), {});
+                await new Promise(r => setTimeout(r, 30));
+                ''' + _EXPAND_ALL + '''
+                expandAll(); await new Promise(r => setTimeout(r, 10));
+                const subs = () => [...host.querySelectorAll(".tags-subgroup-header")]
+                    .map(h => h.textContent.replace(/^[▸▾] */, ""));
+                const names = () => [...host.querySelectorAll(".tags-name")].map(n => n.textContent);
+                const subsBefore = subs();
+                const spod = [...host.querySelectorAll(".tags-subgroup-header")]
+                    .find(h => h.textContent.includes("Spodoptera"));
+                spod.click();
+                await new Promise(r => setTimeout(r, 10));
+                return { subsBefore, namesAfter: names() };
+            } finally { state.update(prev); }
+        }'''
+    )
+    assert out["subsBefore"] == ["Chlorella (1)", "Spodoptera (2)"], out["subsBefore"]
+    assert out["namesAfter"] == ["Chlorella vulgaris"], out["namesAfter"]
+
+
+def test_tags_list_column_sort(page):
+    """The Name/Count sort controls reorder tags within a group."""
+    out = page.evaluate(
+        '''async () => {
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            const state = await import("/app/src/ui/state.js");
+            const prev = { tags: state.getState().tags, tagCategories: state.getState().tagCategories,
+                           tagVocabulary: state.getState().tagVocabulary };
+            state.update({
+                tags: { 1: ["Aaa", "Bbb"], 2: ["Bbb"] },
+                tagCategories: { "Aaa": "gene", "Bbb": "gene" },
+                tagVocabulary: ["species", "gene", "method", "theme"],
+            });
+            try {
+                const { mount } = await import("/app/src/ui/panels/tags-list.js");
+                mount(host, state.getState(), {});
+                await new Promise(r => setTimeout(r, 30));
+                ''' + _EXPAND_ALL + '''
+                expandAll(); await new Promise(r => setTimeout(r, 10));
+                const names = () => [...host.querySelectorAll(".tags-name")].map(n => n.textContent);
+                const btn = (label) => [...host.querySelectorAll(".tags-sort-btn")]
+                    .find(b => b.textContent.startsWith(label));
+                const defaultOrder = names();
+                btn("Count").click(); await new Promise(r => setTimeout(r, 10));
+                const byCountDesc = names();
+                btn("Count").click(); await new Promise(r => setTimeout(r, 10));
+                const byCountAsc = names();
+                btn("Name").click(); await new Promise(r => setTimeout(r, 10));
+                const byNameAsc = names();
+                return { defaultOrder, byCountDesc, byCountAsc, byNameAsc };
+            } finally { state.update(prev); }
+        }'''
+    )
+    assert out["defaultOrder"] == ["Aaa", "Bbb"], out["defaultOrder"]
+    assert out["byCountDesc"] == ["Bbb", "Aaa"], out["byCountDesc"]
+    assert out["byCountAsc"] == ["Aaa", "Bbb"], out["byCountAsc"]
+    assert out["byNameAsc"] == ["Aaa", "Bbb"], out["byNameAsc"]

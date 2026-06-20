@@ -25,7 +25,7 @@ import logging
 
 from .records import (
     PaperRecord, CitationRecord, ClaimRequest, ClaimGrant, ResultMark,
-    PromoteCitationAction,
+    PromoteCitationAction, PendingDoiBackfill,
 )
 
 
@@ -46,6 +46,8 @@ KEY_PROMOTE_CITATIONS  = 'promote:citations'
 # The pending_resolver persists its sweep cursor here so a restart
 # resumes where it stopped instead of redoing work.
 KEY_PENDING_CURSOR     = 'pending_resolver:cursor'
+# resolve_pending_dois → writer: oa_id→doi stamps to apply to pending_citations.
+KEY_PENDING_DOI_BACKFILL = 'backfill:pending_dois'
 
 
 def claim_request_key(service: str) -> str:
@@ -232,6 +234,18 @@ class CacheClient:
         raw = self._r.lpop(self._k(KEY_PROMOTE_CITATIONS), count=n) or []
         return [PromoteCitationAction.from_json(s) for s in raw]
 
+    def push_pending_doi_backfills(self, backfills: Iterable[PendingDoiBackfill]) -> int:
+        """resolve_pending_dois pushes oa_id→doi stamps for the writer to apply."""
+        payloads = [b.to_json() for b in backfills]
+        if payloads:
+            self._r.rpush(self._k(KEY_PENDING_DOI_BACKFILL), *payloads)
+        return len(payloads)
+
+    def pop_pending_doi_backfill_batch(self, n: int) -> list[PendingDoiBackfill]:
+        """Writer drains up to n DOI backfills in a single round-trip."""
+        raw = self._r.lpop(self._k(KEY_PENDING_DOI_BACKFILL), count=n) or []
+        return [PendingDoiBackfill.from_json(s) for s in raw]
+
     def get_pending_cursor(self) -> int:
         """Reader's saved sweep cursor (last pending_citations.id processed)."""
         raw = self._r.get(self._k(KEY_PENDING_CURSOR))
@@ -270,13 +284,14 @@ class CacheClient:
         pipe = self._r.pipeline()
         for key in (KEY_STAGED_PAPERS, KEY_STAGED_CITATIONS,
                     KEY_PARKED_PAPERS, KEY_PARKED_CITATIONS,
-                    KEY_RESOLVED_PAPERS, KEY_PROMOTE_CITATIONS):
+                    KEY_RESOLVED_PAPERS, KEY_PROMOTE_CITATIONS,
+                    KEY_PENDING_DOI_BACKFILL):
             pipe.llen(self._k(key))
         vals = pipe.execute()
         return dict(zip(
             ('staged_papers', 'staged_citations',
              'parked_papers', 'parked_citations',
-             'resolved_papers', 'promote_citations'),
+             'resolved_papers', 'promote_citations', 'pending_doi_backfill'),
             vals,
         ))
 
@@ -292,7 +307,7 @@ class CacheClient:
             self._k(KEY_STAGED_PAPERS),   self._k(KEY_STAGED_CITATIONS),
             self._k(KEY_PARKED_PAPERS),   self._k(KEY_PARKED_CITATIONS),
             self._k(KEY_RESOLVED_PAPERS), self._k(KEY_PROMOTE_CITATIONS),
-            self._k(KEY_PENDING_CURSOR),
+            self._k(KEY_PENDING_CURSOR),  self._k(KEY_PENDING_DOI_BACKFILL),
         )
         for prefix in (KEY_CLAIM_REQUEST_PREFIX, KEY_CLAIM_GRANT_PREFIX,
                        KEY_RESULT_MARK_PREFIX):

@@ -19,6 +19,7 @@ from .expand_incoming_oa     import ExpandIncomingOa
 from .search_s2_factorial    import SearchS2Factorial
 from .import_ris              import ImportRis
 from .import_bib              import ImportBib
+from .resolve_pending_dois    import ResolvePendingDois
 from .materialize_ghost_stubs import MaterializeGhostStubs
 
 # Default registration order (placeholders first, then real producers).
@@ -43,6 +44,7 @@ ALL_MODULES = [
     SearchS2Factorial,
     ImportRis,
     ImportBib,
+    ResolvePendingDois,
     MaterializeGhostStubs,
 ]
 
@@ -53,6 +55,6 @@ __all__ = [
     'EnrichBiblioCrossref', 'EnrichStubsOa',
     'BulkPaperIds', 'BulkAbstracts', 'BulkPapers',
     'ExpandPapersS2', 'ExpandIncomingOa', 'SearchS2Factorial', 'ImportRis',
-    'ImportBib', 'MaterializeGhostStubs',
+    'ImportBib', 'ResolvePendingDois', 'MaterializeGhostStubs',
     'ALL_MODULES',
 ]

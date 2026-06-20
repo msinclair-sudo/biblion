@@ -96,6 +96,16 @@ ENRICH_PRODUCERS = (
     'expand_incoming_oa',
     'resolve_dois_oa',
     'resolve_dois_s2',
+    # Resolve OA-id-only pending endpoints to their DOI so cross-source halves
+    # (OA gives ids, S2 gives DOIs) unify — making the ghost-degree count below
+    # correct. Must run before materialize_ghost_stubs.
+    'resolve_pending_dois',
+    # Promote SHARED pending-citation endpoints (default degree>=2) into the
+    # corpus as is_stub=1 ghosts so the PendingResolver can wire up their edges.
+    # Runs last so it sees the pending edges parked above. The degree count is
+    # only correct once endpoints are DOI-unified, so resolve_pending_dois must
+    # run first; ghost stubs are never themselves hopped (is_stub=0 guards).
+    'materialize_ghost_stubs',
 )
 
 
@@ -483,13 +493,18 @@ def _live_conflicts_by_field(conn) -> list:
     return sorted(counts.items(), key=lambda kv: -kv[1])[:10]
 
 
-def _qc_snapshot(db_path) -> dict:
-    """Gather all QC metrics for a DB into a plain dict.
+def _qc_snapshot(db_path, full: bool = True) -> dict:
+    """Gather QC metrics for a DB into a plain dict.
 
-    Shared by the one-shot `qc` command and the live `enrich` dashboard so
-    both report identical numbers. Opens its own short-lived connections and
-    closes them — safe to call repeatedly on a tick while writers are active
-    (reads see WAL-committed state).
+    Shared by the one-shot `qc` command and the live `enrich` dashboard. Opens
+    its own short-lived connections and closes them — safe to call repeatedly on
+    a tick while writers are active (reads see WAL-committed state).
+
+    `full=False` skips the expensive aggregates (citation-coverage COUNT(DISTINCT)
+    JOIN ~3s, and the pending-endpoint degree CTE ~0.6s). The live dashboard runs
+    EVERY render tick against a DB under heavy write load and doesn't display
+    those numbers anyway, so it passes full=False; only the one-shot `qc` (which
+    renders them) computes them.
     """
     conn = get_connection(db_path)
     init_db(conn)
@@ -555,6 +570,24 @@ def _qc_snapshot(db_path) -> dict:
         }
         for name in sorted(latest)
     ]
+    # Pending-edge endpoints: external papers our corpus cites that aren't yet
+    # rows. Degree = how many distinct in-corpus citers point at the endpoint;
+    # `materialize_ghost_stubs` (default degree>=2) turns shared ones into ghosts.
+    # COUNT(DISTINCT ...) GROUP BY over the whole pending table — qc-only.
+    if full:
+        snap['pending'] = dict(conn.execute("""
+            WITH ep AS (
+                SELECT cited_doi AS doi, COUNT(DISTINCT citing_doi) AS deg
+                FROM pending_citations
+                WHERE cited_doi IS NOT NULL
+                GROUP BY cited_doi
+            )
+            SELECT
+                (SELECT COUNT(*) FROM pending_citations)        AS rows,
+                (SELECT COUNT(*) FROM ep)                       AS distinct_cited_dois,
+                (SELECT COALESCE(SUM(deg >= 2), 0) FROM ep)     AS cited_deg2plus,
+                (SELECT COALESCE(SUM(deg  = 1), 0) FROM ep)     AS cited_deg1
+        """).fetchone())
     conn.close()
 
     snap['attempts'] = []
@@ -592,16 +625,50 @@ def _qc_snapshot(db_path) -> dict:
         }
         # Remaining claimable candidates per MODULE — work left to do. Lets the
         # dashboard tell "done" (0 remaining everywhere) from "stalled".
-        from .framework.claims import CANDIDATE_QUERIES, count_remaining
-        remaining: dict = {}
-        for mod, spec in CANDIDATE_QUERIES.items():
-            try:
-                remaining[mod] = count_remaining(
-                    cconn, spec['service'], spec['candidate_sql'],
-                    spec.get('fields', ('_all',)))
-            except Exception:
-                remaining[mod] = None
-        snap['remaining_by_module'] = remaining
+        # qc-ONLY: each count is a COUNT(*) over the module's full eligible set
+        # with cross-attach NOT-EXISTS gating — ~10s per module on a large corpus
+        # under write load (vs claim_candidates, which is fast because LIMIT 50
+        # short-circuits). Running this every render tick froze the live screen,
+        # so the live dashboard (full=False) skips it and shows '?' for remaining.
+        snap['remaining_by_module'] = {}
+        if full:
+            from .framework.claims import CANDIDATE_QUERIES, count_remaining
+            remaining: dict = {}
+            for mod, spec in CANDIDATE_QUERIES.items():
+                try:
+                    remaining[mod] = count_remaining(
+                        cconn, spec['service'], spec['candidate_sql'],
+                        spec.get('fields', ('_all',)))
+                except Exception:
+                    remaining[mod] = None
+            snap['remaining_by_module'] = remaining
+        # Citation-retrieval coverage of the REAL (non-stub) corpus. A paper is
+        # covered when it has a settled (succeeded|failed) attempt for the
+        # direction: refs = field 'refs' OR a full s2_hop; cites = field 'cites'
+        # OR a full s2_hop. Eligible = non-stub, non-rejected, with a usable id.
+        # Two COUNT(DISTINCT) JOINs over the whole corpus (~3s) — qc-only.
+        if full:
+            snap['coverage'] = dict(cconn.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM main_v3.papers
+                 WHERE is_stub=0 AND is_rejected=0
+                   AND (doi IS NOT NULL OR s2_id IS NOT NULL))         AS refs_eligible,
+              (SELECT COUNT(DISTINCT ea.paper_id)
+                 FROM enrichment_attempts ea
+                 JOIN main_v3.papers p ON p.id = ea.paper_id
+                 WHERE p.is_stub=0 AND p.is_rejected=0
+                   AND ea.status IN ('succeeded','failed')
+                   AND (ea.field='refs' OR ea.service='s2_hop'))       AS refs_covered,
+              (SELECT COUNT(*) FROM main_v3.papers
+                 WHERE is_stub=0 AND is_rejected=0
+                   AND (oa_id IS NOT NULL OR s2_id IS NOT NULL))       AS cites_eligible,
+              (SELECT COUNT(DISTINCT ea.paper_id)
+                 FROM enrichment_attempts ea
+                 JOIN main_v3.papers p ON p.id = ea.paper_id
+                 WHERE p.is_stub=0 AND p.is_rejected=0
+                   AND ea.status IN ('succeeded','failed')
+                   AND (ea.field='cites' OR ea.service='s2_hop'))      AS cites_covered
+            """).fetchone())
         cconn.close()
     except Exception as e:
         snap['attempts_error'] = str(e)
@@ -645,6 +712,21 @@ def _render_qc(snap: dict, db_path, header_extra: str = '') -> list[str]:
     out.append(f"  {'edges':18s} {core['edges']:>14,}")
     out.append(f"  {'pending edges':18s} {core['pending_edges']:>14,}")
     out.append(f"  {'cit_count rows':18s} {core['cit_count_rows']:>14,}")
+    pend = snap.get('pending')
+    if pend:
+        out.append(f"  {'pending cited DOIs':18s} {pend['distinct_cited_dois']:>14,}"
+                   f"   (deg>=2 {pend['cited_deg2plus']:,}, deg1 {pend['cited_deg1']:,}"
+                   f" -> ghosts)")
+
+    cov = snap.get('coverage')
+    if cov:
+        out.append("\n  Citation coverage (non-stub corpus)")
+
+        def cov_line(label, covered, eligible):
+            pct = covered / eligible * 100 if eligible else 0
+            out.append(f"  {label:18s} {covered:>14,} / {eligible:<10,} ({pct:5.1f}%)")
+        cov_line('refs retrieved',  cov['refs_covered'],  cov['refs_eligible'])
+        cov_line('cites retrieved', cov['cites_covered'], cov['cites_eligible'])
 
     out.append("\n  Conflicts")
     out.append(f"  {'total':18s} {core['conflicts']:>14,}")
@@ -1860,7 +1942,9 @@ def cmd_daemon(args) -> int:
             _rich_live = None
 
     def _renderable():
-        snap = _qc_snapshot(args.db)
+        # full=False: skip the multi-second coverage/pending-degree aggregates
+        # the dashboard doesn't show — they ran every tick and froze the screen.
+        snap = _qc_snapshot(args.db, full=False)
         return _rich_dashboard(
             snap, args.db,
             uptime_s=int(time.monotonic() - started_mono),
@@ -1873,7 +1957,7 @@ def cmd_daemon(args) -> int:
         elif live:
             # Fallback: Rich missing but we have a TTY — minimal reprint.
             recent = _recent_errors()
-            core = _qc_snapshot(args.db)['core']
+            core = _qc_snapshot(args.db, full=False)['core']
             sys.stdout.write(
                 f"\rpapers {core['papers']:,}  edges {core['edges']:,}  "
                 f"pending {core['pending_edges']:,}  errors(10m) {len(recent)}   ")

@@ -123,13 +123,13 @@ class ExpandIncomingOa(Module):
                         edges += 1
                 except Exception as e:
                     stats['errors'] += 1
-                    failed.append((pid, '_all'))
+                    failed.append((pid, 'cites'))
                     if verbose:
                         print(f"  [paper {pid}] ERROR {type(e).__name__}: {str(e)[:60]}")
                     continue
                 stats['edges_pushed'] += edges
                 stats['papers'] += 1
-                succeeded.append((pid, '_all'))
+                succeeded.append((pid, 'cites'))
 
             report_marks(ctx.cache, self.name, succeeded, failed)
             print(f"  [batch] {len(rows)} papers → "

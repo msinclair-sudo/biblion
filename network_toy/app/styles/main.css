@@ -1672,6 +1672,32 @@ tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--ac
 /* ── tags-list panel ──────────────────────────────────────────────── */
 
 .tags-list { overflow-y: auto; min-height: 0; flex: 1; }
+.tags-filter-bar {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.tags-filter-bar .cart-filter { width: 100%; box-sizing: border-box; }
+.tags-sort-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.tags-sort-label { font-size: 11px; color: var(--text-faint); }
+.tags-sort-btn {
+  font-size: 11px;
+  padding: 1px 7px;
+  background: var(--bg-2);
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.tags-sort-btn:hover { color: var(--text); }
+.tags-sort-btn.active { color: var(--text); border-color: var(--accent, #6cf); }
 .tags-group-header {
   padding: 5px 10px 3px;
   font-size: 10px;
@@ -1684,6 +1710,22 @@ tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--ac
   position: sticky;
   top: 0;
 }
+.tags-subgroup-header {
+  padding: 3px 10px 3px 22px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+}
+.tags-subgroup-header .tags-genus-name { font-style: italic; }
+.tags-group-toggle { cursor: pointer; user-select: none; }
+.tags-group-toggle:hover { color: var(--text); }
+.tags-group-chevron {
+  display: inline-block;
+  width: 1em;
+  font-size: 9px;
+}
 .tags-row {
   display: flex;
   align-items: center;
@@ -1693,6 +1735,8 @@ tr.search-row.selected td.search-cell-check { box-shadow: inset 2px 0 0 var(--ac
   font-size: 12px;
   cursor: default;
 }
+/* after .tags-row so the longhand wins over the padding shorthand above */
+.tags-row-indent { padding-left: 22px; }
 .tags-row-active { background: var(--bg-2); }
 .tags-swatch {
   width: 11px;

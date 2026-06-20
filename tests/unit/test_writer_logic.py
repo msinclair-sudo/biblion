@@ -21,6 +21,7 @@ import pytest
 
 from biblion.cache.records import (
     PaperRecord, CitationRecord, PromoteCitationAction, ClaimRequest,
+    PendingDoiBackfill,
 )
 from biblion.merge.writer import MergeWriter
 from tests.conftest import needs_redis
@@ -184,6 +185,65 @@ class TestPromoteActions:
         w.run_cycle()  # must not raise
         assert w.stats.promote_actions_applied == 1
 
+    def test_action_with_vanished_endpoint_does_not_crash_cycle(
+        self, tmp_db_path, claims_db_path, cache,
+        insert_paper, insert_pending_citation, count_rows,
+    ):
+        """Regression: the Resolver can delete a paper between when the
+        pending_resolver resolves an edge and when the writer applies the
+        promotion. The citations FK then fails — which used to abort the whole
+        cycle (writer exit 1, all producers stall). It must be caught per-action:
+        the bad promotion is skipped, its pending row left for re-resolution, and
+        a valid promotion in the same batch still lands."""
+        a = insert_paper(doi='10.1/a')
+        b = insert_paper(doi='10.1/b')
+        good_pid = insert_pending_citation(
+            citing_doi='10.1/a', cited_doi='10.1/b', provenance='pending_resolver')
+        stale_pid = insert_pending_citation(
+            citing_doi='10.1/a', cited_doi='10.9/gone', provenance='pending_resolver')
+        # Valid action + one pointing at a cited_id that doesn't exist (999).
+        cache.push_promote_citation(PromoteCitationAction(
+            pending_id=good_pid, citing_id=a, cited_id=b, provenance='pending_resolver'))
+        cache.push_promote_citation(PromoteCitationAction(
+            pending_id=stale_pid, citing_id=a, cited_id=999, provenance='pending_resolver'))
+
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        w.run_cycle()                                  # must NOT raise
+
+        assert count_rows('citations') == 1            # only the valid edge
+        assert w.stats.promotions_stale_endpoint == 1
+        # Valid pending row consumed; the stale one is left to re-resolve later.
+        assert count_rows('pending_citations', 'id = %d' % good_pid) == 0
+        assert count_rows('pending_citations', 'id = %d' % stale_pid) == 1
+
+
+# ---------------------------------------------------------------------------
+# DOI backfill application (resolve_pending_dois -> writer)
+# ---------------------------------------------------------------------------
+
+class TestDoiBackfills:
+    def test_backfill_stamps_doi_on_both_sides(
+        self, tmp_db_path, claims_db_path, cache, insert_pending_citation, db_conn,
+    ):
+        # Same OA work appears as a cited endpoint in one row and a citing
+        # endpoint in another; both lack a DOI.
+        cited_id  = insert_pending_citation(citing_doi='10.1/a', cited_oa_id='W500')
+        citing_id = insert_pending_citation(citing_oa_id='W500', cited_doi='10.1/b')
+        # And a row that already has the DOI on that side — must not be clobbered.
+        keep_id   = insert_pending_citation(citing_doi='10.1/c', cited_oa_id='W500',
+                                            cited_doi='10.9/already')
+        cache.push_pending_doi_backfills([PendingDoiBackfill(oa_id='W500', doi='10.9/resolved')])
+
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        w.run_cycle()
+
+        rows = {r['id']: r for r in db_conn.execute(
+            "SELECT id, cited_doi, citing_doi FROM pending_citations")}
+        assert rows[cited_id]['cited_doi']   == '10.9/resolved'   # stamped
+        assert rows[citing_id]['citing_doi'] == '10.9/resolved'   # other side
+        assert rows[keep_id]['cited_doi']    == '10.9/already'    # not clobbered
+        assert w.stats.pending_dois_backfilled == 2               # two rows updated
+
 
 # ---------------------------------------------------------------------------
 # Regression tests for the bugs we fixed
@@ -225,8 +285,8 @@ class TestRegressionFixes:
         w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
         cache.push_paper(PaperRecord(source='t', doi='10.1/a'))
 
-        # Patch get_connection to return a conn whose commit() raises
-        orig_get_conn = writer_mod.get_connection
+        # The writer holds ONE persistent connection (self._conn) reused across
+        # cycles; wrap it so its commit() raises, simulating a disk-full commit.
         class BrokenConn:
             def __init__(self, real):
                 self._real = real
@@ -235,9 +295,7 @@ class TestRegressionFixes:
             def commit(self):
                 raise sqlite3.OperationalError('disk full')
 
-        def fake_get_conn(p):
-            return BrokenConn(orig_get_conn(p))
-        monkeypatch.setattr(writer_mod, 'get_connection', fake_get_conn)
+        w._conn = BrokenConn(w._conn)
 
         with pytest.raises(sqlite3.OperationalError, match='disk full'):
             w.run_cycle()

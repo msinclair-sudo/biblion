@@ -257,6 +257,14 @@ CREATE TABLE IF NOT EXISTS pending_citations (
     last_retry_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_retry ON pending_citations(last_retry_at);
+-- Partial indexes for resolve_pending_dois: scanning DISTINCT OA-only endpoints
+-- and the writer's per-oa_id DOI-backfill UPDATE. The `*_doi IS NULL` predicate
+-- keeps them tiny (a row leaves the index the moment its DOI is stamped) and
+-- exactly matches both the scan and update WHERE clauses.
+CREATE INDEX IF NOT EXISTS idx_pending_cited_oa
+    ON pending_citations(cited_oa_id) WHERE cited_oa_id IS NOT NULL AND cited_doi IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_citing_oa
+    ON pending_citations(citing_oa_id) WHERE citing_oa_id IS NOT NULL AND citing_doi IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- Orchestrator per-invocation run state.
@@ -295,7 +303,10 @@ CREATE INDEX IF NOT EXISTS idx_module_runs_status
 # '_all' sentinel field and behave as one row per (paper, service).
 ENRICHMENT_FIELDS = ('abstract', 'authors', 'venue', 'year', 'pub_type', 'title',
                      # Crossref biblio detail (enrich_biblio_crossref).
-                     'volume', 'first_page', 'publisher')
+                     'volume', 'first_page', 'publisher',
+                     # Citation retrieval coverage: 'refs' = outgoing reference
+                     # list fetched, 'cites' = incoming citations fetched.
+                     'refs', 'cites')
 ENRICHMENT_FIELD_ALL = '_all'
 
 _CLAIMS_SCHEMA = """
@@ -707,6 +718,29 @@ def _migrate_claims_schema(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_citation_attempt_fields(conn: sqlite3.Connection) -> None:
+    """Relabel legacy citation-retrieval attempts to the explicit per-direction
+    fields so the coverage feature doesn't re-fetch already-done papers.
+
+    `expand_incoming_oa` used field='_all' before incoming citations were tracked
+    explicitly; its candidate query now gates on field='cites'. Rename the old
+    rows so a paper already swept for incoming citations stays settled. UPDATE OR
+    IGNORE + a cleanup DELETE keeps it idempotent (a 'cites' row may already
+    exist from a post-upgrade run). No-op when the table is absent.
+    """
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(enrichment_attempts)").fetchall()}
+    if not cols or 'field' not in cols:
+        return
+    conn.execute(
+        "UPDATE OR IGNORE enrichment_attempts SET field='cites' "
+        "WHERE service='oa_incoming' AND field='_all'")
+    conn.execute(
+        "DELETE FROM enrichment_attempts "
+        "WHERE service='oa_incoming' AND field='_all'")
+    conn.commit()
+
+
 def ensure_claims_db(claims_db_path: Optional[Path] = None) -> None:
     """
     Idempotent one-time setup: create the claims DB and schema if missing.
@@ -725,6 +759,8 @@ def ensure_claims_db(claims_db_path: Optional[Path] = None) -> None:
     # IF NOT EXISTS index DDL below applies to the migrated table.
     _migrate_claims_schema(conn)
     conn.executescript(_CLAIMS_SCHEMA)
+    # Relabel legacy citation attempts (needs the per-field shape to exist).
+    _migrate_citation_attempt_fields(conn)
     conn.commit()
     conn.close()
 

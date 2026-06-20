@@ -60,7 +60,10 @@ ROOT = Path(__file__).resolve().parent
 # Datasets live in the repo-root data/ dir (one level up from network_toy/),
 # not under network_toy/ itself. Resolved directly here so the toy needs no
 # network_toy/data symlink; /data/ URLs are mapped to this dir in the Handler.
-DATA = ROOT.parent / "data"
+# NETWORK_TOY_DATA overrides this so the data can live on a faster filesystem
+# (e.g. native ext4) than the repo — the biblion DBs are write-heavy and the
+# repo may sit on a slow networked/OneDrive mount.
+DATA = Path(os.environ.get("NETWORK_TOY_DATA") or (ROOT.parent / "data"))
 _DEFAULT_PORT = int(os.environ.get("NETWORK_TOY_PORT", "8000"))
 
 # The four files that make a data/<id> dir a loadable dataset (see datasource/

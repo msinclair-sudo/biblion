@@ -18,6 +18,7 @@ Designed so each cycle is bounded and resumable. SIGINT halts after the
 current cycle commits.
 """
 import logging
+import os
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -33,6 +34,15 @@ from .resolve import (
 
 
 DEFAULT_BATCH_SIZE = 1000
+
+# Page cache for the writer's PERSISTENT main-DB connection. SQLite's page cache
+# is per-connection, so the writer keeps ONE connection alive across cycles
+# (rather than reopening per cycle with a cold cache) and gives it a large cache
+# so the hot index/working set stays in RAM. Citation processing is read-heavy
+# (_batch_lookup probes papers/identifiers per edge); on a slow networked/9P
+# mount a cold cache pins the writer on read I/O. Only the writer (one process)
+# gets this — producers keep get_connection's modest default. Override via env.
+_WRITER_CACHE_MB = int(os.environ.get('BIBLION_WRITER_CACHE_MB', '1024'))
 
 _log = logging.getLogger(__name__)
 
@@ -383,6 +393,14 @@ class MergeStats:
     # pending_resolver process — see merge/pending_resolver.py).
     promote_actions_applied: int = 0
     promotions_already_done: int = 0
+    # DOI backfills from resolve_pending_dois: oa_id->doi stamps applied to
+    # pending_citations endpoints (counts pending ROWS updated, both sides).
+    pending_dois_backfilled: int = 0
+    # A promote action whose endpoint paper vanished between when the
+    # pending_resolver resolved it and when we applied it — the Resolver merged
+    # that duplicate away. Left pending for the next sweep to re-resolve onto the
+    # surviving (canonical) paper. Expected churn, not an error.
+    promotions_stale_endpoint: int = 0
     # Defensive counters — non-zero indicates a real problem the supervisor
     # should surface.
     commit_failures:   int = 0
@@ -422,11 +440,41 @@ class MergeWriter:
             conn.commit()
         finally:
             conn.close()
+        # ONE persistent main-DB connection reused across cycles. SQLite's page
+        # cache is per-connection; reopening per cycle (the old behaviour) meant
+        # a COLD cache every ~0.5s, so every endpoint lookup hit the disk — on a
+        # large DB on a 9P/networked mount that pins the writer on read I/O. A
+        # warm, large cache keeps the working set in RAM. Writer-only, so it
+        # doesn't multiply across producer processes.
+        self._conn = get_connection(self.db_path)
+        self._conn.execute(f"PRAGMA cache_size = {-_WRITER_CACHE_MB * 1024}")
+        # Persistent claims-DB connection (main DB ATTACHed as main_v3) for the
+        # claim flow — same cold-cache-per-cycle problem as above: serving a
+        # claim runs each module's candidate query against the ATTACHed papers
+        # table, and reopening per cycle re-read it from disk every time.
+        self._claims_conn = None
 
     # Max promote actions applied per cycle. Each action is two cheap
     # indexed writes (INSERT citations + DELETE pending) so this can be
     # generous.
     PROMOTE_BATCH = 5000
+
+    def close(self) -> None:
+        """Close the persistent connections. Idempotent; safe to call on GC."""
+        for attr in ('_conn', '_claims_conn'):
+            conn = getattr(self, attr, None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def __del__(self):
+        # Defensive: ensure the persistent connection is released even when a
+        # caller (e.g. a test) doesn't call close(), so we don't leak it / trip
+        # the "unclosed database" ResourceWarning.
+        self.close()
 
     def run_cycle(self) -> int:
         """
@@ -443,7 +491,7 @@ class MergeWriter:
 
         Returns the total number of records processed in this cycle.
         """
-        conn = get_connection(self.db_path)
+        conn = self._conn          # persistent — warm page cache across cycles
         self.stats.cycles += 1
         processed = 0
 
@@ -468,6 +516,10 @@ class MergeWriter:
             # 4. promote actions from the pending_resolver sidecar
             processed += self._apply_promote_actions(conn)
 
+            # 4b. DOI backfills from resolve_pending_dois — stamp resolved OA
+            #     DOIs onto pending endpoints so cross-source halves unify.
+            processed += self._apply_doi_backfills(conn)
+
             # Commit. A failure here (disk full, WAL corruption) means the
             # work we just did didn't make it to the DB — we MUST surface
             # that, not silently advance the cycle counter. The supervisor
@@ -483,8 +535,18 @@ class MergeWriter:
                 except Exception:
                     pass
                 raise
-        finally:
-            conn.close()
+        except Exception:
+            # Persistent connection: roll back any partial transaction so the
+            # next cycle starts clean. (The old per-cycle conn.close() discarded
+            # it implicitly; now we hold the connection open, so we must.) The
+            # supervisor restarts us on the re-raised error.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        # NOTE: do NOT close `conn` here — it's the persistent self._conn whose
+        # warm page cache is the whole point. It's closed in close()/on exit.
 
         # 5. serve claim flow — uses its own connection (claims DB sidecar)
         processed += self._serve_claim_flow()
@@ -572,15 +634,35 @@ class MergeWriter:
                         # expire naturally rather than block the cycle.
                         pass
                     processed += 1
-        finally:
-            if wconn is not None:
-                wconn.close()
+        except Exception:
+            # The persistent claims connection may hold a half-open transaction
+            # after an unexpected error (Redis disconnect mid-serve, etc.); reset
+            # it so the next cycle starts clean. Closed for good in close().
+            self._reset_claims_conn()
+            raise
         return processed
 
+    def _reset_claims_conn(self) -> None:
+        c = getattr(self, '_claims_conn', None)
+        if c is not None:
+            try: c.close()
+            except Exception: pass
+            self._claims_conn = None
+
     def _connect_claims(self) -> sqlite3.Connection:
-        """Open the claims-DB connection (with main DB attached)."""
-        from ..db import get_claims_connection
-        return get_claims_connection(main_db_path=self.db_path)
+        """Persistent claims-DB connection (main DB ATTACHed as main_v3), reused
+        across cycles so the candidate queries' page cache stays warm. The big
+        cache is set on the ATTACHed main schema (where candidate SQL reads the
+        papers/identifiers it scans), not the small claims DB."""
+        if self._claims_conn is None:
+            from ..db import get_claims_connection
+            c = get_claims_connection(main_db_path=self.db_path)
+            try:
+                c.execute(f"PRAGMA main_v3.cache_size = {-_WRITER_CACHE_MB * 1024}")
+            except sqlite3.OperationalError:
+                pass   # attach alias differs / unsupported — fall back to default
+            self._claims_conn = c
+        return self._claims_conn
 
     def _apply_promote_actions(self, conn: sqlite3.Connection) -> int:
         """
@@ -604,11 +686,24 @@ class MergeWriter:
             return 0
         ts = _now()
         for a in actions:
-            cur = conn.execute("""
-                INSERT OR IGNORE INTO citations
-                    (citing_id, cited_id, provenance, discovered)
-                VALUES (?, ?, ?, ?)
-            """, (a.citing_id, a.cited_id, a.provenance, ts))
+            # An endpoint can disappear between resolution and apply: the
+            # Resolver merges a duplicate paper and DELETEs the loser, so
+            # citing_id/cited_id may no longer exist -> citations' FK to
+            # papers(id) fails. (OR IGNORE suppresses PK/UNIQUE conflicts but
+            # NOT foreign-key violations.) This is common churn once ghost
+            # stubs are materialized en masse, so catch it per-action: skip the
+            # insert AND leave the pending row in place so the next sweep
+            # re-resolves it onto the surviving canonical paper. Without this
+            # the whole writer cycle aborts (exit 1) and every producer stalls.
+            try:
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO citations
+                        (citing_id, cited_id, provenance, discovered)
+                    VALUES (?, ?, ?, ?)
+                """, (a.citing_id, a.cited_id, a.provenance, ts))
+            except sqlite3.IntegrityError:
+                self.stats.promotions_stale_endpoint += 1
+                continue            # keep pending row for re-resolution
             if cur.rowcount:
                 self.stats.new_citations += 1
             else:
@@ -619,6 +714,39 @@ class MergeWriter:
             )
         self.stats.promote_actions_applied += len(actions)
         return len(actions)
+
+    DOI_BACKFILL_BATCH = 5000
+
+    def _apply_doi_backfills(self, conn: sqlite3.Connection) -> int:
+        """Stamp resolved OpenAlex DOIs onto pending_citations endpoints.
+
+        resolve_pending_dois pushes (oa_id -> doi) pairs; we write the DOI into
+        every pending row that knows the work only by its oa_id, on BOTH the
+        citing and cited sides. Once stamped, an oa-id-only endpoint and a
+        doi-bearing one (from S2) share a DOI, so materialize_ghost_stubs and the
+        pending_resolver group them as one paper — making the ghost-degree count
+        true. `AND ... IS NULL` keeps it idempotent and never clobbers a DOI we
+        already have. Returns the number of pending rows updated.
+        """
+        backfills = self.cache.pop_pending_doi_backfill_batch(self.DOI_BACKFILL_BATCH)
+        if not backfills:
+            return 0
+        updated = 0
+        for b in backfills:
+            if not (b.oa_id and b.doi):
+                continue
+            cur = conn.execute(
+                "UPDATE pending_citations SET cited_doi = ? "
+                "WHERE cited_oa_id = ? AND cited_doi IS NULL",
+                (b.doi, b.oa_id))
+            updated += cur.rowcount
+            cur = conn.execute(
+                "UPDATE pending_citations SET citing_doi = ? "
+                "WHERE citing_oa_id = ? AND citing_doi IS NULL",
+                (b.doi, b.oa_id))
+            updated += cur.rowcount
+        self.stats.pending_dois_backfilled += updated
+        return updated
 
     # -------------------------------------------------------- paper processing
 
@@ -806,21 +934,25 @@ def main():
     flag   = ShutdownFlag.install(name='merge-writer')
 
     print(f"[merge] writing to {args.db}")
-    print(f"[merge] redis @ {args.redis_url}  batch={args.batch_size}")
+    print(f"[merge] redis @ {args.redis_url}  batch={args.batch_size} "
+          f"cache={_WRITER_CACHE_MB}MB")
     _check_candidate_query_indexes(args.db, writer.served_modules)
-    while not flag.requested:
-        n = writer.run_cycle()
-        if n == 0:
-            time.sleep(args.idle_sleep)
-        elif writer.stats.cycles % 50 == 0:
-            print(f"[merge] cycles={writer.stats.cycles}  "
-                  f"new={writer.stats.new_papers}  "
-                  f"upd={writer.stats.updated_papers}  "
-                  f"parked={writer.stats.parked_papers}  "
-                  f"cits={writer.stats.new_citations}  "
-                  f"pending={writer.stats.pending_citations}  "
-                  f"promoted={writer.stats.promote_actions_applied}  "
-                  f"conflicts={writer.stats.conflicts}")
+    try:
+        while not flag.requested:
+            n = writer.run_cycle()
+            if n == 0:
+                time.sleep(args.idle_sleep)
+            elif writer.stats.cycles % 50 == 0:
+                print(f"[merge] cycles={writer.stats.cycles}  "
+                      f"new={writer.stats.new_papers}  "
+                      f"upd={writer.stats.updated_papers}  "
+                      f"parked={writer.stats.parked_papers}  "
+                      f"cits={writer.stats.new_citations}  "
+                      f"pending={writer.stats.pending_citations}  "
+                      f"promoted={writer.stats.promote_actions_applied}  "
+                      f"conflicts={writer.stats.conflicts}")
+    finally:
+        writer.close()
     print(f"\n[merge] shutdown. final stats: {writer.stats}")
 
 

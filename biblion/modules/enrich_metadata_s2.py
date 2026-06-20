@@ -149,6 +149,7 @@ class EnrichMetadataS2(Module):
                 SELECT 1 FROM papers
                 WHERE doi IS NOT NULL
                   AND is_rejected = 0
+                  AND is_seed = 1
                   AND (abstract IS NULL OR authors IS NULL
                        OR venue IS NULL OR year IS NULL)
                 LIMIT 1

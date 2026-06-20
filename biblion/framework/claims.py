@@ -498,6 +498,12 @@ CANDIDATE_QUERIES: dict[str, dict] = {
     'enrich_metadata_oa': {
         'service': 'oa',
         'fields': ('abstract', 'authors', 'venue', 'year', 'pub_type'),
+        # is_seed = 1 is the LEAF-BOUND anchor. Enriching a paper's metadata here
+        # also pulls its referenced_works (refs) → new pending endpoints → new
+        # ghosts → unbounded BFS. We only ever want that 1-hop expansion from the
+        # SEEDS. is_seed never flips, unlike is_stub (writer flips is_stub→0 on
+        # any touch, so a DOI-bearing ghost would otherwise become a ref-fetch
+        # target and cascade). Ghosts stay identifier-only leaves.
         'candidate_sql': """
             SELECT p.id AS id, p.doi AS doi,
                    p.is_seed AS is_seed, p.discovery_count AS discovery_count,
@@ -509,6 +515,7 @@ CANDIDATE_QUERIES: dict[str, dict] = {
             FROM papers p
             WHERE p.doi IS NOT NULL
               AND p.is_rejected = 0
+              AND p.is_seed = 1
               AND (p.abstract IS NULL OR p.authors IS NULL
                    OR p.venue IS NULL OR p.year IS NULL OR p.pub_type IS NULL)
         """,
@@ -517,6 +524,8 @@ CANDIDATE_QUERIES: dict[str, dict] = {
     'enrich_metadata_s2': {
         'service': 's2_live',
         'fields': ('abstract', 'authors', 'venue', 'year', 'pub_type'),
+        # is_seed = 1 — see enrich_metadata_oa: only seeds expand (refs+citers
+        # come along); ghosts stay leaves regardless of the is_stub flip.
         'candidate_sql': """
             SELECT p.id AS id, p.doi AS doi,
                    p.is_seed AS is_seed, p.discovery_count AS discovery_count,
@@ -528,6 +537,7 @@ CANDIDATE_QUERIES: dict[str, dict] = {
             FROM papers p
             WHERE p.doi IS NOT NULL
               AND p.is_rejected = 0
+              AND p.is_seed = 1
               AND (p.abstract IS NULL OR p.authors IS NULL
                    OR p.venue IS NULL OR p.year IS NULL OR p.pub_type IS NULL)
         """,
@@ -664,13 +674,18 @@ CANDIDATE_QUERIES: dict[str, dict] = {
     # of metadata enrichment. Edge-only (no stub metadata).
     'expand_incoming_oa': {
         'service': 'oa_incoming',
-        'fields': ('_all',),
+        'fields': ('cites',),
+        # is_seed = 1: fetch incoming citations (who-cites-this) ONLY for seeds.
+        # Doing it for every non-stub paper crawled the whole graph; anchoring on
+        # is_seed (which never flips, unlike is_stub) keeps it to a 1-hop fan-in
+        # around the seeds.
         'candidate_sql': """
-            SELECT p.id AS id, p.oa_id AS oa_id, 1 AS need__all,
+            SELECT p.id AS id, p.oa_id AS oa_id, 1 AS need_cites,
                    p.is_seed AS is_seed, p.discovery_count AS discovery_count
             FROM papers p
             WHERE p.oa_id IS NOT NULL
               AND p.is_rejected = 0
+              AND p.is_seed = 1
         """,
         'order_by': "ORDER BY b.is_seed DESC, b.discovery_count DESC, b.id ASC",
     },

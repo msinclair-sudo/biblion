@@ -298,3 +298,28 @@ class PromoteCitationAction:
     @classmethod
     def from_json(cls, s: str) -> 'PromoteCitationAction':
         return cls(**json.loads(s))
+
+
+@dataclass
+class PendingDoiBackfill:
+    """Reader → writer: "OpenAlex work `oa_id` resolves to `doi` — stamp that DOI
+    onto every pending_citations endpoint that currently knows the work only by
+    its oa_id."
+
+    OpenAlex's referenced_works / cites: responses identify works by OA id, never
+    DOI, while Semantic Scholar references carry the DOI. So the same external
+    paper appears as an oa-id-only pending endpoint AND a doi-bearing one — two
+    invisible halves until this stamps the DOI on the oa-id half, unifying them.
+    The writer applies the UPDATE to both the citing and cited sides; the reader
+    never touches the DB.
+    """
+    oa_id: str
+    doi:   str
+    resolved_at: str = field(default_factory=_now)
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(',', ':'))
+
+    @classmethod
+    def from_json(cls, s: str) -> 'PendingDoiBackfill':
+        return cls(**json.loads(s))
