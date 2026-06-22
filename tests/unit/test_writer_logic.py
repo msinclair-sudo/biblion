@@ -147,6 +147,79 @@ class TestCitationProcessing:
 
 
 # ---------------------------------------------------------------------------
+# Alias redirect (Phase 1). With the aliases table empty every existing test
+# above is the regression anchor (find() is identity). These cover the
+# loser->winner redirect once an alias row is present. The paper single-hit
+# redirect is NOT exercised here: while a live (un-compacted) loser still holds
+# its identifier, writing that identifier onto the winner would collide on the
+# UNIQUE index — a Phase 5/6 concern (loser identifiers are re-homed at
+# compaction). The citation/promote paths write no identifiers, so they isolate
+# the redirect mechanism cleanly.
+# ---------------------------------------------------------------------------
+
+class TestAliasRedirect:
+    @staticmethod
+    def _alias(db_conn, loser, winner):
+        db_conn.execute(
+            "INSERT INTO aliases (loser_id, winner_id, created_at) "
+            "VALUES (?, ?, datetime('now'))", (loser, winner))
+        db_conn.execute("UPDATE papers SET tombstone = 1 WHERE id = ?", (loser,))
+        db_conn.commit()
+
+    def test_citation_endpoint_redirected_to_winner(
+        self, tmp_db_path, claims_db_path, cache, insert_paper, db_conn,
+    ):
+        loser  = insert_paper(doi='10.1/lose', title='L')
+        winner = insert_paper(doi='10.1/win',  title='W')
+        b      = insert_paper(doi='10.1/b',    title='B')
+        self._alias(db_conn, loser, winner)
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        cache.push_citation(CitationRecord(
+            source='oa', citing_doi='10.1/lose', cited_doi='10.1/b'))
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT citing_id, cited_id FROM citations").fetchone()
+        assert row['citing_id'] == winner      # redirected off the loser
+        assert row['cited_id'] == b
+
+    def test_promote_endpoint_redirected_to_winner(
+        self, tmp_db_path, claims_db_path, cache,
+        insert_paper, insert_pending_citation, db_conn,
+    ):
+        loser  = insert_paper(doi='10.1/lose')
+        winner = insert_paper(doi='10.1/win')
+        b      = insert_paper(doi='10.1/b')
+        self._alias(db_conn, loser, winner)
+        pid = insert_pending_citation(
+            citing_doi='10.1/lose', cited_doi='10.1/b', provenance='pr')
+        cache.push_promote_citation(PromoteCitationAction(
+            pending_id=pid, citing_id=loser, cited_id=b, provenance='pr'))
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        w.run_cycle()
+        row = db_conn.execute(
+            "SELECT citing_id, cited_id FROM citations").fetchone()
+        assert row['citing_id'] == winner
+        assert row['cited_id'] == b
+
+    def test_promote_self_loop_dropped(
+        self, tmp_db_path, claims_db_path, cache,
+        insert_paper, insert_pending_citation, count_rows, db_conn,
+    ):
+        # Both endpoints alias to the same winner -> the edge is a self-loop.
+        loser  = insert_paper(doi='10.1/lose')
+        winner = insert_paper(doi='10.1/win')
+        self._alias(db_conn, loser, winner)
+        pid = insert_pending_citation(
+            citing_doi='10.1/lose', cited_doi='10.1/win', provenance='pr')
+        cache.push_promote_citation(PromoteCitationAction(
+            pending_id=pid, citing_id=loser, cited_id=winner, provenance='pr'))
+        w = MergeWriter(tmp_db_path, cache, batch_size=10, served_modules=[])
+        w.run_cycle()
+        assert count_rows('citations') == 0          # self-loop dropped
+        assert count_rows('pending_citations') == 0  # pending row cleared
+
+
+# ---------------------------------------------------------------------------
 # Promote-action application
 # ---------------------------------------------------------------------------
 

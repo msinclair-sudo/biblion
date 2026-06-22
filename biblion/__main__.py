@@ -282,13 +282,69 @@ def cmd_enrich(args) -> int:
 from contextlib import contextmanager
 
 
+def _legacy_enrich() -> bool:
+    """True only when BIBLION_LEGACY_ENRICH=1 reverts to the pre-redesign path
+    (legacy producers + Resolver + read-to-decide writer)."""
+    import os
+    return os.environ.get('BIBLION_LEGACY_ENRICH') == '1'
+
+
+def _dispatch_endpoints() -> set:
+    """Endpoints explicitly cut over via BIBLION_DISPATCH_ENDPOINTS. Used to skip
+    a legacy producer when its endpoint is dispatched. Empty unless the env var
+    is set (so `advanced run <producer>` still works); the enrich supervisor
+    uses _effective_dispatch() for the new-default-everything behaviour."""
+    import os
+    from .enrich.dispatcher import parse_endpoints
+    try:
+        return set(parse_endpoints(os.environ.get('BIBLION_DISPATCH_ENDPOINTS', '')))
+    except ValueError:
+        return set()
+
+
+def _effective_dispatch() -> set:
+    """The endpoint set the enrich supervisor should dispatch. The new design
+    (default) dispatches exactly the claim-flow producers the standard enrich run
+    used to spawn (ENRICH_PRODUCERS) that have a handler — NOT every handler.
+
+    The other handlers belong to `hop` / `bulk`, not `enrich`: in particular the
+    broad expand_papers_s2 hops EVERY node (incl. ghosts) → unbounded BFS + would
+    back-fill ghost metadata, and enrich_stubs_oa metadata-fills ghost stubs.
+    An explicit BIBLION_DISPATCH_ENDPOINTS overrides; BIBLION_LEGACY_ENRICH=1
+    disables the dispatcher entirely."""
+    import os
+    from .enrich.handlers import HANDLERS
+    if _legacy_enrich():
+        return set()
+    explicit = os.environ.get('BIBLION_DISPATCH_ENDPOINTS')
+    if explicit:
+        return _dispatch_endpoints()
+    base = {e for e in ENRICH_PRODUCERS if e in HANDLERS}
+    # The SEEDS-only S2 hop gives complete seed refs+cites (edges only; ghost
+    # creation stays selective via materialize_ghost_stubs). Bounded by is_seed,
+    # so no cascade — unlike the broad expand_papers_s2.
+    if 'expand_papers_s2_seeds' in HANDLERS:
+        base.add('expand_papers_s2_seeds')
+    return base
+
+
+def _active_module_classes():
+    """ALL_MODULES minus any producer cut over to the dispatcher (its endpoint
+    name == the module name), so the legacy producer and the dispatcher don't
+    both spend API budget on the same papers during cutover."""
+    cut = _dispatch_endpoints()
+    return [cls for cls in ALL_MODULES if getattr(cls, 'name', None) not in cut]
+
+
 @contextmanager
 def _ensure_merge_daemons(args):
-    """Spawn writer + resolver + pending_resolver around the body, then drain
-    the cache and tear them down. No-op if they're already running."""
+    """Spawn writer + resolver + pending_resolver (+ enrich dispatcher when
+    BIBLION_DISPATCH_ENDPOINTS is set) around the body, then drain the cache and
+    tear them down. No-op if they're already running."""
     import os, signal, subprocess, time
     existing = subprocess.run(
-        ['pgrep', '-f', f'biblion.merge.(writer|resolver|pending_resolver).*--db {args.db}'],
+        ['pgrep', '-f',
+         f'biblion.(merge.(writer|resolver|pending_resolver)|enrich.(dispatcher|compute)).*--db {args.db}'],
         capture_output=True, text=True,
     )
     if existing.stdout.strip():
@@ -315,23 +371,66 @@ def _ensure_merge_daemons(args):
     from .db import ensure_claims_db
     ensure_claims_db()
 
+    # Resolve enrich design (new is default; BIBLION_LEGACY_ENRICH=1 reverts).
+    # This is the INGEST substrate (import/search/hop): it brings up the writer
+    # + (pure-mode) compute so pushed records get applied, but NOT the dispatcher
+    # — ingesting shouldn't also kick off API enrichment (that's `biblion enrich`).
+    legacy = _legacy_enrich()
+    _default = '0' if legacy else '1'
+    pure_on  = os.environ.get('BIBLION_PURE_WRITER', _default) == '1'
+    alias_on = os.environ.get('BIBLION_ALIAS_DEDUP', _default) == '1'
+    # Pin resolved mode into the spawned subprocesses' env (see cmd_daemon).
+    env['BIBLION_PURE_WRITER'] = '1' if pure_on else '0'
+    env['BIBLION_ALIAS_DEDUP'] = '1' if alias_on else '0'
+
     print(f"[biblion] starting merge daemons (log → {mux.path})")
     writer = _spawn('merge writer',
         ['python', '-u', '-m', 'biblion.merge.writer',
          '--db', str(args.db), '--redis-url', args.redis_url])
-    resolver = _spawn('resolver',
-        ['python', '-u', '-m', 'biblion.merge.resolver',
-         '--db', str(args.db), '--redis-url', args.redis_url])
+    # Resolver only needed when multi-hits park (legacy writer + alias off).
+    resolver = None
+    if not (pure_on or alias_on):
+        resolver = _spawn('resolver',
+            ['python', '-u', '-m', 'biblion.merge.resolver',
+             '--db', str(args.db), '--redis-url', args.redis_url])
     pending = _spawn('pending resolver',
         ['python', '-u', '-m', 'biblion.merge.pending_resolver',
          '--db', str(args.db), '--redis-url', args.redis_url])
 
+    # Dispatcher is opt-in even under the new design here (ingest != enrich).
+    dispatch_eps = os.environ.get('BIBLION_DISPATCH_ENDPOINTS', '').strip()
+    dispatcher = None
+    if dispatch_eps:
+        dispatcher = _spawn('enrich dispatcher',
+            ['python', '-u', '-m', 'biblion.enrich.dispatcher',
+             '--db', str(args.db), '--redis-url', args.redis_url,
+             '--endpoints', dispatch_eps])
+
+    # Compute feeds the pure writer (apply ingested records). On by default.
+    compute = None
+    if pure_on:
+        compute = _spawn('enrich compute',
+            ['python', '-u', '-m', 'biblion.enrich.compute',
+             '--db', str(args.db), '--redis-url', args.redis_url])
+
+    daemons = [('writer', writer), ('pending', pending)]
+    if resolver is not None:
+        daemons.append(('resolver', resolver))
+    if dispatcher is not None:
+        daemons.append(('dispatcher', dispatcher))
+    if compute is not None:
+        daemons.append(('compute', compute))
+
     time.sleep(1)
-    for nm, p in (('writer', writer), ('resolver', resolver),
-                  ('pending', pending)):
-        if p.poll() is not None:
-            print(f"[ERROR] {nm} died immediately (exit {p.returncode})")
-            raise SystemExit(1)
+    if any(p.poll() is not None for _nm, p in daemons):
+        for nm, p in daemons:
+            if p.poll() is not None:
+                print(f"[ERROR] {nm} died immediately (exit {p.returncode})")
+        for nm, p in daemons:          # don't orphan the survivors
+            if p.poll() is None:
+                try: os.killpg(p.pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError): pass
+        raise SystemExit(1)
 
     try:
         yield
@@ -344,14 +443,27 @@ def _ensure_merge_daemons(args):
             total = (lens['staged_papers'] + lens['staged_citations']
                      + lens['parked_papers'] + lens['resolved_papers']
                      + lens.get('promote_citations', 0))
+            # When the dispatcher is active, dirty:papers is real outstanding
+            # work it still has to route, so don't declare idle until it drains.
+            if dispatcher is not None:
+                total += lens.get('dirty_papers', 0)
+            # In pure mode, work flows staged -> (compute) -> write:jobs -> writer.
+            if compute is not None:
+                total += lens.get('write_jobs', 0)
             idle_count = idle_count + 1 if total == 0 else 0
             print(f"  [drain] queues: {lens}  (idle {idle_count}/{idle_target})")
             time.sleep(1)
             if writer.poll() is not None:
                 break
     finally:
-        for name, p in (('pending', pending), ('resolver', resolver),
-                        ('writer', writer)):
+        teardown = [('writer', writer), ('pending', pending)]
+        if resolver is not None:
+            teardown.append(('resolver', resolver))
+        if dispatcher is not None:
+            teardown.insert(0, ('dispatcher', dispatcher))
+        if compute is not None:
+            teardown.insert(0, ('compute', compute))
+        for name, p in teardown:
             if p.poll() is None:
                 try: os.killpg(p.pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError): pass
@@ -381,7 +493,7 @@ def _ensure_merge_daemons(args):
 def _orchestrator(args) -> Orchestrator:
     cache = CacheClient(url=args.redis_url) if args.redis_url else None
     o = Orchestrator(db_path=args.db, cache=cache)
-    o.register_all([cls() for cls in ALL_MODULES])
+    o.register_all([cls() for cls in _active_module_classes()])
     o.plan()
     return o
 
@@ -427,7 +539,7 @@ def cmd_run(args) -> int:
     cache = CacheClient(url=args.redis_url) if args.redis_url else None
     o = Orchestrator(db_path=args.db, cache=cache, config=config,
                      merge_after_producers=False)
-    o.register_all([cls() for cls in ALL_MODULES])
+    o.register_all([cls() for cls in _active_module_classes()])
     o.plan()
     # In --loop mode (daemon supervises everything), each producer runs
     # ONLY itself. Other producers handle their own prereqs in parallel.
@@ -531,6 +643,30 @@ def _qc_snapshot(db_path, full: bool = True) -> dict:
             (SELECT COUNT(*) FROM field_observations)                  AS observations,
             (SELECT COUNT(*) FROM field_conflicts)                     AS conflict_log
     """).fetchone())
+    # Per-population coverage: seeds (the real papers) vs stubs (ghost leaves,
+    # which only ever carry identifiers). One scan of conditional SUMs so the
+    # dashboard can show coverage against the RIGHT denominator instead of
+    # diluting seed metadata by the ghost majority.
+    snap['core'].update(dict(conn.execute("""
+        SELECT
+            COALESCE(SUM(is_seed=1 AND doi      IS NOT NULL), 0) AS seed_doi,
+            COALESCE(SUM(is_seed=1 AND oa_id    IS NOT NULL), 0) AS seed_oa,
+            COALESCE(SUM(is_seed=1 AND s2_id    IS NOT NULL), 0) AS seed_s2,
+            COALESCE(SUM(is_seed=1 AND title    IS NOT NULL), 0) AS seed_title,
+            COALESCE(SUM(is_seed=1 AND year     IS NOT NULL), 0) AS seed_year,
+            COALESCE(SUM(is_seed=1 AND venue    IS NOT NULL), 0) AS seed_venue,
+            COALESCE(SUM(is_seed=1 AND authors  IS NOT NULL), 0) AS seed_authors,
+            COALESCE(SUM(is_seed=1 AND abstract IS NOT NULL), 0) AS seed_abstract,
+            COALESCE(SUM(is_stub=1 AND doi      IS NOT NULL), 0) AS stub_doi,
+            COALESCE(SUM(is_stub=1 AND oa_id    IS NOT NULL), 0) AS stub_oa,
+            COALESCE(SUM(is_stub=1 AND s2_id    IS NOT NULL), 0) AS stub_s2,
+            COALESCE(SUM(is_stub=1 AND title    IS NOT NULL), 0) AS stub_title,
+            COALESCE(SUM(is_stub=1 AND year     IS NOT NULL), 0) AS stub_year,
+            COALESCE(SUM(is_stub=1 AND venue    IS NOT NULL), 0) AS stub_venue,
+            COALESCE(SUM(is_stub=1 AND authors  IS NOT NULL), 0) AS stub_authors,
+            COALESCE(SUM(is_stub=1 AND abstract IS NOT NULL), 0) AS stub_abstract
+        FROM papers
+    """).fetchone()))
     # LIVE conflicts: re-resolve every (paper, field) that has >1 distinct
     # observation and count only those that STILL conflict under current rules.
     # field_conflicts is an immutable audit log (every disagreement ever seen),
@@ -1076,6 +1212,8 @@ def cmd_sql(args) -> int:
 
 def _rich_dashboard(snap: dict, db_path, *, uptime_s: int,
                     recent_errors: list, log_dir, n_producers: int,
+                    daemons: list | None = None, pipeline: list | None = None,
+                    services: list | None = None,
                     live_modules: list | None = None):
     """Build a Rich renderable for the live `enrich` dashboard.
 
@@ -1093,9 +1231,6 @@ def _rich_dashboard(snap: dict, db_path, *, uptime_s: int,
     core = snap['core']
     total = core['papers'] or 1
 
-    def pct(n):
-        return f"{n / total * 100:5.1f}%"
-
     n_err = len(recent_errors)
     head = Text.assemble(
         ("biblion enrich ", "bold cyan"),
@@ -1109,35 +1244,56 @@ def _rich_dashboard(snap: dict, db_path, *, uptime_s: int,
 
     # Count-style sections rendered as compact labelled grids, then laid out
     # side by side so the full stat set fits without a tall single column.
-    def grid(title, rows, *, show_pct=True):
+    # Each grid's % is against its own population (`denom`) so seed metadata
+    # coverage isn't diluted by the ghost-stub majority.
+    def grid(title, rows, *, show_pct=True, denom=None, title_style="bold"):
+        d = denom if denom is not None else total
+        def _pct(n):
+            return f"{n / (d or 1) * 100:5.1f}%"
         g = Table.grid(padding=(0, 1))
         g.add_column(justify="left")
         g.add_column(justify="right")
         if show_pct:
             g.add_column(justify="right", style="dim")
-        for label, count in rows:
-            cells = [label, f"{count:,}"]
+        for row in rows:
+            label, count = row[0], row[1]
+            style = row[2] if len(row) > 2 else None
+            cells = [Text(label, style=style) if style else label,
+                     Text(f"{count:,}", style=style) if style else f"{count:,}"]
             if show_pct:
-                cells.append(f"({pct(count)})")
+                cells.append(f"({_pct(count)})")
             g.add_row(*cells)
-        return Group(Text(title, style="bold"), g)
+        return Group(Text(title, style=title_style), g)
 
-    identifiers = grid("Identifiers", [
-        ("papers", core['papers']), ("with DOI", core['with_doi']),
-        ("with OA ID", core['with_oa']), ("with S2 ID", core['with_s2']),
-    ])
-    metadata = grid("Metadata", [
-        ("with title", core['with_title']), ("with year", core['with_year']),
-        ("with venue", core['with_venue']), ("with authors", core['with_authors']),
-        ("with abstract", core['with_abstract']),
-    ])
-    flags = grid("Flags", [
-        ("seeds", core['seeds']), ("stubs", core['stubs']),
-        ("rejected", core['rejected']),
-    ])
-    graph = grid("Graph", [
-        ("edges", core['edges']), ("pending edges", core['pending_edges']),
+    # Coverage as a seed-vs-stub split: each metric shows the seed count (green)
+    # and stub count (yellow) side by side, so the two populations are never
+    # summed into one misleading number. Stubs are ghost leaves — they carry
+    # identifiers but (almost) no metadata, which the two columns make obvious.
+    coverage = Table(title="Corpus coverage", title_justify="left",
+                     title_style="bold", expand=False)
+    coverage.add_column("metric")
+    coverage.add_column("seeds", justify="right", style="green")
+    coverage.add_column("stubs", justify="right", style="yellow")
+    for label, s, st in (
+        ("papers",        core['seeds'],                core['stubs']),
+        ("with DOI",      core.get('seed_doi', 0),      core.get('stub_doi', 0)),
+        ("with OA ID",    core.get('seed_oa', 0),       core.get('stub_oa', 0)),
+        ("with S2 ID",    core.get('seed_s2', 0),       core.get('stub_s2', 0)),
+        ("with title",    core.get('seed_title', 0),    core.get('stub_title', 0)),
+        ("with year",     core.get('seed_year', 0),     core.get('stub_year', 0)),
+        ("with venue",    core.get('seed_venue', 0),    core.get('stub_venue', 0)),
+        ("with authors",  core.get('seed_authors', 0),  core.get('stub_authors', 0)),
+        ("with abstract", core.get('seed_abstract', 0), core.get('stub_abstract', 0)),
+    ):
+        coverage.add_row(label, f"{s:,}", f"{st:,}")
+
+    # Graph + corpus flags (whole-corpus totals).
+    graph = grid("Graph & flags", [
+        ("edges", core['edges']),
+        ("pending edges", core['pending_edges']),
         ("cit_count rows", core['cit_count_rows']),
+        ("rejected", core['rejected'], "red" if core['rejected'] else None),
+        ("retracted", core.get('retracted', 0)),
     ], show_pct=False)
 
     # Conflicts: total plus the per-field breakdown.
@@ -1146,15 +1302,19 @@ def _rich_dashboard(snap: dict, db_path, *, uptime_s: int,
     conf_rows += [(f"  {f}", n) for f, n in snap.get('conflicts_by_field', [])]
     conflicts = grid("Conflicts", conf_rows, show_pct=False)
 
-    blocks = [head, "",
-              Columns([identifiers, metadata, flags, graph, conflicts],
-                      padding=(0, 3), equal=False, expand=False)]
+    corpus = Columns([coverage, graph, conflicts],
+                     padding=(0, 3), equal=False, expand=False)
 
-    blocks.append("")
-    if 'attempts_error' in snap:
-        blocks.append(Text(f"Enrichment attempts: claims DB unavailable: "
-                           f"{snap['attempts_error']}", style="red"))
-    elif snap.get('attempts'):
+    # Status style map shared by the daemon strip + pipeline owners + services.
+    _dstyle = {'working': 'bold green', 'stale': 'yellow',
+               'down': 'bold red', 'starting': 'cyan'}
+
+    def _attempts_block():
+        if 'attempts_error' in snap:
+            return Text(f"Enrichment attempts: claims DB unavailable: "
+                        f"{snap['attempts_error']}", style="red")
+        if not snap.get('attempts'):
+            return Text("Enrichment attempts: (none recorded yet)", style="dim")
         by_service: dict[str, dict[str, int]] = {}
         for svc, status, n in snap['attempts']:
             by_service.setdefault(svc, {})[status] = n
@@ -1170,28 +1330,62 @@ def _rich_dashboard(snap: dict, db_path, *, uptime_s: int,
             att.add_row(svc, f"{bs.get('claimed', 0):,}",
                         f"{bs.get('succeeded', 0):,}",
                         f"{bs.get('failed', 0):,}", f"{tot:,}")
-        blocks.append(att)
-    else:
-        blocks.append(Text("Enrichment attempts: (none recorded yet)", style="dim"))
+        return att
 
-    if live_modules is not None:
-        # Live view: status derived from the supervisor's ground truth — is the
-        # process alive, and did its service settle any attempts since the last
-        # tick. module_runs.status is unreliable for looping producers (they
-        # sit in 'running' for minutes, then show 'orphaned' after a restart),
-        # so we ignore it here.
-        health = Table(title="Module health", title_justify="left",
+    def _services_table(services, snap):
+        """One panel merging live per-service activity (in-flight/did/state) with
+        the cumulative attempt outcomes (succeeded/failed) — the two used to be
+        separate tables that duplicated each other (claimed==in-flight)."""
+        if 'attempts_error' in snap:
+            return Text(f"Services: claims DB unavailable: "
+                        f"{snap['attempts_error']}", style="red")
+        att: dict[str, dict[str, int]] = {}
+        for svc, status, n in snap.get('attempts', []):
+            att.setdefault(svc, {})[status] = n
+        live = {s['service']: s for s in (services or [])}
+        names = sorted(set(att) | set(live))
+        if not names:
+            return Text("Services: (none recorded yet)", style="dim")
+        t = Table(title="Services", title_justify="left",
+                  title_style="bold", expand=False)
+        for col, kw in (("service", {}),
+                        ("in-flight", {'justify': 'right'}),
+                        ("succeeded", {'justify': 'right', 'style': 'green'}),
+                        ("failed", {'justify': 'right', 'style': 'red'}),
+                        ("did (5s)", {'justify': 'right'}), ("state", {})):
+            t.add_column(col, **kw)
+        for svc in names:
+            a = att.get(svc, {})
+            lv = live.get(svc, {})
+            inflight = lv.get('in_flight', a.get('claimed', 0))
+            did = lv.get('did', 0)
+            active = lv.get('active')
+            t.add_row(
+                svc,
+                Text(f"{inflight:,}" if inflight else "0",
+                     style='yellow' if inflight else 'dim'),
+                f"{a.get('succeeded', 0):,}", f"{a.get('failed', 0):,}",
+                Text(f"+{did:,}" if did else "0",
+                     style='green' if did else 'dim'),
+                Text('working' if active else 'idle',
+                     style='bold green' if active else 'yellow'))
+        return t
+
+    def _producers_table(rows, *, title):
+        """Producer live-health table (status from process+work, not module_runs
+        — looping producers sit in 'running' for minutes then 'orphaned')."""
+        health = Table(title=title, title_justify="left",
                        title_style="bold", expand=False)
-        health.add_column("module")
-        health.add_column("status")
-        health.add_column("remaining", justify="right")
-        health.add_column("in-flight", justify="right")
-        health.add_column("did (5s)", justify="right")
-        health.add_column("settled", justify="right", style="green")
-        health.add_column("restarts", justify="right")
+        for col, kw in (("module", {}), ("status", {}),
+                        ("remaining", {'justify': 'right'}),
+                        ("in-flight", {'justify': 'right'}),
+                        ("did (5s)", {'justify': 'right'}),
+                        ("settled", {'justify': 'right', 'style': 'green'}),
+                        ("restarts", {'justify': 'right'})):
+            health.add_column(col, **kw)
         live_style = {'working': 'bold green', 'idle': 'yellow',
                       'down': 'bold red', 'done': 'green', 'starting': 'cyan'}
-        for m in live_modules:
+        for m in rows:
             left = m.get('remaining')
             left_txt = (Text("?", style='dim') if left is None else
                         Text(f"{left:,}", style='dim' if left == 0 else 'bold'))
@@ -1202,43 +1396,135 @@ def _rich_dashboard(snap: dict, db_path, *, uptime_s: int,
             did_txt = Text(f"+{did:,}" if did else "0",
                            style='green' if did else 'dim')
             r = m.get('restarts', 0)
-            r_txt = Text(f"{r:,}", style='red' if r else 'dim')
             health.add_row(
                 m['module'],
                 Text(m['status'], style=live_style.get(m['status'], '')),
-                left_txt, inflight_txt, did_txt, f"{m.get('settled', 0):,}", r_txt)
-        blocks += ["", health]
-        # Overall completion banner: every producer parked with no work left.
-        if all((m.get('remaining') == 0) for m in live_modules):
-            blocks.append(Text(
-                "all producers caught up — no claimable work remaining "
-                "(failed fields retry after the cooldown; run `qc` for totals)",
-                style="bold green"))
-    elif snap.get('module_health'):
-        # One-shot qc render (no live supervisor): summarise module_runs
-        # history. Lifetime failed+orphaned counts shown as 'crashes'.
-        health = Table(title="Module health (from run history)",
+                left_txt, inflight_txt, did_txt,
+                f"{m.get('settled', 0):,}",
+                Text(f"{r:,}", style='red' if r else 'dim'))
+        return health
+
+    blocks = [head]
+
+    if daemons is not None:
+        # ---- live layout: daemons + pipeline are the hero ----
+        n_down = sum(1 for d in daemons if d['status'] == 'down')
+        n_stale = sum(1 for d in daemons if d['status'] == 'stale')
+        n_ok = len(daemons) - n_down - n_stale
+        blocks.append(Text.assemble(
+            ("daemons: ", "dim"), (f"{n_ok} ok", "green"), ("  ·  ", "dim"),
+            (f"{n_down} down", "bold red" if n_down else "dim"), ("  ·  ", "dim"),
+            (f"{n_stale} stale", "yellow" if n_stale else "dim"),
+        ))
+
+        def _counters(role, st):
+            if role == 'writer':
+                return (f"cyc {st.get('cycles', 0):,}  new {st.get('new_papers', 0):,}"
+                        f"  upd {st.get('updated_papers', 0):,}"
+                        f"  cits {st.get('new_citations', 0):,}")
+            if role == 'compute':
+                return (f"pass {st.get('passes', 0):,}  paper {st.get('paper_jobs', 0):,}"
+                        f"  edge {st.get('edge_jobs', 0):,}"
+                        f"  merge {st.get('merge_jobs', 0):,}")
+            if role == 'dispatcher':
+                return (f"disp {st.get('dispatched', 0):,}  ok {st.get('succeeded', 0):,}"
+                        f"  fail {st.get('failed', 0):,}")
+            if role == 'pending_resolver':
+                return (f"cyc {st.get('cycles', 0):,}  scan {st.get('rows_scanned', 0):,}"
+                        f"  push {st.get('actions_pushed', 0):,}")
+            if role == 'resolver':
+                return f"merged {st.get('merged', 0):,}  pass {st.get('passthrough', 0):,}"
+            return "  ".join(f"{k} {v}" for k, v in st.items() if k != 'ts')
+
+        # Workers = infra daemons (heartbeat-driven) + residual producers
+        # (work-driven), in one table so there's a single "what's running" panel.
+        dt = Table(title="Workers", title_justify="left",
+                   title_style="bold", expand=False)
+        for col, kw in (("worker", {}), ("status", {}),
+                        ("age", {'justify': 'right'}), ("counters", {}),
+                        ("restarts", {'justify': 'right'})):
+            dt.add_column(col, **kw)
+        for d in daemons:
+            age = d.get('age')
+            age_txt = "?" if age is None else f"{int(age)}s"
+            r = d.get('restarts', 0)
+            dt.add_row(d['role'],
+                       Text(d['status'], style=_dstyle.get(d['status'], '')),
+                       age_txt, _counters(d['role'], d.get('stats', {})),
+                       Text(f"{r:,}", style='red' if r else 'dim'))
+        _pstyle = {'working': 'bold green', 'idle': 'yellow', 'down': 'bold red',
+                   'done': 'green', 'starting': 'cyan'}
+        for m in (live_modules or []):
+            rem = m.get('remaining')
+            rem_txt = '?' if rem is None else f"{rem:,}"
+            r = m.get('restarts', 0)
+            dt.add_row(
+                m['module'],
+                Text(m['status'], style=_pstyle.get(m['status'], '')),
+                "—",
+                f"in-flight {m.get('in_flight', 0):,}  did +{m.get('did', 0):,}"
+                f"  remaining {rem_txt}",
+                Text(f"{r:,}", style='red' if r else 'dim'))
+
+        pt = Table(title="Pipeline", title_justify="left",
+                   title_style="bold", expand=False)
+        for col, kw in (("stage", {}), ("depth", {'justify': 'right'}),
+                        ("Δ/tick", {'justify': 'right'}), ("owner", {}),
+                        ("owner status", {})):
+            pt.add_column(col, **kw)
+        for s in (pipeline or []):
+            depth = s['depth']
+            dlt = s['delta']
+            if dlt > 0:
+                dlt_txt = Text(f"+{dlt:,}", style='green')
+            elif dlt < 0:
+                dlt_txt = Text(f"{dlt:,}", style='cyan')
+            else:
+                dlt_txt = Text("0", style='dim')
+            pt.add_row(s['stage'],
+                       Text(f"{depth:,}", style='bold' if depth else 'dim'),
+                       dlt_txt, s['owner'],
+                       Text(s['owner_status'],
+                            style=_dstyle.get(s['owner_status'], '')))
+
+        # Four panels: Workers, Pipeline, Services (live + cumulative merged),
+        # Corpus coverage. The coverage table carries its own title.
+        blocks += ["", dt, "", pt, "", _services_table(services, snap),
+                   "", corpus]
+    else:
+        # ---- one-shot qc / legacy layout (unchanged behaviour) ----
+        blocks += ["", corpus, "", _attempts_block()]
+        if live_modules is not None:
+            blocks += ["", _producers_table(live_modules, title="Module health")]
+            # Overall completion banner: every producer parked with no work left.
+            if all((m.get('remaining') == 0) for m in live_modules):
+                blocks.append(Text(
+                    "all producers caught up — no claimable work remaining "
+                    "(failed fields retry after the cooldown; run `qc` for totals)",
+                    style="bold green"))
+        elif snap.get('module_health'):
+            # One-shot qc render: summarise module_runs history.
+            mh = Table(title="Module health (from run history)",
                        title_justify="left", title_style="bold", expand=False)
-        health.add_column("module")
-        health.add_column("last status")
-        health.add_column("ok", justify="right", style="green")
-        health.add_column("idle", justify="right", style="dim")
-        health.add_column("crashes", justify="right")
-        health.add_column("last activity")
-        status_style = {'running': 'cyan', 'success': 'green',
-                        'failed': 'red', 'noop': 'dim', 'orphaned': 'yellow'}
-        for h in snap['module_health']:
-            c = h['counts']
-            crashes = c.get('failed', 0) + c.get('orphaned', 0)
-            ok = c.get('success', 0)
-            idle = c.get('noop', 0)
-            crash_txt = Text(f"{crashes:,}", style='red' if crashes else 'dim')
-            health.add_row(
-                h['module'],
-                Text(h['status'] or '?',
-                     style=status_style.get(h['status'], '')),
-                f"{ok:,}", f"{idle:,}", crash_txt, (h['last'] or '')[:19])
-        blocks += ["", health]
+            for col, kw in (("module", {}), ("last status", {}),
+                            ("ok", {'justify': 'right', 'style': 'green'}),
+                            ("idle", {'justify': 'right', 'style': 'dim'}),
+                            ("crashes", {'justify': 'right'}),
+                            ("last activity", {})):
+                mh.add_column(col, **kw)
+            status_style = {'running': 'cyan', 'success': 'green',
+                            'failed': 'red', 'noop': 'dim', 'orphaned': 'yellow'}
+            for h in snap['module_health']:
+                c = h['counts']
+                crashes = c.get('failed', 0) + c.get('orphaned', 0)
+                crash_txt = Text(f"{crashes:,}", style='red' if crashes else 'dim')
+                mh.add_row(
+                    h['module'],
+                    Text(h['status'] or '?',
+                         style=status_style.get(h['status'], '')),
+                    f"{c.get('success', 0):,}", f"{c.get('noop', 0):,}",
+                    crash_txt, (h['last'] or '')[:19])
+            blocks += ["", mh]
 
     if recent_errors:
         last_ts, last_msg = recent_errors[-1]
@@ -1293,7 +1579,7 @@ def cmd_start(args) -> int:
     # Refuse to start if previous daemons are still running — otherwise we'd
     # end up with two writers pulling from the same Redis queue.
     existing = subprocess.run(
-        ['pgrep', '-f', f'biblion.merge.(writer|resolver|pending_resolver).*--db {args.db}'],
+        ['pgrep', '-f', f'biblion.(merge.(writer|resolver|pending_resolver)|enrich.(dispatcher|compute)).*--db {args.db}'],
         capture_output=True, text=True,
     )
     if existing.stdout.strip():
@@ -1329,7 +1615,7 @@ def cmd_start(args) -> int:
             'enrich_metadata_limit': args.limit,
         } if args.limit else {},
     )
-    o.register_all([cls() for cls in ALL_MODULES])
+    o.register_all([cls() for cls in _active_module_classes()])
     o.plan()
 
     print(f"\nRunning producer: {args.target}")
@@ -1485,6 +1771,120 @@ def cmd_import(args) -> int:
     return 0
 
 
+def _wait_paper_pipeline_idle(cache, idle_target: int = 3,
+                              timeout: int = 1800) -> None:
+    """Block until the paper side of the merge pipeline has drained and
+    committed: staged papers consumed by compute, write-jobs applied by the
+    writer, no parked/resolved/alias work outstanding. Used between the paper
+    push and the citation push so compute resolves edge endpoints against
+    *committed* rows instead of parking every edge as pending."""
+    import time
+    idle = waited = 0
+    while idle < idle_target and waited < timeout:
+        lens = cache.lengths()
+        busy = (lens['staged_papers'] + lens.get('write_jobs', 0)
+                + lens['resolved_papers'] + lens['parked_papers']
+                + lens.get('alias_jobs', 0))
+        idle = idle + 1 if busy == 0 else 0
+        time.sleep(1)
+        waited += 1
+
+
+def cmd_merge(args) -> int:
+    """Merge another biblion DB into this one, deduplicating by identifier.
+
+    Reads the source DB and replays its papers + citation graph through the
+    same producer->writer pipeline `import` uses (so identifier dedup, field
+    resolution, and pending-citation promotion all happen in the writer), then
+    a post-drain SQL pass copies the sidecar data records can't carry
+    (is_seed/is_rejected, paper_tags, citation_counts). The target is mutated
+    in place; the writer only ADDs/COALESCEs, never destroys existing rows.
+    """
+    from .merge.combine import (iter_paper_records, iter_citation_records,
+                                copy_sidecar_tables)
+
+    src = Path(args.src_db).expanduser().resolve()
+    target = Path(args.db).expanduser().resolve()
+    if not src.exists():
+        print(f"[biblion merge] source DB not found: {src}")
+        return 1
+    if src == target:
+        print("[biblion merge] source and target are the same database.")
+        return 1
+
+    source_tag = f'merge:{src.stem}'
+
+    # In-place mutation is irreversible — take a safety copy first (the writer
+    # only adds, but a botched run shouldn't be unrecoverable).
+    if not args.no_backup:
+        bak = target.with_name(f'{target.name}.pre-merge-{src.stem}.bak')
+        if bak.exists():
+            print(f"[biblion merge] backup {bak} exists; pass --no-backup to "
+                  f"skip, or remove it first.")
+            return 2
+        _src = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+        try:
+            _dst = sqlite3.connect(str(bak))
+            try:
+                _src.backup(_dst)
+            finally:
+                _dst.close()
+        finally:
+            _src.close()
+        print(f"[biblion merge] backed up target -> {bak}")
+
+    # Ensure the source is on the current schema (idempotent; cheap no-op when
+    # up to date) so SELECTs over the extended columns / sidecar tables work.
+    sconn = get_connection(src)
+    init_db(sconn)
+    base = dict(sconn.execute(
+        "SELECT (SELECT COUNT(*) FROM papers WHERE tombstone=0)   AS papers,"
+        "       (SELECT COUNT(*) FROM citations)                  AS edges,"
+        "       (SELECT COUNT(*) FROM pending_citations)          AS pending "
+    ).fetchone())
+    print(f"[biblion merge] source {src.name}: {base['papers']} papers, "
+          f"{base['edges']} edges, {base['pending']} pending")
+
+    tgt_before = dict(get_connection(target).execute(
+        "SELECT (SELECT COUNT(*) FROM papers WHERE tombstone=0) AS papers,"
+        "       (SELECT COUNT(*) FROM citations)                AS edges "
+    ).fetchone())
+
+    pushed_p = pushed_c = 0
+    with _ensure_merge_daemons(args):
+        cache = CacheClient(url=args.redis_url)
+        for chunk in iter_paper_records(sconn, source_tag):
+            pushed_p += cache.push_papers(chunk)
+        print(f"[biblion merge] pushed {pushed_p} paper records; waiting for "
+              f"them to commit before pushing edges...")
+        _wait_paper_pipeline_idle(cache)
+        for chunk in iter_citation_records(sconn, source_tag):
+            pushed_c += cache.push_citations(chunk)
+        print(f"[biblion merge] pushed {pushed_c} citation records")
+    sconn.close()
+
+    # Cache has drained. Copy the identifier-keyed sidecar data.
+    tconn = get_connection(target)
+    side = copy_sidecar_tables(tconn, src)
+    tgt_after = dict(tconn.execute(
+        "SELECT (SELECT COUNT(*) FROM papers WHERE tombstone=0) AS papers,"
+        "       (SELECT COUNT(*) FROM citations)                AS edges "
+    ).fetchone())
+    tconn.close()
+
+    print("\n[biblion merge] summary:")
+    print(f"  papers   {tgt_before['papers']:>8} -> {tgt_after['papers']:<8}"
+          f" (+{tgt_after['papers'] - tgt_before['papers']})")
+    print(f"  edges    {tgt_before['edges']:>8} -> {tgt_after['edges']:<8}"
+          f" (+{tgt_after['edges'] - tgt_before['edges']})")
+    print(f"  matched source papers  {side.get('matched', 0)}")
+    print(f"  is_seed set            {side.get('is_seed', 0)}")
+    print(f"  is_rejected set        {side.get('is_rejected', 0)}")
+    print(f"  paper_tags copied      {side.get('paper_tags', 0)}")
+    print(f"  citation_counts copied {side.get('citation_counts', 0)}")
+    return 0
+
+
 def cmd_search(args) -> int:
     """Run the search_s2_factorial module against a searches/*.json file.
 
@@ -1504,9 +1904,31 @@ def cmd_search(args) -> int:
         cache = CacheClient(url=args.redis_url) if args.redis_url else None
         o = Orchestrator(db_path=args.db, cache=cache, config=config,
                          merge_after_producers=False)
-        o.register_all([cls() for cls in ALL_MODULES])
+        o.register_all([cls() for cls in _active_module_classes()])
         o.plan()
         o.run('search_s2_factorial', force=args.force, skip_prereqs=True)
+    # Cache has drained and the merge daemons are stopped. Flag the search hits
+    # as seeds by provenance — the writer can't set is_seed from a PaperRecord,
+    # so (unlike import's mark_seeds) we mark them here. Ghost endpoints found
+    # later from refs/citations keep is_seed=0.
+    from .modules.search_s2_factorial import SEARCH_SOURCE_PREFIX
+    conn = get_connection(args.db)
+    try:
+        cur = conn.execute(
+            "UPDATE papers SET is_seed = 1, updated_at = datetime('now') "
+            "WHERE is_seed = 0 AND id IN ("
+            "  SELECT DISTINCT paper_id FROM field_observations "
+            "  WHERE source LIKE ? || '%')",
+            (SEARCH_SOURCE_PREFIX,))
+        conn.commit()
+        marked = cur.rowcount
+        print(f"  marked is_seed=1       {marked}")
+    finally:
+        conn.close()
+    # Marking seeds by SQL is invisible to the dirty feed, so force the next
+    # `enrich` to re-scan the corpus and pick up the new seeds' metadata needs.
+    if marked and args.redis_url:
+        CacheClient(url=args.redis_url).clear_dirty_seeded()
     return 0
 
 
@@ -1548,7 +1970,7 @@ def cmd_hop(args) -> int:
         cache = CacheClient(url=args.redis_url) if args.redis_url else None
         o = Orchestrator(db_path=args.db, cache=cache, config=config,
                          merge_after_producers=False)
-        o.register_all([cls() for cls in ALL_MODULES])
+        o.register_all([cls() for cls in _active_module_classes()])
         o.plan()
         o.run('expand_papers_s2', force=args.force, skip_prereqs=True)
     return 0
@@ -1625,7 +2047,7 @@ def cmd_bulk(args) -> int:
     # Redis queues from two places is fine in theory, but the live producers
     # also touch the claims DB and we don't want either side waiting.
     existing = subprocess.run(
-        ['pgrep', '-f', f'biblion.merge.(writer|resolver|pending_resolver).*--db {args.db}'],
+        ['pgrep', '-f', f'biblion.(merge.(writer|resolver|pending_resolver)|enrich.(dispatcher|compute)).*--db {args.db}'],
         capture_output=True, text=True,
     )
     if existing.stdout.strip():
@@ -1669,7 +2091,7 @@ def cmd_bulk(args) -> int:
         merge_after_producers=False,
         config=config,
     )
-    o.register_all([cls() for cls in ALL_MODULES])
+    o.register_all([cls() for cls in _active_module_classes()])
     o.plan()
 
     producer_error = None
@@ -1785,7 +2207,7 @@ def cmd_daemon(args) -> int:
 
     # Refuse to start with orphans
     existing = subprocess.run(
-        ['pgrep', '-f', f'biblion.merge.(writer|resolver|pending_resolver).*--db {args.db}'],
+        ['pgrep', '-f', f'biblion.(merge.(writer|resolver|pending_resolver)|enrich.(dispatcher|compute)).*--db {args.db}'],
         capture_output=True, text=True,
     )
     if existing.stdout.strip():
@@ -1800,23 +2222,73 @@ def cmd_daemon(args) -> int:
     ensure_claims_db()
     print(f"Claims DB: {get_claims_db_path()}")
 
+    # Resolve the enrich design. New design is the default; the per-feature
+    # env flags / BIBLION_LEGACY_ENRICH override. The writer subprocess reads the
+    # same flags from the inherited env, so it agrees with us on pure/alias mode.
+    legacy = _legacy_enrich()
+    _default = '0' if legacy else '1'
+    pure_on  = os.environ.get('BIBLION_PURE_WRITER', _default) == '1'
+    alias_on = os.environ.get('BIBLION_ALIAS_DEDUP', _default) == '1'
+    dispatch_set = _effective_dispatch()
+    dispatch_eps = ','.join(sorted(dispatch_set))
+    # Pin the resolved mode into the spawned subprocesses' env so the writer
+    # (which defaults to legacy when constructed directly) runs in the design we
+    # chose here.
+    common_env['BIBLION_PURE_WRITER'] = '1' if pure_on else '0'
+    common_env['BIBLION_ALIAS_DEDUP'] = '1' if alias_on else '0'
+
     print(f"\nStarting v3 daemon (log → {mux.path})...")
+    print(f"  enrich design: {'LEGACY' if legacy else 'new'} "
+          f"(pure_writer={pure_on}, alias_dedup={alias_on}, "
+          f"dispatch={len(dispatch_set)} endpoints)")
     writer = _spawn('merge writer',
         ['python', '-u', '-m', 'biblion.merge.writer',
          '--db', str(args.db), '--redis-url', args.redis_url])
-    resolver = _spawn('resolver',
-        ['python', '-u', '-m', 'biblion.merge.resolver',
-         '--db', str(args.db), '--redis-url', args.redis_url])
+    # The Resolver only has work when multi-hits PARK — i.e. legacy writer with
+    # alias-dedup off. Pure mode and inline alias-dedup never park.
+    resolver = None
+    if not (pure_on or alias_on):
+        resolver = _spawn('resolver',
+            ['python', '-u', '-m', 'biblion.merge.resolver',
+             '--db', str(args.db), '--redis-url', args.redis_url])
     pending = _spawn('pending resolver',
         ['python', '-u', '-m', 'biblion.merge.pending_resolver',
          '--db', str(args.db), '--redis-url', args.redis_url])
 
+    # Dispatcher handles the cut endpoints; compute feeds the pure writer.
+    dispatcher = None
+    if dispatch_eps:
+        dispatcher = _spawn('enrich dispatcher',
+            ['python', '-u', '-m', 'biblion.enrich.dispatcher',
+             '--db', str(args.db), '--redis-url', args.redis_url,
+             '--endpoints', dispatch_eps])
+    compute = None
+    if pure_on:
+        compute = _spawn('enrich compute',
+            ['python', '-u', '-m', 'biblion.enrich.compute',
+             '--db', str(args.db), '--redis-url', args.redis_url])
+    # Don't run a legacy producer for any endpoint the dispatcher now owns.
+    if dispatch_set:
+        args.targets = [t for t in args.targets if t not in dispatch_set]
+
     time.sleep(1)
-    for nm, p in (('writer', writer), ('resolver', resolver),
-                  ('pending_resolver', pending)):
-        if p.poll() is not None:
-            print(f"[ERROR] {nm} died immediately (exit {p.returncode}); aborting")
-            return 1
+    _infra = [('writer', writer), ('pending_resolver', pending)]
+    if resolver is not None:
+        _infra.append(('resolver', resolver))
+    if dispatcher is not None:
+        _infra.append(('dispatcher', dispatcher))
+    if compute is not None:
+        _infra.append(('compute', compute))
+    if any(p.poll() is not None for _nm, p in _infra):
+        for nm, p in _infra:
+            if p.poll() is not None:
+                print(f"[ERROR] {nm} died immediately (exit {p.returncode})")
+        print("[ERROR] aborting; stopping the daemons already spawned")
+        for nm, p in _infra:           # don't orphan the survivors
+            if p.poll() is None:
+                try: os.killpg(p.pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError): pass
+        return 1
 
     # Spawn producers with a stagger so they don't all hit the claims DB
     # write lock in the same millisecond.
@@ -1830,7 +2302,14 @@ def cmd_daemon(args) -> int:
 
     # Supervise: poll every few seconds, restart crashes, exit on SIGINT.
     def _kill_all():
-        for label, p in [('resolver', resolver), ('writer', writer)] + list(producers.items()):
+        extra = [('writer', writer)]
+        if resolver is not None:
+            extra.append(('resolver', resolver))
+        if dispatcher is not None:
+            extra.append(('dispatcher', dispatcher))
+        if compute is not None:
+            extra.append(('compute', compute))
+        for label, p in extra + list(producers.items()):
             if p.poll() is None:
                 try:
                     os.killpg(p.pid, signal.SIGTERM)
@@ -1840,9 +2319,32 @@ def cmd_daemon(args) -> int:
     shutting_down = False
     # Track per-subprocess crash count to detect crash-loop conditions
     crash_count: dict[str, int] = {n: 0 for n in producers}
-    crash_count['_writer']    = 0
-    crash_count['_resolver']  = 0
-    crash_count['_pending']   = 0
+    crash_count['_writer']     = 0
+    crash_count['_resolver']   = 0
+    crash_count['_pending']    = 0
+    crash_count['_dispatcher'] = 0
+    crash_count['_compute']    = 0
+
+    # Infra daemons the live dashboard surfaces: (heartbeat role, crash_count
+    # key). Conditionally present — resolver only in legacy/parking mode,
+    # dispatcher/compute only under the new design. The role strings MUST match
+    # the cache.beat(...) calls in each daemon's loop.
+    _daemon_specs = [('writer', '_writer'), ('pending_resolver', '_pending')]
+    if resolver is not None:
+        _daemon_specs.append(('resolver', '_resolver'))
+    if dispatcher is not None:
+        _daemon_specs.append(('dispatcher', '_dispatcher'))
+    if compute is not None:
+        _daemon_specs.append(('compute', '_compute'))
+    _daemon_roles = [role for role, _ck in _daemon_specs]
+
+    def _daemon_proc(role):
+        # Resolve role -> the CURRENT Popen. The writer/resolver/dispatcher/
+        # compute/pending locals are rebound on restart; closures see the live
+        # value, so liveness reads stay correct after a respawn.
+        return {'writer': writer, 'pending_resolver': pending,
+                'resolver': resolver, 'dispatcher': dispatcher,
+                'compute': compute}.get(role)
 
     # A producer that exits 0 (no claimable work) is "parked": not a crash,
     # not respawned immediately. We recheck it for work on a slow heartbeat so
@@ -1860,6 +2362,13 @@ def cmd_daemon(args) -> int:
     ERROR_WINDOW_S = 600
     started_mono = time.monotonic()
     live = sys.stdout.isatty()
+
+    # Long-lived cache handle for the live ticks: reads daemon heartbeats and
+    # queue depths each render. _prev_lengths holds the last tick's depths so
+    # the pipeline panel can show per-tick deltas.
+    _live_cache = CacheClient(url=args.redis_url)
+    _prev_lengths: dict[str, int] = {}
+    HEARTBEAT_STALE_S = 30      # alive but no beat in this long -> 'stale'
 
     def _record_error(label: str, returncode, crash_n: int) -> None:
         error_events.append((time.monotonic(),
@@ -1922,7 +2431,86 @@ def cmd_daemon(args) -> int:
                 'in_flight': in_flight, 'settled': cur, 'remaining': left,
                 'restarts': crash_count.get(name, 0),
             })
+        # NOTE: _prev_settled is updated by _live_services (the sole updater),
+        # called after this in _renderable, so both read the same prior tick.
+        return out
+
+    # Services the dispatcher drives, in stable order — derived from the cut set
+    # so absent services don't show empty rows.
+    from .enrich.handlers import HANDLERS
+    _dispatch_services = sorted({HANDLERS[e].service
+                                 for e in dispatch_set if e in HANDLERS})
+
+    def _live_services(snap):
+        """Per-service activity rows (the dispatcher's real work), keyed by the
+        API service. Sole updater of _prev_settled — call after _live_modules."""
+        settled = snap.get('settled_by_service', {})
+        claimed = snap.get('claimed_by_service', {})
+        now = time.monotonic()
+        out = []
+        for svc in _dispatch_services:
+            cur = settled.get(svc, 0)
+            did = max(0, cur - _prev_settled.get(svc, cur))
+            in_flight = claimed.get(svc, 0)
+            if did > 0 or in_flight > 0:
+                _last_active[svc] = now
+            active = (now - _last_active.get(svc, 0.0)) <= ACTIVE_WINDOW_S
+            out.append({'service': svc, 'in_flight': in_flight,
+                        'settled': cur, 'did': did, 'active': active})
         _prev_settled.update(settled)
+        return out
+
+    def _live_daemons(beats):
+        """Per-daemon health: up/down from poll(), working/stale from heartbeat
+        age, plus the daemon's own counters and restart count."""
+        now_wall = time.time()
+        out = []
+        for role, ck in _daemon_specs:
+            p = _daemon_proc(role)
+            alive = p is not None and p.poll() is None
+            hb = beats.get(role)
+            ts = hb.get('ts') if hb else None
+            age = (now_wall - ts) if ts else None
+            if not alive:
+                status = 'down'
+            elif ts is None:
+                status = 'starting'        # alive but no beat yet
+            elif age is not None and age > HEARTBEAT_STALE_S:
+                status = 'stale'           # alive but not progressing
+            else:
+                status = 'working'
+            out.append({'role': role, 'status': status, 'age': age,
+                        'restarts': crash_count.get(ck, 0), 'stats': hb or {}})
+        return out
+
+    def _build_pipeline_stages(daemons, lengths, prev):
+        """Ordered pipeline stages: queue depth + per-tick delta + owning daemon
+        status. Deltas are plain subtractions (fixed 5s tick), forced to 0 on
+        the first tick when prev is empty."""
+        dstat = {d['role']: d['status'] for d in daemons}
+
+        def depth(*keys):
+            return sum(lengths.get(k, 0) for k in keys)
+
+        def delta(*keys):
+            if not prev:
+                return 0
+            return depth(*keys) - sum(prev.get(k, 0) for k in keys)
+
+        stages = [
+            ('staged',  ('staged_papers', 'staged_citations'), 'dispatcher'),
+            ('write',   ('write_jobs',),                        'compute'),
+            ('promote', ('promote_citations',),                'pending_resolver'),
+            ('alias',   ('alias_jobs',),                        'writer'),
+        ]
+        if 'resolver' in dstat:          # legacy parking path only
+            stages.append(('parked', ('parked_papers', 'resolved_papers'),
+                           'resolver'))
+        out = []
+        for label, keys, owner in stages:
+            out.append({'stage': label, 'depth': depth(*keys),
+                        'delta': delta(*keys), 'owner': owner,
+                        'owner_status': dstat.get(owner, '—')})
         return out
 
     # Live dashboard via Rich. Rich's Live(screen=True) owns the alternate
@@ -1941,26 +2529,44 @@ def cmd_daemon(args) -> int:
         except Exception:
             _rich_live = None
 
-    def _renderable():
+    def _collect():
         # full=False: skip the multi-second coverage/pending-degree aggregates
         # the dashboard doesn't show — they ran every tick and froze the screen.
         snap = _qc_snapshot(args.db, full=False)
-        return _rich_dashboard(
-            snap, args.db,
-            uptime_s=int(time.monotonic() - started_mono),
-            recent_errors=_recent_errors(), log_dir=log_dir,
-            n_producers=len(producers), live_modules=_live_modules(snap))
+        try:
+            beats = _live_cache.get_heartbeats(_daemon_roles)
+            lengths = _live_cache.lengths()
+        except Exception:
+            beats, lengths = {}, {}        # a Redis blip degrades, never crashes
+        daemons = _live_daemons(beats)
+        modules = _live_modules(snap)          # reads _prev_settled (no update)
+        services = _live_services(snap)        # sole _prev_settled updater; after
+        pipeline = _build_pipeline_stages(daemons, lengths, _prev_lengths)
+        _prev_lengths.clear()
+        _prev_lengths.update(lengths)          # after delta read
+        return snap, daemons, pipeline, services, modules
 
     def _draw() -> None:
+        snap, daemons, pipeline, services, modules = _collect()
         if _rich_live is not None:
-            _rich_live.update(_renderable(), refresh=True)
+            _rich_live.update(_rich_dashboard(
+                snap, args.db,
+                uptime_s=int(time.monotonic() - started_mono),
+                recent_errors=_recent_errors(), log_dir=log_dir,
+                n_producers=len(producers), daemons=daemons, pipeline=pipeline,
+                services=services, live_modules=modules), refresh=True)
         elif live:
-            # Fallback: Rich missing but we have a TTY — minimal reprint.
+            # Fallback: Rich missing but we have a TTY — minimal reprint, with
+            # daemon health so the no-Rich path isn't blind to the daemons.
             recent = _recent_errors()
-            core = _qc_snapshot(args.db, full=False)['core']
+            core = snap['core']
+            n_down = sum(1 for d in daemons if d['status'] == 'down')
+            n_stale = sum(1 for d in daemons if d['status'] == 'stale')
             sys.stdout.write(
                 f"\rpapers {core['papers']:,}  edges {core['edges']:,}  "
-                f"pending {core['pending_edges']:,}  errors(10m) {len(recent)}   ")
+                f"pending {core['pending_edges']:,}  "
+                f"daemons down {n_down} stale {n_stale}  "
+                f"errors(10m) {len(recent)}   ")
             sys.stdout.flush()
 
     if _rich_live is not None:
@@ -2015,7 +2621,8 @@ def cmd_daemon(args) -> int:
                     '--db', str(args.db), '--redis-url', args.redis_url,
                 ])
 
-            if resolver.poll() is not None and not shutting_down:
+            if resolver is not None and resolver.poll() is not None \
+                    and not shutting_down:
                 crash_count['_resolver'] += 1
                 c = crash_count['_resolver']
                 wait = min(2 ** min(c, 6), 60)
@@ -2037,6 +2644,31 @@ def cmd_daemon(args) -> int:
                     '--db', str(args.db), '--redis-url', args.redis_url,
                 ])
 
+            if dispatcher is not None and dispatcher.poll() is not None \
+                    and not shutting_down:
+                crash_count['_dispatcher'] += 1
+                c = crash_count['_dispatcher']
+                wait = min(2 ** min(c, 6), 60)
+                _record_error('enrich dispatcher', dispatcher.returncode, c)
+                time.sleep(wait)
+                dispatcher = _spawn('enrich dispatcher', [
+                    'python', '-u', '-m', 'biblion.enrich.dispatcher',
+                    '--db', str(args.db), '--redis-url', args.redis_url,
+                    '--endpoints', dispatch_eps,
+                ])
+
+            if compute is not None and compute.poll() is not None \
+                    and not shutting_down:
+                crash_count['_compute'] += 1
+                c = crash_count['_compute']
+                wait = min(2 ** min(c, 6), 60)
+                _record_error('enrich compute', compute.returncode, c)
+                time.sleep(wait)
+                compute = _spawn('enrich compute', [
+                    'python', '-u', '-m', 'biblion.enrich.compute',
+                    '--db', str(args.db), '--redis-url', args.redis_url,
+                ])
+
             # Refresh the live QC panel at the end of every poll tick.
             _draw()
     except KeyboardInterrupt:
@@ -2048,67 +2680,110 @@ def cmd_daemon(args) -> int:
         if _rich_live is not None:
             _rich_live.stop()
         live_active['on'] = False
-    print("\n[supervisor] Ctrl-C — signalling SIGTERM to all subprocesses.")
+    # ---------------------------------------------------------------- teardown
+    # Robust shutdown. The writer/compute are stopped LAST (after the drain), so
+    # a SECOND Ctrl-C mid-drain must NOT orphan them — any KeyboardInterrupt here
+    # escalates to SIGKILL, and a finally backstop guarantees nothing spawned
+    # outlives the supervisor (the daemons are in their own process groups via
+    # setsid, so the terminal's Ctrl-C never reaches them — only we can).
+    def _all_spawned():
+        procs = [('writer', writer), ('pending_resolver', pending)]
+        if resolver is not None:
+            procs.append(('resolver', resolver))
+        if dispatcher is not None:
+            procs.append(('dispatcher', dispatcher))
+        if compute is not None:
+            procs.append(('compute', compute))
+        return procs + list(producers.items())
 
-    # Send SIGTERM to producers + pending_resolver first so they stop
-    # pushing new work into the cache.
-    for name, p in producers.items():
-        if p.poll() is None:
-            try: os.killpg(p.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError): pass
-    if pending.poll() is None:
-        try: os.killpg(pending.pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError): pass
-    # Wait briefly
-    for name, p in list(producers.items()) + [('pending_resolver', pending)]:
-        try: p.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            print(f"  [{name}] did not exit in 20s — SIGKILL")
-            try: os.killpg(p.pid, signal.SIGKILL)
-            except (ProcessLookupError, OSError): pass
-            p.wait()
+    def _signal_all(sig):
+        for _name, p in _all_spawned():
+            if p.poll() is None:
+                try: os.killpg(p.pid, sig)
+                except (ProcessLookupError, OSError): pass
 
-    # Producers are dead — free any claims they held in-flight so they don't
-    # sit 'claimed' (blocking re-claim until the 60-min sweep) for next run.
     try:
-        from .db import get_claims_connection
-        from .framework.claims import release_all_claims
-        cconn = get_claims_connection(main_db_path=args.db)
-        freed = release_all_claims(cconn)
-        cconn.close()
-        if freed:
-            print(f"[supervisor] released {freed} in-flight claim(s)")
-    except Exception as e:
-        print(f"[supervisor] claim release skipped: {e}")
+        print("\n[supervisor] Ctrl-C — stopping subprocesses "
+              "(Ctrl-C again to force-kill)...")
 
-    # Now drain Redis through the writer
-    print("\n[supervisor] Producers stopped, draining cache...")
-    cache = CacheClient(url=args.redis_url)
-    idle_target, idle_count = 5, 0
-    while idle_count < idle_target:
-        lens = cache.lengths()
-        total = (lens['staged_papers'] + lens['staged_citations']
-                 + lens['parked_papers'] + lens['resolved_papers']
-                 + lens.get('promote_citations', 0))
-        idle_count = idle_count + 1 if total == 0 else 0
-        print(f"  [drain] queues: {lens}  (idle {idle_count}/{idle_target})")
-        time.sleep(1)
-        if writer.poll() is not None:
-            break
-
-    # Stop the daemons
-    for name, p in (('resolver', resolver), ('writer', writer)):
-        if p.poll() is None:
-            try: os.killpg(p.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError): pass
-            try: p.wait(timeout=10)
+        # SIGTERM producers + pending + dispatcher first so they stop pushing
+        # into the cache. NOT compute — it DRAINS staged -> write:jobs and must
+        # stay alive through the drain below, or pure-mode staged records are lost.
+        _producers_like = list(producers.items()) + [('pending_resolver', pending)]
+        if dispatcher is not None:
+            _producers_like.append(('dispatcher', dispatcher))
+        for name, p in _producers_like:
+            if p.poll() is None:
+                try: os.killpg(p.pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError): pass
+        for name, p in _producers_like:
+            try: p.wait(timeout=20)
             except subprocess.TimeoutExpired:
+                print(f"  [{name}] did not exit in 20s — SIGKILL")
                 try: os.killpg(p.pid, signal.SIGKILL)
                 except (ProcessLookupError, OSError): pass
                 p.wait()
-            print(f"  [{name}] stopped (code {p.returncode})")
 
-    print(f"\n[supervisor] Final cache: {cache.lengths()}")
+        # Producers are dead — free any claims they held in-flight so they don't
+        # sit 'claimed' (blocking re-claim until the 60-min sweep) for next run.
+        try:
+            from .db import get_claims_connection
+            from .framework.claims import release_all_claims
+            cconn = get_claims_connection(main_db_path=args.db)
+            freed = release_all_claims(cconn)
+            cconn.close()
+            if freed:
+                print(f"[supervisor] released {freed} in-flight claim(s)")
+        except Exception as e:
+            print(f"[supervisor] claim release skipped: {e}")
+
+        # Now drain Redis through the (still-alive) writer + compute.
+        print("\n[supervisor] Producers stopped, draining cache...")
+        cache = CacheClient(url=args.redis_url)
+        idle_target, idle_count = 5, 0
+        while idle_count < idle_target:
+            lens = cache.lengths()
+            total = (lens['staged_papers'] + lens['staged_citations']
+                     + lens['parked_papers'] + lens['resolved_papers']
+                     + lens.get('promote_citations', 0)
+                     # compute is still draining staged -> write:jobs -> writer.
+                     + lens.get('write_jobs', 0))
+            idle_count = idle_count + 1 if total == 0 else 0
+            print(f"  [drain] queues: {lens}  (idle {idle_count}/{idle_target})")
+            time.sleep(1)
+            if writer.poll() is not None:
+                break
+
+        # Stop the rest (compute first — it feeds the writer).
+        _stop = [('writer', writer)]
+        if resolver is not None:
+            _stop.insert(0, ('resolver', resolver))
+        if compute is not None:
+            _stop.insert(0, ('compute', compute))
+        for name, p in _stop:
+            if p.poll() is None:
+                try: os.killpg(p.pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError): pass
+                try: p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try: os.killpg(p.pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError): pass
+                    p.wait()
+                print(f"  [{name}] stopped (code {p.returncode})")
+
+        print(f"\n[supervisor] Final cache: {cache.lengths()}")
+    except KeyboardInterrupt:
+        # Second Ctrl-C mid-teardown: skip the graceful drain, force-kill so we
+        # never return with the writer/compute orphaned.
+        print("\n[supervisor] Second Ctrl-C — force-killing all daemons.")
+        _signal_all(signal.SIGKILL)
+    finally:
+        # Backstop: guarantee nothing spawned outlives us, whatever path above.
+        _signal_all(signal.SIGKILL)
+        for _name, p in _all_spawned():
+            try: p.wait(timeout=5)
+            except Exception: pass
+
     mux.close()
     print(f"[supervisor] log: {mux.path}")
     # Alt-screen is gone; leave the final coverage numbers in scrollback.
@@ -2370,6 +3045,14 @@ def cmd_update(args) -> int:
     return 0
 
 
+def cmd_compact(args) -> int:
+    from .enrich.compaction import compact
+    stats = compact(args.db, dry_run=args.dry_run, force=args.force)
+    label = 'would change' if args.dry_run else 'compacted'
+    print(f"[compaction] {label}: {stats}")
+    return 0
+
+
 def cmd_snapshot(args) -> int:
     """Snapshot the DB into a read-only network-toy bundle (+ node set).
 
@@ -2424,6 +3107,14 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
 def _add_advanced_subcommands(sub) -> None:
     """The full power-user surface; nested under `biblion advanced`."""
     sub.add_parser('list', help='Show registered modules + contracts')
+
+    scp = sub.add_parser('compact',
+        help='Flatten the alias map: rewrite aliased edges to winners, re-home '
+             'sidecar rows, delete tombstoned losers. Must run quiesced.')
+    scp.add_argument('--dry-run', action='store_true',
+        help='Report what would change without writing')
+    scp.add_argument('--force', action='store_true',
+        help='Run even if a writer/dispatcher appears to be up (dangerous)')
 
     sbf = sub.add_parser('backfill-observations',
         help='Rebuild field_observations from existing papers + field_conflicts '
@@ -2583,6 +3274,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sim.add_argument('--verbose', action='store_true',
         help='Per-record progress logging')
 
+    smerge = sub.add_parser('merge',
+        help='Merge another biblion DB into this one (dedup by identifier)')
+    smerge.add_argument('src_db', type=Path,
+        help='Source biblion DB to fold into the current --db')
+    smerge.add_argument('--no-backup', action='store_true',
+        help='Skip the automatic pre-merge backup of the target DB')
+
     sx = sub.add_parser('search',
         help='Run boolean-keyword Semantic Scholar search ingestion')
     sx.add_argument('search_file', type=Path,
@@ -2690,6 +3388,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 _ADVANCED_DISPATCH = {
     'list':   'cmd_list',
+    'compact': 'cmd_compact',
     'plan':   'cmd_plan',
     'run':    'cmd_run',
     'start':  'cmd_start',
@@ -2765,7 +3464,7 @@ def main(argv: list[str] = None) -> int:
     _NO_REDIS = {'init', 'qc', 'backup', 'migrate', 'export', 'flag-retractions',
                  'clean-titles', 'sql'}
     _NO_REDIS_ADVANCED = {'list', 'plan', 'backfill-observations',
-                          'snapshot', 'embedding', 'subset'}
+                          'snapshot', 'embedding', 'subset', 'compact'}
     needs_redis = args.cmd not in _NO_REDIS and not (
         args.cmd == 'advanced' and args.advanced_cmd in _NO_REDIS_ADVANCED)
     if needs_redis:
@@ -2774,6 +3473,7 @@ def main(argv: list[str] = None) -> int:
     dispatch = {
         'init':   cmd_init,
         'import': cmd_import,
+        'merge':  cmd_merge,
         'search': cmd_search,
         'hop':    cmd_hop,
         'enrich': cmd_enrich,

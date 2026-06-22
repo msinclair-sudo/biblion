@@ -27,7 +27,9 @@ from pathlib import Path
 from typing import Optional
 
 from ..cache import CacheClient, PaperRecord, CitationRecord
+from ..cache.records import WritePaperJob, WriteEdgeJob, WritePendingEdgeJob
 from ..db    import get_connection, init_db, get_db_path, _source_bucket
+from .aliasmap import AliasMap
 from .resolve import (
     Observation, resolve, canonicalize, _canon_pub_type, _canon_editorial,
 )
@@ -381,6 +383,7 @@ class MergeStats:
     new_papers:      int = 0
     updated_papers:  int = 0
     parked_papers:   int = 0
+    merged_papers:   int = 0          # multi-hits resolved via alias-dedup
     conflicts:       int = 0
     citations_seen:  int = 0
     new_citations:   int = 0
@@ -448,6 +451,29 @@ class MergeWriter:
         # doesn't multiply across producer processes.
         self._conn = get_connection(self.db_path)
         self._conn.execute(f"PRAGMA cache_size = {-_WRITER_CACHE_MB * 1024}")
+        # In-RAM union-find over the `aliases` table. The writer is the sole
+        # applier of alias rows, so this is authoritative: every insert/update/
+        # edge is redirected to its canonical id at apply time. With an empty
+        # aliases table find() is identity, so this is a pure no-op until dedup
+        # (Phase 5) starts emitting alias jobs.
+        self._aliases = AliasMap.load(self._conn)
+        # Dirty-set feed: paper ids committed this cycle, flushed to Redis AFTER
+        # commit so the (pure dirty-set) Reader only ever sees durable state. On
+        # a commit failure the set is retained for the retry cycle. Disable via
+        # BIBLION_DIRTY_FEED=0 (no consumer reads it until Phase 2).
+        self._dirty: set[int] = set()
+        self._dirty_feed = os.environ.get('BIBLION_DIRTY_FEED', '1') != '0'
+        # Per-feature mode flags, read from the env. A directly-constructed
+        # MergeWriter defaults to the legacy path; the enrich supervisor injects
+        # BIBLION_PURE_WRITER=1 / BIBLION_ALIAS_DEDUP=1 into the spawned writer's
+        # env so the new design is the default operationally (legacy reachable
+        # via BIBLION_LEGACY_ENRICH=1, which the supervisor honours).
+        # Alias-dedup (Phase 5): multi-hits tombstone+alias losers onto a winner
+        # inline instead of parking for the Resolver.
+        self._alias_dedup = os.environ.get('BIBLION_ALIAS_DEDUP', '0') == '1'
+        # Pure-writer (Phase 6): apply pre-resolved write-jobs from the compute
+        # stage instead of probing staged records (no _batch_lookup on write).
+        self._pure_writer = os.environ.get('BIBLION_PURE_WRITER', '0') == '1'
         # Persistent claims-DB connection (main DB ATTACHed as main_v3) for the
         # claim flow — same cold-cache-per-cycle problem as above: serving a
         # claim runs each module's candidate query against the ATTACHed papers
@@ -476,6 +502,50 @@ class MergeWriter:
         # the "unclosed database" ResourceWarning.
         self.close()
 
+    def _mark_dirty(self, paper_id: Optional[int]) -> None:
+        """Record a paper id touched this cycle for the dirty-set feed,
+        canonicalised through the alias map. Flushed to Redis after commit."""
+        if self._dirty_feed and paper_id is not None:
+            self._dirty.add(self._aliases.find(paper_id))
+
+    _MERGE_COLS = ('id', 'doi', 's2_id', 'oa_id', 'title', 'year', 'venue',
+                   'authors', 'abstract', 'pub_type')
+
+    def _load_rows(self, conn: sqlite3.Connection, ids: list[int]) -> list:
+        cols = ', '.join(self._MERGE_COLS)
+        placeholders = ', '.join('?' for _ in ids)
+        return conn.execute(
+            f"SELECT {cols} FROM papers WHERE id IN ({placeholders})", ids
+        ).fetchall()
+
+    def _apply_merge_plan(self, conn: sqlite3.Connection, plan, ts: str) -> None:
+        """Apply a dedup MergePlan: tombstone + alias losers, transplant their
+        identifiers onto the winner, NULL-fill its metadata. No delete, no edge
+        re-home — edges keep their (now tombstoned) endpoint and resolve through
+        the alias map until compaction. The writer is the sole alias applier."""
+        wid = plan.winner_id
+        for lid in plan.loser_ids:
+            # NULL the loser's identifier columns FIRST so they free the UNIQUE
+            # indexes before we transplant them onto the winner; tombstone it.
+            conn.execute(
+                "UPDATE papers SET doi=NULL, s2_id=NULL, oa_id=NULL, "
+                "tombstone=1, updated_at=? WHERE id=?", (ts, lid))
+            conn.execute(
+                "INSERT OR IGNORE INTO aliases (loser_id, winner_id, created_at) "
+                "VALUES (?, ?, ?)", (lid, wid, ts))
+            self._aliases.union(lid, wid)
+        for col, val in plan.identifier_transplants.items():
+            conn.execute(
+                f"UPDATE papers SET {col}=?, updated_at=? WHERE id=? AND {col} IS NULL",
+                (val, ts, wid))
+        for col, val in plan.field_fills.items():
+            conn.execute(
+                f"UPDATE papers SET {col}=?, updated_at=? WHERE id=? AND {col} IS NULL",
+                (val, ts, wid))
+        for col, wval, lval in plan.conflicts:
+            _log_conflict(conn, wid, col, wval, lval, 'alias_dedup', ts)
+        self._mark_dirty(wid)
+
     def run_cycle(self) -> int:
         """
         Run one merge cycle.
@@ -496,22 +566,27 @@ class MergeWriter:
         processed = 0
 
         try:
-            # 1. drain resolved papers — these are guaranteed single-hit by construction,
-            #    so we can route them through the same single-hit path.
-            from ..cache.client import KEY_RESOLVED_PAPERS
-            resolved = self.cache.pop_papers_batch(self.batch_size, key=KEY_RESOLVED_PAPERS)
-            if resolved:
-                processed += self._process_paper_batch(conn, resolved)
+            if self._pure_writer:
+                # Pure mode: apply pre-resolved write-jobs only. The compute
+                # stage did the identifier lookup; no probing here.
+                processed += self._apply_write_jobs(conn)
+            else:
+                # 1. drain resolved papers — guaranteed single-hit by construction,
+                #    so we route them through the same single-hit path.
+                from ..cache.client import KEY_RESOLVED_PAPERS
+                resolved = self.cache.pop_papers_batch(self.batch_size, key=KEY_RESOLVED_PAPERS)
+                if resolved:
+                    processed += self._process_paper_batch(conn, resolved)
 
-            # 2. staged papers
-            papers = self.cache.pop_papers_batch(self.batch_size)
-            if papers:
-                processed += self._process_paper_batch(conn, papers)
+                # 2. staged papers
+                papers = self.cache.pop_papers_batch(self.batch_size)
+                if papers:
+                    processed += self._process_paper_batch(conn, papers)
 
-            # 3. staged citations
-            citations = self.cache.pop_citations_batch(self.batch_size)
-            if citations:
-                processed += self._process_citation_batch(conn, citations)
+                # 3. staged citations
+                citations = self.cache.pop_citations_batch(self.batch_size)
+                if citations:
+                    processed += self._process_citation_batch(conn, citations)
 
             # 4. promote actions from the pending_resolver sidecar
             processed += self._apply_promote_actions(conn)
@@ -547,6 +622,14 @@ class MergeWriter:
             raise
         # NOTE: do NOT close `conn` here — it's the persistent self._conn whose
         # warm page cache is the whole point. It's closed in close()/on exit.
+
+        # Dirty-set feed: emit ONLY after the commit above succeeded (a raised
+        # exception would have skipped this and left _dirty intact for retry).
+        # The Reader canonicalises again on pop, so a loser aliased after we
+        # SADD it still resolves to its winner.
+        if self._dirty_feed and self._dirty:
+            self.cache.add_dirty_papers(self._dirty)
+            self._dirty.clear()
 
         # 5. serve claim flow — uses its own connection (claims DB sidecar)
         processed += self._serve_claim_flow()
@@ -695,17 +778,30 @@ class MergeWriter:
             # insert AND leave the pending row in place so the next sweep
             # re-resolves it onto the surviving canonical paper. Without this
             # the whole writer cycle aborts (exit 1) and every producer stalls.
+            # Redirect endpoints to canonical winners (a duplicate may have been
+            # merged after the pending_resolver resolved this action).
+            citing_id = self._aliases.find(a.citing_id)
+            cited_id  = self._aliases.find(a.cited_id)
+            if citing_id == cited_id:
+                # Both endpoints folded into one paper — the edge is now a
+                # self-loop. Drop it and clear the (resolved) pending row.
+                conn.execute("DELETE FROM pending_citations WHERE id = ?",
+                             (a.pending_id,))
+                self.stats.promotions_already_done += 1
+                continue
             try:
                 cur = conn.execute("""
                     INSERT OR IGNORE INTO citations
                         (citing_id, cited_id, provenance, discovered)
                     VALUES (?, ?, ?, ?)
-                """, (a.citing_id, a.cited_id, a.provenance, ts))
+                """, (citing_id, cited_id, a.provenance, ts))
             except sqlite3.IntegrityError:
                 self.stats.promotions_stale_endpoint += 1
                 continue            # keep pending row for re-resolution
             if cur.rowcount:
                 self.stats.new_citations += 1
+                self._mark_dirty(citing_id)
+                self._mark_dirty(cited_id)
             else:
                 self.stats.promotions_already_done += 1
             conn.execute(
@@ -783,24 +879,54 @@ class MergeWriter:
             if n == 0:
                 new_id = _insert_new(conn, rec, ts)
                 self.stats.new_papers += 1
+                self._mark_dirty(new_id)
                 # Track this row's identifiers so later records in the batch
                 # see it as a hit
                 for col, val in (('doi', rec.doi), ('s2_id', rec.s2_id), ('oa_id', rec.oa_id)):
                     if val:
                         in_batch[(col, val)] = new_id
             elif n == 1:
-                paper_id = effective[0].paper_id
+                # Redirect to the canonical winner before applying, so an update
+                # to a merged-away loser lands on its winner. Identity until
+                # dedup (Phase 5) populates the alias map.
+                paper_id = self._aliases.find(effective[0].paper_id)
                 c = _apply_single_hit(conn, paper_id, rec, ts)
                 self.stats.updated_papers += 1
                 self.stats.conflicts      += c
-                # Re-index in case this rec brought new identifiers
+                self._mark_dirty(paper_id)
+                # Re-index (canonical id) in case this rec brought new identifiers
                 for col, val in (('doi', rec.doi), ('s2_id', rec.s2_id), ('oa_id', rec.oa_id)):
                     if val:
                         in_batch[(col, val)] = paper_id
             else:
-                self.cache.park_paper(rec)
-                self.stats.parked_papers += 1
+                if self._alias_dedup:
+                    self._dedup_multihit(conn, rec, effective, ts)
+                else:
+                    self.cache.park_paper(rec)
+                    self.stats.parked_papers += 1
         return len(records)
+
+    def _dedup_multihit(self, conn: sqlite3.Connection, rec: PaperRecord,
+                        effective: list, ts: str) -> None:
+        """Resolve a multi-hit inline via alias-dedup (replaces parking +
+        Resolver). Canonicalise the matched ids; if they collapse to one winner
+        it's effectively a single hit, otherwise plan + apply the merge and then
+        apply the incoming record to the winner."""
+        from ..enrich.dedup import plan_merge
+        ids = sorted({self._aliases.find(h.paper_id) for h in effective})
+        if len(ids) <= 1:
+            wid = ids[0] if ids else None
+            if wid is not None:
+                self.stats.conflicts += _apply_single_hit(conn, wid, rec, ts)
+                self.stats.updated_papers += 1
+                self._mark_dirty(wid)
+            return
+        rows = self._load_rows(conn, ids)
+        plan = plan_merge(rows)
+        self._apply_merge_plan(conn, plan, ts)
+        self.stats.conflicts += _apply_single_hit(conn, plan.winner_id, rec, ts)
+        self.stats.updated_papers += 1
+        self.stats.merged_papers += 1
 
     # ----------------------------------------------------- citation processing
 
@@ -827,6 +953,14 @@ class MergeWriter:
             cited_hits  = hits[2 * i + 1]
             citing_id = citing_hits[0].paper_id if len(citing_hits) == 1 else None
             cited_id  = cited_hits[0].paper_id  if len(cited_hits)  == 1 else None
+            # Redirect each endpoint to its canonical winner before deciding
+            # citations-vs-pending, so a freshly-aliased endpoint resolves to the
+            # winner immediately (not via a later promote). If both endpoints
+            # alias to the same paper the != guard below drops the self-loop.
+            if citing_id is not None:
+                citing_id = self._aliases.find(citing_id)
+            if cited_id is not None:
+                cited_id = self._aliases.find(cited_id)
 
             if citing_id and cited_id and citing_id != cited_id:
                 cur = conn.execute("""
@@ -836,6 +970,9 @@ class MergeWriter:
                 """, (citing_id, cited_id, rec.source, ts))
                 if cur.rowcount:
                     self.stats.new_citations += 1
+                # Both endpoints' edge sets changed — mark them for the Reader.
+                self._mark_dirty(citing_id)
+                self._mark_dirty(cited_id)
             else:
                 # One or both endpoints not yet in papers — park for later retry
                 conn.execute("""
@@ -851,6 +988,153 @@ class MergeWriter:
                 ))
                 self.stats.pending_citations += 1
         return len(records)
+
+    # ----------------------------------------------------- pure-writer apply
+
+    @staticmethod
+    def _index_in_batch(in_batch: dict, rec: PaperRecord, pid: int) -> None:
+        for col, val in (('doi', rec.doi), ('s2_id', rec.s2_id),
+                         ('oa_id', rec.oa_id)):
+            if val:
+                in_batch[(col, val)] = pid
+
+    @staticmethod
+    def _in_batch_hit(in_batch: dict, rec: PaperRecord):
+        for col, val in (('doi', rec.doi), ('s2_id', rec.s2_id),
+                         ('oa_id', rec.oa_id)):
+            if val and (col, val) in in_batch:
+                return in_batch[(col, val)]
+        return None
+
+    def _insert_or_update(self, conn: sqlite3.Connection, rec: PaperRecord,
+                          ts: str) -> int:
+        """Insert a new paper; on a UNIQUE clash (compute's read snapshot went
+        stale — the row was inserted by an earlier job) fall back to a single-hit
+        update of the existing row. Returns the canonical paper id."""
+        try:
+            new_id = _insert_new(conn, rec, ts)
+            self.stats.new_papers += 1
+            return new_id
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT id FROM papers WHERE (doi IS NOT NULL AND doi = ?) "
+                "OR (s2_id IS NOT NULL AND s2_id = ?) "
+                "OR (oa_id IS NOT NULL AND oa_id = ?) LIMIT 1",
+                (rec.doi, rec.s2_id, rec.oa_id)).fetchone()
+            if row is None:
+                raise
+            return self._single_hit_or_merge(conn, row['id'], rec, ts)
+
+    def _single_hit_or_merge(self, conn: sqlite3.Connection, paper_id: int,
+                             rec: PaperRecord, ts: str) -> int:
+        """Apply a single-hit update; if it trips a UNIQUE-identifier clash the
+        record is evidence two rows are the same paper, so escalate to a merge.
+
+        Compute classifies a record as a single-hit UPDATE off a read snapshot.
+        Between scan and apply, one of the record's identifiers can be inserted
+        onto a DIFFERENT paper; the UPDATE then trips `UNIQUE constraint failed:
+        papers.<id>`. Rather than crash (the supervisor would restart us on the
+        same poison job and stall), treat the colliding record — which carries
+        both ids — as proof the two rows are duplicates: probe the cluster,
+        merge it (losers tombstoned + their ids NULLed, so the colliding id is
+        freed onto the winner), then re-apply the record onto the winner, which
+        can no longer collide. Returns the canonical paper id the record landed
+        on; owns the conflicts / updated / merged stat accounting for the record.
+
+        Wrapped in a SAVEPOINT so the partial single-hit writes (observations
+        recorded before the failing UPDATE) roll back cleanly before the merge.
+        """
+        paper_id = self._aliases.find(paper_id)
+        conn.execute("SAVEPOINT single_hit")
+        try:
+            self.stats.conflicts += _apply_single_hit(conn, paper_id, rec, ts)
+        except sqlite3.IntegrityError:
+            conn.execute("ROLLBACK TO single_hit")
+            conn.execute("RELEASE single_hit")
+            return self._merge_stale_collision(conn, paper_id, rec, ts)
+        conn.execute("RELEASE single_hit")
+        self.stats.updated_papers += 1
+        return paper_id
+
+    def _merge_stale_collision(self, conn: sqlite3.Connection, paper_id: int,
+                               rec: PaperRecord, ts: str) -> int:
+        """Resolve a stale-snapshot single-hit collision (see
+        `_single_hit_or_merge`) by merging every paper the record's identifiers
+        now match, then applying the record onto the merge winner."""
+        from ..enrich.dedup import plan_merge
+        hits = _batch_lookup(conn, [rec])[0]
+        ids = {self._aliases.find(h.paper_id) for h in hits}
+        ids.add(paper_id)
+        ids = sorted(i for i in ids if i is not None)
+        if len(ids) <= 1:
+            # No real cluster — the clash wasn't a cross-paper duplicate (an
+            # unexpected constraint). Re-apply on the canonical target and let
+            # it raise if it genuinely cannot land.
+            wid = ids[0] if ids else paper_id
+            self.stats.conflicts += _apply_single_hit(conn, wid, rec, ts)
+            self.stats.updated_papers += 1
+            return wid
+        rows = self._load_rows(conn, ids)
+        plan = plan_merge(rows)
+        self._apply_merge_plan(conn, plan, ts)
+        wid = self._aliases.find(plan.winner_id)
+        self.stats.conflicts += _apply_single_hit(conn, wid, rec, ts)
+        self.stats.updated_papers += 1
+        self.stats.merged_papers += 1
+        return wid
+
+    def _apply_write_jobs(self, conn: sqlite3.Connection) -> int:
+        """Apply a batch of pre-resolved write-jobs (Phase 6 pure mode). Reuses
+        _insert_new / _apply_single_hit / _apply_merge_plan verbatim, so the row
+        outcome is identical to the legacy path — only the identifier lookup
+        moved upstream to the compute stage."""
+        from ..enrich.dedup import MergePlan
+        jobs = self.cache.pop_write_job_batch(self.batch_size)
+        if not jobs:
+            return 0
+        ts = _now()
+        in_batch: dict[tuple[str, str], int] = {}
+        for job in jobs:
+            if isinstance(job, WritePaperJob):
+                rec = PaperRecord.from_json(job.record)
+                if job.plan is not None:
+                    plan = MergePlan(**job.plan)
+                    self._apply_merge_plan(conn, plan, ts)
+                    self.stats.merged_papers += 1
+                    tid = self._single_hit_or_merge(conn, plan.winner_id, rec, ts)
+                else:
+                    tid = job.target_id
+                    if tid is None:
+                        tid = self._in_batch_hit(in_batch, rec)
+                    if tid is None:
+                        tid = self._insert_or_update(conn, rec, ts)
+                    else:
+                        tid = self._single_hit_or_merge(conn, tid, rec, ts)
+                self._index_in_batch(in_batch, rec, tid)
+                self._mark_dirty(tid)
+            elif isinstance(job, WriteEdgeJob):
+                c = self._aliases.find(job.citing_id)
+                d = self._aliases.find(job.cited_id)
+                if c and d and c != d:
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO citations "
+                        "(citing_id, cited_id, provenance, discovered) "
+                        "VALUES (?, ?, ?, ?)", (c, d, job.provenance, ts))
+                    if cur.rowcount:
+                        self.stats.new_citations += 1
+                    self._mark_dirty(c)
+                    self._mark_dirty(d)
+            elif isinstance(job, WritePendingEdgeJob):
+                conn.execute(
+                    "INSERT INTO pending_citations "
+                    "(citing_doi, citing_s2_id, citing_oa_id, "
+                    " cited_doi, cited_s2_id, cited_oa_id, provenance, discovered_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (job.citing_doi, job.citing_s2_id, job.citing_oa_id,
+                     job.cited_doi, job.cited_s2_id, job.cited_oa_id,
+                     job.provenance, ts))
+                self.stats.pending_citations += 1
+        return len(jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -940,6 +1224,7 @@ def main():
     try:
         while not flag.requested:
             n = writer.run_cycle()
+            cache.beat('writer', writer.stats)    # live-dashboard heartbeat
             if n == 0:
                 time.sleep(args.idle_sleep)
             elif writer.stats.cycles % 50 == 0:

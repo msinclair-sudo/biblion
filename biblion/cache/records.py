@@ -323,3 +323,101 @@ class PendingDoiBackfill:
     @classmethod
     def from_json(cls, s: str) -> 'PendingDoiBackfill':
         return cls(**json.loads(s))
+
+
+@dataclass
+class AliasJob:
+    """dedup → writer: "fold paper `loser_id` into `winner_id`." The writer
+    inserts the aliases row, updates its in-RAM union-find, NULLs the loser's
+    identifier columns + tombstones it (never deletes — edges keep a live
+    endpoint until offline compaction), and marks the winner dirty. Reads
+    resolve the loser to the winner through the alias map until compaction
+    rewrites the edge endpoints.
+    """
+    loser_id:  int
+    winner_id: int
+    created_at: str = field(default_factory=_now)
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(',', ':'))
+
+    @classmethod
+    def from_json(cls, s: str) -> 'AliasJob':
+        return cls(**json.loads(s))
+
+
+@dataclass
+class UpsertWinnerJob:
+    """dedup → writer: NULL-fill the winner's columns from the merged losers.
+    `fields` is {column: value} of already-resolved values the writer applies
+    with COALESCE (first-write-wins), never a blind overwrite."""
+    winner_id: int
+    fields: dict = field(default_factory=dict)
+    created_at: str = field(default_factory=_now)
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(',', ':'))
+
+    @classmethod
+    def from_json(cls, s: str) -> 'UpsertWinnerJob':
+        return cls(**json.loads(s))
+
+
+@dataclass
+class WritePaperJob:
+    """compute -> pure writer (Phase 6). A paper to apply, with the identifier
+    lookup already done so the writer never probes:
+      * target_id is None  -> insert a new paper (writer assigns the id; the
+        in-batch map + UNIQUE index handle a same-batch / stale-snapshot dup),
+      * target_id set       -> single-hit update of that (canonical) paper,
+      * plan set            -> multi-hit: apply the MergePlan (tombstone+alias
+        the losers, transplant ids) then single-hit the winner.
+    `record` is a PaperRecord.to_json() string (re-hydrated on apply); `plan` is
+    the MergePlan fields dict or None.
+    """
+    target_id: Optional[int]
+    record: str
+    plan: Optional[dict] = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(',', ':'))
+
+    @classmethod
+    def from_json(cls, s: str) -> 'WritePaperJob':
+        return cls(**json.loads(s))
+
+
+@dataclass
+class WriteEdgeJob:
+    """compute -> pure writer: a citation edge whose endpoints already resolved
+    to canonical paper ids."""
+    citing_id: int
+    cited_id:  int
+    provenance: str
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(',', ':'))
+
+    @classmethod
+    def from_json(cls, s: str) -> 'WriteEdgeJob':
+        return cls(**json.loads(s))
+
+
+@dataclass
+class WritePendingEdgeJob:
+    """compute -> pure writer: an edge with an unresolved endpoint, parked in
+    pending_citations exactly as the legacy writer would."""
+    citing_doi: Optional[str]
+    citing_s2_id: Optional[str]
+    citing_oa_id: Optional[str]
+    cited_doi: Optional[str]
+    cited_s2_id: Optional[str]
+    cited_oa_id: Optional[str]
+    provenance: str
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(',', ':'))
+
+    @classmethod
+    def from_json(cls, s: str) -> 'WritePendingEdgeJob':
+        return cls(**json.loads(s))

@@ -19,13 +19,18 @@ Keys
     claim_request:<service>    List[json(ClaimRequest)]      producer push, writer LPOP
     claim_grant:<service>      List[json(ClaimGrant)]        writer push, producer LPOP (BLPOP)
     result_mark:<service>      List[json(ResultMark)]        producer push, writer LPOP
+
+    dirty:papers               Set[paper_id]                 writer SADD (post-commit), Reader SPOP
+    dirty:seeded               flag                          set once the Reader has seeded the corpus
 """
 from typing import Iterable, Optional
+import json
 import logging
 
 from .records import (
     PaperRecord, CitationRecord, ClaimRequest, ClaimGrant, ResultMark,
-    PromoteCitationAction, PendingDoiBackfill,
+    PromoteCitationAction, PendingDoiBackfill, AliasJob, UpsertWinnerJob,
+    WritePaperJob, WriteEdgeJob, WritePendingEdgeJob,
 )
 
 
@@ -48,6 +53,31 @@ KEY_PROMOTE_CITATIONS  = 'promote:citations'
 KEY_PENDING_CURSOR     = 'pending_resolver:cursor'
 # resolve_pending_dois → writer: oa_id→doi stamps to apply to pending_citations.
 KEY_PENDING_DOI_BACKFILL = 'backfill:pending_dois'
+
+# Dirty-set feed (enrich redesign). The writer SADDs every committed paper id
+# (canonicalised through the alias map) here; the Reader SPOPs them. A SET, not a
+# list, so repeated touches of the same paper between drains collapse to one
+# entry. KEY_DIRTY_SEEDED is a one-shot flag the Reader sets after its initial
+# full-corpus seed so it never re-seeds.
+KEY_DIRTY_PAPERS  = 'dirty:papers'
+KEY_DIRTY_SEEDED  = 'dirty:seeded'
+
+# dedup → writer: alias / upsert-winner jobs (enrich redesign Phase 5+). The
+# writer is the sole applier of alias rows. Phase 5 applies these inline; the
+# queue is the durable boundary the pure-writer (Phase 6) consumes.
+KEY_ALIAS_JOBS = 'alias:jobs'
+
+# compute → pure writer (Phase 6): pre-resolved write-jobs. The compute stage
+# does the identifier lookup; the writer applies without probing.
+KEY_WRITE_JOBS = 'write:jobs'
+
+# Daemon heartbeats (live dashboard). Each daemon SETs a single JSON blob at
+# hb:<role> every cycle, stamped with time.time(). The dashboard reads them to
+# derive working/stale (by ts age) and show live per-daemon counters. ts-based
+# staleness, NOT a TTL: a stalled-but-alive daemon should stay readable with an
+# OLD ts (its stall age is the signal) rather than vanish; process up/down is
+# already authoritative from the supervisor's proc.poll().
+KEY_HEARTBEAT_PREFIX = 'hb:'
 
 
 def claim_request_key(service: str) -> str:
@@ -246,6 +276,161 @@ class CacheClient:
         raw = self._r.lpop(self._k(KEY_PENDING_DOI_BACKFILL), count=n) or []
         return [PendingDoiBackfill.from_json(s) for s in raw]
 
+    # --------------------------------------------------------------- dirty set
+
+    # SADD accepts many members, but a single command with millions of args is
+    # unwieldy; chunk the initial full-corpus seed.
+    _DIRTY_SADD_CHUNK = 5000
+
+    def add_dirty_papers(self, ids: Iterable[int]) -> int:
+        """SADD committed paper ids onto dirty:papers. Returns members added
+        (duplicates already in the set don't count). No-op on empty input."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return 0
+        key = self._k(KEY_DIRTY_PAPERS)
+        added = 0
+        for i in range(0, len(ids), self._DIRTY_SADD_CHUNK):
+            added += self._r.sadd(key, *ids[i:i + self._DIRTY_SADD_CHUNK])
+        return added
+
+    def pop_dirty_papers(self, n: int) -> list[int]:
+        """Atomically SPOP up to n paper ids. Returns [] when the set is empty.
+
+        The set may transiently contain merged-away losers (a paper SADDed and
+        then aliased before being popped); consumers MUST canonicalise each id
+        through the alias map on pop and re-add the winner if it changed."""
+        raw = self._r.spop(self._k(KEY_DIRTY_PAPERS), count=n) or []
+        return [int(x) for x in raw]
+
+    def dirty_count(self) -> int:
+        return self._r.scard(self._k(KEY_DIRTY_PAPERS))
+
+    def seed_dirty_all(self, ids: Iterable[int]) -> int:
+        """Bulk-add the whole corpus for the Reader's one-time bootstrap.
+        Kept distinct from add_dirty_papers for intent; same SADD underneath."""
+        return self.add_dirty_papers(ids)
+
+    def dirty_seeded(self) -> bool:
+        """True once the Reader has done its initial full-corpus seed."""
+        return bool(self._r.exists(self._k(KEY_DIRTY_SEEDED)))
+
+    def mark_dirty_seeded(self) -> None:
+        self._r.set(self._k(KEY_DIRTY_SEEDED), '1')
+
+    def clear_dirty_seeded(self) -> None:
+        """Drop the one-time seed flag so the Reader re-seeds the whole corpus on
+        its next pass. Call after a bulk change the dirty feed didn't observe
+        (e.g. marking new seeds by SQL) so the dispatcher re-evaluates them."""
+        self._r.delete(self._k(KEY_DIRTY_SEEDED))
+
+    # --------------------------------------------------------------- alias jobs
+
+    def push_alias_jobs(self, jobs: Iterable) -> int:
+        """dedup pushes AliasJob / UpsertWinnerJob for the writer to apply.
+        Each job is tagged with its class name so the writer can dispatch."""
+        payloads = []
+        for j in jobs:
+            payloads.append(json.dumps(
+                {'kind': type(j).__name__, 'data': j.to_json()},
+                separators=(',', ':')))
+        if payloads:
+            self._r.rpush(self._k(KEY_ALIAS_JOBS), *payloads)
+        return len(payloads)
+
+    def pop_alias_job_batch(self, n: int) -> list:
+        """Writer drains up to n alias/upsert jobs. Returns concrete
+        AliasJob / UpsertWinnerJob instances."""
+        raw = self._r.lpop(self._k(KEY_ALIAS_JOBS), count=n) or []
+        out = []
+        for s in raw:
+            env = json.loads(s)
+            cls = AliasJob if env['kind'] == 'AliasJob' else UpsertWinnerJob
+            out.append(cls.from_json(env['data']))
+        return out
+
+    # --------------------------------------------------------------- write jobs
+
+    def push_write_jobs(self, jobs: Iterable) -> int:
+        """compute pushes WritePaperJob / WriteEdgeJob / WritePendingEdgeJob for
+        the pure writer. Each is tagged with its class name for dispatch."""
+        payloads = []
+        for j in jobs:
+            payloads.append(json.dumps(
+                {'kind': type(j).__name__, 'data': j.to_json()},
+                separators=(',', ':')))
+        if payloads:
+            self._r.rpush(self._k(KEY_WRITE_JOBS), *payloads)
+        return len(payloads)
+
+    def pop_write_job_batch(self, n: int) -> list:
+        """Writer drains up to n write-jobs as concrete record instances."""
+        raw = self._r.lpop(self._k(KEY_WRITE_JOBS), count=n) or []
+        kinds = {'WritePaperJob': WritePaperJob, 'WriteEdgeJob': WriteEdgeJob,
+                 'WritePendingEdgeJob': WritePendingEdgeJob}
+        out = []
+        for s in raw:
+            env = json.loads(s)
+            out.append(kinds[env['kind']].from_json(env['data']))
+        return out
+
+    # ----------------------------------------------------------- shadow counters
+
+    def incr_counter(self, name: str, by: int = 1) -> int:
+        """Bump a namespaced diagnostic counter (e.g. shadow:needs_mismatch).
+        Used by the shadow-mode comparators to surface divergence without
+        failing production."""
+        return self._r.incrby(self._k(name), by)
+
+    def get_counter(self, name: str) -> int:
+        raw = self._r.get(self._k(name))
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def beat(self, role: str, stats) -> None:
+        """Publish a daemon's per-cycle stats + wall-clock ts to hb:<role>.
+
+        `stats` may be a dataclass (MergeStats / ResolverStats) or a plain dict
+        (compute / dispatcher). Never raises on a Redis hiccup or an
+        unserialisable field — a telemetry write must never crash the daemon's
+        work loop."""
+        import time as _time
+        from dataclasses import is_dataclass, asdict
+        try:
+            payload = asdict(stats) if is_dataclass(stats) else dict(stats)
+        except Exception:
+            payload = {}
+        payload['ts'] = _time.time()
+        try:
+            self._r.set(self._k(f"{KEY_HEARTBEAT_PREFIX}{role}"),
+                        json.dumps(payload, separators=(',', ':'), default=str))
+        except Exception:
+            pass
+
+    def get_heartbeats(self, roles: Iterable[str]) -> dict:
+        """Read hb:<role> for each role in one pipeline round-trip. Returns
+        {role: {'ts': float, ...stats}} with the value None when no beat exists
+        yet (the daemon hasn't completed its first cycle)."""
+        roles = list(roles)
+        if not roles:
+            return {}
+        pipe = self._r.pipeline()
+        for r in roles:
+            pipe.get(self._k(f"{KEY_HEARTBEAT_PREFIX}{r}"))
+        vals = pipe.execute()
+        out: dict = {}
+        for r, raw in zip(roles, vals):
+            if raw is None:
+                out[r] = None
+                continue
+            try:
+                out[r] = json.loads(raw)
+            except Exception:
+                out[r] = None
+        return out
+
     def get_pending_cursor(self) -> int:
         """Reader's saved sweep cursor (last pending_citations.id processed)."""
         raw = self._r.get(self._k(KEY_PENDING_CURSOR))
@@ -285,13 +470,15 @@ class CacheClient:
         for key in (KEY_STAGED_PAPERS, KEY_STAGED_CITATIONS,
                     KEY_PARKED_PAPERS, KEY_PARKED_CITATIONS,
                     KEY_RESOLVED_PAPERS, KEY_PROMOTE_CITATIONS,
-                    KEY_PENDING_DOI_BACKFILL):
+                    KEY_PENDING_DOI_BACKFILL, KEY_ALIAS_JOBS, KEY_WRITE_JOBS):
             pipe.llen(self._k(key))
+        pipe.scard(self._k(KEY_DIRTY_PAPERS))   # a set, not a list
         vals = pipe.execute()
         return dict(zip(
             ('staged_papers', 'staged_citations',
              'parked_papers', 'parked_citations',
-             'resolved_papers', 'promote_citations', 'pending_doi_backfill'),
+             'resolved_papers', 'promote_citations', 'pending_doi_backfill',
+             'alias_jobs', 'write_jobs', 'dirty_papers'),
             vals,
         ))
 
@@ -308,9 +495,11 @@ class CacheClient:
             self._k(KEY_PARKED_PAPERS),   self._k(KEY_PARKED_CITATIONS),
             self._k(KEY_RESOLVED_PAPERS), self._k(KEY_PROMOTE_CITATIONS),
             self._k(KEY_PENDING_CURSOR),  self._k(KEY_PENDING_DOI_BACKFILL),
+            self._k(KEY_DIRTY_PAPERS),    self._k(KEY_DIRTY_SEEDED),
+            self._k(KEY_ALIAS_JOBS),      self._k(KEY_WRITE_JOBS),
         )
         for prefix in (KEY_CLAIM_REQUEST_PREFIX, KEY_CLAIM_GRANT_PREFIX,
-                       KEY_RESULT_MARK_PREFIX):
+                       KEY_RESULT_MARK_PREFIX, KEY_HEARTBEAT_PREFIX):
             for key in self._r.scan_iter(f"{self._k(prefix)}*"):
                 self._r.delete(key)
 

@@ -248,8 +248,10 @@ def main():
         except Exception as e:
             resolver.stats.errors += 1
             _log.exception("pending_resolver cycle failed: %s", e)
+            cache.beat('pending_resolver', resolver.stats)
             time.sleep(args.idle_sleep)
             continue
+        cache.beat('pending_resolver', resolver.stats)    # live-dashboard heartbeat
         # Idle backoff only when a wrap happened (empty/end of table).
         if n == 0:
             time.sleep(args.idle_sleep)

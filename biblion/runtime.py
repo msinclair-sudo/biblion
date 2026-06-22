@@ -40,9 +40,23 @@ class ShutdownFlag:
               f"(Ctrl-C again to abort).")
         self.requested = True
 
+    def _term_handler(self, sig, frame):
+        # SIGTERM (from the supervisor): cooperative shutdown — finish the
+        # current batch and exit cleanly (writer commits, connections close).
+        # No two-strikes escalation; the supervisor escalates to SIGKILL on its
+        # own timeout if we don't exit in time.
+        if not self.requested:
+            print(f"\n[{self.name}] SIGTERM — finishing current batch and exiting.")
+        self.requested = True
+
     @classmethod
     def install(cls, name: str = 'biblion') -> 'ShutdownFlag':
-        """Create a new flag and bind it to SIGINT."""
+        """Create a new flag and bind it to SIGINT (interactive Ctrl-C, two
+        strikes) and SIGTERM (supervisor shutdown, single cooperative strike)."""
         flag = cls(name)
         signal.signal(signal.SIGINT, flag._handler)
+        try:
+            signal.signal(signal.SIGTERM, flag._term_handler)
+        except (ValueError, OSError):
+            pass   # not in the main thread — SIGINT binding above already tried
         return flag

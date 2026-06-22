@@ -157,3 +157,43 @@ class TestIntrospection:
 
     def test_ping(self, cache):
         assert cache.ping() is True
+
+
+# ---------------------------------------------------------------------------
+# Daemon heartbeats
+# ---------------------------------------------------------------------------
+
+class TestHeartbeats:
+    def test_beat_then_get_round_trip(self, cache):
+        cache.beat('writer', {'cycles': 5, 'new_papers': 7})
+        hb = cache.get_heartbeats(['writer'])
+        assert hb['writer']['cycles'] == 5
+        assert hb['writer']['new_papers'] == 7
+        assert isinstance(hb['writer']['ts'], float)
+
+    def test_get_missing_role_is_none(self, cache):
+        assert cache.get_heartbeats(['nobody'])['nobody'] is None
+
+    def test_get_no_roles_is_empty(self, cache):
+        assert cache.get_heartbeats([]) == {}
+
+    def test_beat_accepts_dataclass(self, cache):
+        # MergeStats is a dataclass — beat() must asdict() it transparently.
+        from biblion.merge.writer import MergeStats
+        cache.beat('writer', MergeStats(cycles=3, new_papers=2))
+        hb = cache.get_heartbeats(['writer'])
+        assert hb['writer']['cycles'] == 3 and hb['writer']['new_papers'] == 2
+
+    def test_beat_overwrites(self, cache):
+        cache.beat('writer', {'cycles': 1})
+        cache.beat('writer', {'cycles': 9})        # SET, not a list
+        assert cache.get_heartbeats(['writer'])['writer']['cycles'] == 9
+
+    def test_flush_all_clears_heartbeats(self, cache):
+        cache.beat('writer', {'cycles': 1})
+        cache.beat('compute', {'passes': 1})
+        cache.flush_all()
+        hb = cache.get_heartbeats(['writer', 'compute'])
+        assert hb['writer'] is None and hb['compute'] is None
+        # heartbeats aren't queues, so the lengths() invariant still holds.
+        assert sum(cache.lengths().values()) == 0

@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS papers (
     is_seed     INTEGER NOT NULL DEFAULT 0,
     is_stub     INTEGER NOT NULL DEFAULT 0,    -- 1 = only identifier(s) known, not yet enriched
     is_rejected INTEGER NOT NULL DEFAULT 0,    -- 1 = patent/proceedings/etc
+    -- Alias-dedup substrate (enrich redesign). A merged-away "loser" row is
+    -- TOMBSTONED, never deleted, so its edges keep a live endpoint until offline
+    -- compaction rewrites them; the `aliases` table maps loser -> winner.
+    -- canonical_id is the winner; NULL means "== id" — we deliberately do NOT
+    -- backfill it on migrate (a full-table rewrite on a multi-GB DB), so every
+    -- reader MUST treat NULL canonical_id as identity. See aliases below.
+    tombstone   INTEGER NOT NULL DEFAULT 0,    -- 1 = merged loser; excluded from node sets
+    canonical_id INTEGER,                      -- alias winner; NULL == id (no backfill)
     discovery_count INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL,
     updated_at  TEXT
@@ -118,6 +126,23 @@ CREATE INDEX IF NOT EXISTS idx_papers_has_oa_id
 -- inside _SCHEMA — see the idx_papers_citekey precedent.
 
 -- ---------------------------------------------------------------------------
+-- Alias map (union-find) for dedup. One row per merged-away "loser" paper,
+-- pointing at the "winner" it folds into. PRIMARY KEY(loser_id) enforces the
+-- union-find invariant: each node has exactly one outgoing edge. Chains
+-- (a->b->c) are legal and collapsed by AliasMap.find()'s path compression;
+-- offline compaction (Phase 7) flattens them and drops tombstoned losers.
+-- Dedup never deletes rows or re-homes edges — it only appends here and sets
+-- papers.tombstone, so the live row count only grows until compaction.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS aliases (
+    loser_id   INTEGER NOT NULL PRIMARY KEY,    -- one outgoing edge per node
+    winner_id  INTEGER NOT NULL,
+    created_at TEXT    NOT NULL
+);
+-- Supports compaction's "all losers of this winner" scan.
+CREATE INDEX IF NOT EXISTS idx_aliases_winner ON aliases(winner_id);
+
+-- ---------------------------------------------------------------------------
 -- Scheme-keyed secondary identifiers (issn, isbn, arxiv, mag, dblp, ...).
 -- The primary lookup keys (doi/s2_id/oa_id) stay as papers columns; this table
 -- holds the open, often multi-valued set (a book can carry several ISBNs; a
@@ -164,6 +189,20 @@ CREATE TABLE IF NOT EXISTS citations (
 );
 CREATE INDEX IF NOT EXISTS idx_cit_citing ON citations(citing_id);
 CREATE INDEX IF NOT EXISTS idx_cit_cited  ON citations(cited_id);
+
+-- Alias-resolved view of the citation graph for SQL consumers (qc, exports).
+-- Resolves each endpoint one level through `aliases` (loser -> winner). This is
+-- exact for the common single-merge case; multi-merge chains (a->b->c) are
+-- transient and flattened by offline compaction, so one level suffices until
+-- then. The snapshot path does a full chained rewrite for the JS consumer that
+-- can't run union-find. No-op when `aliases` is empty.
+CREATE VIEW IF NOT EXISTS citations_canonical AS
+SELECT COALESCE(aw.winner_id, c.citing_id) AS citing_id,
+       COALESCE(ac.winner_id, c.cited_id)  AS cited_id,
+       c.provenance, c.discovered
+FROM citations c
+LEFT JOIN aliases aw ON aw.loser_id = c.citing_id
+LEFT JOIN aliases ac ON ac.loser_id = c.cited_id;
 
 -- ---------------------------------------------------------------------------
 -- Per-source citation/reference counts.
@@ -389,9 +428,15 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         db_path = get_db_path()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    # busy_timeout FIRST: switching to WAL needs a brief lock, and on a busy DB
+    # (e.g. opening for the final QC snapshot the instant the daemons are
+    # releasing their WAL locks mid-checkpoint) that contends. Without a busy
+    # handler installed yet, the WAL switch fails immediately with
+    # SQLITE_PROTOCOL ("locking protocol"); with it, it waits and retries. Same
+    # deliberate ordering as get_claims_connection.
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous  = NORMAL")
     conn.execute("PRAGMA cache_size   = -131072")    # 128 MB page cache
     return conn
@@ -535,6 +580,11 @@ _PAPERS_LATE_COLUMNS = [
     ('month',                 'TEXT'),
     ('editorial_status',      'TEXT'),
     ('editorial_status_at',   'TEXT'),
+    # Alias-dedup columns. tombstone carries a constant NOT NULL DEFAULT (legal
+    # in ALTER TABLE ADD COLUMN); canonical_id stays nullable — NULL == id, no
+    # backfill (see the papers CREATE TABLE comment).
+    ('tombstone',             'INTEGER NOT NULL DEFAULT 0'),
+    ('canonical_id',          'INTEGER'),
 ]
 
 

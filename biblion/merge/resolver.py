@@ -213,6 +213,8 @@ def main():
     print(f"[resolver] db={args.db}  redis={args.redis_url}")
     while not flag.requested:
         n = resolver.run_cycle()
+        cache.beat('resolver', {'merged': resolver.merged,    # dashboard heartbeat
+                                'passthrough': resolver.passthrough})
         if n == 0:
             time.sleep(args.idle_sleep)
         else:

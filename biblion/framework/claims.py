@@ -105,6 +105,16 @@ def _retry_cutoff_iso(retry_days: int | None = None) -> str:
     return datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
 
 
+def stale_claim_cutoff_iso(expiry_min: int = _DEFAULT_EXPIRY_MIN) -> str:
+    """ISO timestamp at/before which a 'claimed' row is considered stale and no
+    longer blocks re-claim. Mirrors the expiry window claim_candidates() applies
+    on the legacy path, so the dispatcher/Reader path doesn't let a 'claimed'
+    row that outlived its producer (crash, SIGTERM between claim and mark, a
+    daily-limit break mid-flight) block its paper forever."""
+    cutoff = datetime.now(timezone.utc).timestamp() - (expiry_min * 60)
+    return datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+
+
 def _build_eligibility(service: str, fields: tuple, retry_iso: str):
     """Build the per-field eligibility WHERE term + its params.
 
@@ -361,6 +371,44 @@ def bulk_mark(
         raise
 
 
+def mark_claimed(conn: sqlite3.Connection, service: str, pairs: list) -> None:
+    """Persist 'claimed' rows for (paper_id, field) pairs — the dispatcher's
+    durable in-flight marker (enrich redesign, Phase 4).
+
+    INSERT OR REPLACE so re-claiming an expired/failed attempt is fine. Used by
+    the single Dispatcher in place of claim_candidates' inline claim insert; the
+    persisted rows survive a crash (rehydrated into the in-RAM in-flight set) and
+    make a paper's need invisible to the Reader (which blocks 'claimed') so it
+    isn't re-dispatched. Mirrors bulk_mark's BEGIN IMMEDIATE retry.
+    """
+    if not pairs:
+        return
+    ts = _ts()
+    last_err = None
+    for attempt in range(5):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as e:
+            if 'locked' not in str(e).lower():
+                raise
+            last_err = e
+            time.sleep(0.25 * (2 ** attempt))
+    else:
+        raise last_err  # pragma: no cover
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO enrichment_attempts "
+            "(paper_id, service, field, status, claimed_at) "
+            "VALUES (?, ?, ?, 'claimed', ?)",
+            [(pid, service, fld, ts) for pid, fld in pairs],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def release_claims(conn: sqlite3.Connection, service: str) -> int:
     """
     Drop every in-flight ('claimed') row for this service.
@@ -546,6 +594,9 @@ CANDIDATE_QUERIES: dict[str, dict] = {
     'enrich_metadata_ncbi': {
         'service': 'ncbi',
         'fields': ('abstract', 'title', 'year'),
+        # is_seed = 1: metadata enrichment is for real papers only. Ghosts
+        # (non-seed citation endpoints) stay identifier-only and only get their
+        # DOI resolved — same gate as enrich_metadata_oa/s2.
         'candidate_sql': """
             SELECT p.id AS id, p.pubmed_id AS pubmed_id, p.doi AS doi,
                    p.is_seed AS is_seed, p.discovery_count AS discovery_count,
@@ -555,6 +606,7 @@ CANDIDATE_QUERIES: dict[str, dict] = {
             FROM papers p
             WHERE (p.pubmed_id IS NOT NULL OR p.doi IS NOT NULL)
               AND p.is_rejected = 0
+              AND p.is_seed = 1
               AND (p.abstract IS NULL OR p.title IS NULL OR p.year IS NULL)
         """,
         'order_by': "ORDER BY b.is_seed DESC, b.discovery_count DESC, b.id ASC",
@@ -563,7 +615,9 @@ CANDIDATE_QUERIES: dict[str, dict] = {
         'service': 'crossref',
         'fields': ('volume', 'first_page', 'publisher'),
         # Papers with a DOI still missing the publisher-deposited detail OA/S2
-        # rarely carry. Backed by idx_papers_needs_biblio (db._SCHEMA).
+        # rarely carry. is_seed = 1: biblio detail is metadata enrichment for
+        # real papers; ghosts stay identifier-only (DOI-resolution only). Backed
+        # by idx_papers_needs_biblio (db._SCHEMA).
         'candidate_sql': """
             SELECT p.id AS id, p.doi AS doi,
                    p.is_seed AS is_seed, p.discovery_count AS discovery_count,
@@ -573,6 +627,7 @@ CANDIDATE_QUERIES: dict[str, dict] = {
             FROM papers p
             WHERE p.doi IS NOT NULL
               AND p.is_rejected = 0
+              AND p.is_seed = 1
               AND (p.volume IS NULL OR p.first_page IS NULL
                    OR p.publisher IS NULL)
         """,

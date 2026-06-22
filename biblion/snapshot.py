@@ -39,7 +39,7 @@ from pathlib import Path
 #       deliberate quality choice; it costs citation edges whose endpoint
 #       lacks an abstract.
 NODE_SET_WHERE = (
-    "is_rejected = 0 AND is_stub = 0 "
+    "is_rejected = 0 AND is_stub = 0 AND tombstone = 0 "
     "AND title IS NOT NULL AND abstract IS NOT NULL"
 )
 
@@ -49,7 +49,7 @@ NODE_SET_WHERE = (
 # lacks an abstract -- exactly the rows the default filter excludes. We emit
 # embedded nodes (those that pass NODE_SET_WHERE) first and structural nodes
 # last so embeddings.npy stays a contiguous m*d block (rows >= m are ghosts).
-STRUCTURAL_SET_WHERE = "is_rejected = 0 AND title IS NOT NULL"
+STRUCTURAL_SET_WHERE = "is_rejected = 0 AND tombstone = 0 AND title IS NOT NULL"
 STRUCTURAL_FLAG_EXPR = "(is_stub = 1 OR abstract IS NULL)"
 
 NODE_SET_QUERY = f"""
@@ -94,8 +94,49 @@ def _snapshot_db(src: Path, dst: Path) -> None:
     try:
         d.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         d.execute("PRAGMA journal_mode=DELETE")
+        _canonicalise_snapshot_edges(d)
     finally:
         d.close()
+
+
+def _canonicalise_snapshot_edges(conn: sqlite3.Connection) -> None:
+    """Rewrite alias-merged citation endpoints to their canonical winner IN the
+    snapshot copy, then drop the self-loops the collapse creates.
+
+    The toy reads the snapshot via sql.js and can't do union-find, so the edges
+    must already point at winners. We loop because the persisted `aliases` table
+    can hold chains (a->b, b->c) across separate merges; each pass resolves one
+    level until no endpoint is still a loser. No-op when `aliases` is empty (the
+    pre-dedup steady state)."""
+    # Older snapshots predate the aliases table; guard so this stays safe.
+    has_aliases = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='aliases'"
+    ).fetchone()
+    if not has_aliases:
+        return
+    # UPDATE OR IGNORE: when a rewritten endpoint would duplicate an existing
+    # (winner, cited) edge it violates the PK, so the row is skipped (left
+    # loser-keyed) rather than raising; the leftover-loser DELETE below removes
+    # those duplicates. Loop to resolve alias chains (a->b, b->c).
+    while True:
+        c1 = conn.execute(
+            "UPDATE OR IGNORE citations SET citing_id = "
+            "(SELECT winner_id FROM aliases WHERE loser_id = citing_id) "
+            "WHERE citing_id IN (SELECT loser_id FROM aliases)").rowcount
+        c2 = conn.execute(
+            "UPDATE OR IGNORE citations SET cited_id = "
+            "(SELECT winner_id FROM aliases WHERE loser_id = cited_id) "
+            "WHERE cited_id IN (SELECT loser_id FROM aliases)").rowcount
+        if not c1 and not c2:
+            break
+    # Any edge still keyed to a loser is a duplicate of an already-present winner
+    # edge (the rewrite was skipped); drop it. Then drop self-loops created when
+    # both endpoints collapse onto the same winner.
+    conn.execute(
+        "DELETE FROM citations WHERE citing_id IN (SELECT loser_id FROM aliases) "
+        "OR cited_id IN (SELECT loser_id FROM aliases)")
+    conn.execute("DELETE FROM citations WHERE citing_id = cited_id")
+    conn.commit()
 
 
 def _edge_survival(conn: sqlite3.Connection, where: str = NODE_SET_WHERE) -> dict:

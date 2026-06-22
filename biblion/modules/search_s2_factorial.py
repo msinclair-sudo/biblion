@@ -12,8 +12,11 @@ semantics:
     query.
   * NOT clauses are stripped (S2 ignores boolean NOT).
   * Per sub_query, top-N results (default 100) are paged via offset.
-  * Results stream as PaperRecord into the cache. The merge writer
-    dedups against the existing corpus + handles is_seed marking.
+  * Results stream as PaperRecord into the cache; the merge writer dedups
+    against the existing corpus. Search hits ARE the seeds — the `search` CLI
+    flags them is_seed=1 by provenance after the cache drains (the writer can't
+    set is_seed from a PaperRecord). Endpoints discovered later from refs/
+    citations keep is_seed=0 (ghosts).
   * Checkpoints in Redis: `search:s2:ckpt:<query_id>` -> JSON list of
     completed sub_queries. Resumable on restart.
 
@@ -45,6 +48,11 @@ _SEARCH_FIELDS = (
 )
 
 _DEFAULT_SUB_LIMIT = 100   # papers per sub-query (matches original)
+
+# PaperRecord.source prefix for search hits. These ARE the seeds — the CLI flags
+# them is_seed=1 after the cache drains (the merge writer can't set is_seed from
+# a PaperRecord). Single source of truth for that match.
+SEARCH_SOURCE_PREFIX = 's2_search_factorial:'
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +184,7 @@ def _paper_record_from_search_hit(hit: dict, query_id, query_title: str,
         'sub_query':   sub_query,
     }, separators=(',', ':'))
     return PaperRecord(
-        source       = f's2_search_factorial:{query_id}',
+        source       = f'{SEARCH_SOURCE_PREFIX}{query_id}',
         doi          = doi,
         s2_id        = s2_id,
         title        = hit.get('title') or None,
@@ -202,9 +210,15 @@ def _paper_record_from_search_hit(hit: dict, query_id, query_title: str,
 _CKPT_KEY_PREFIX = 'search:s2:ckpt:'
 
 
+def _ckpt_key(cache, query_id) -> str:
+    """Namespaced checkpoint key, so two projects on the same Redis (and a
+    rebuilt DB) don't share/inherit each other's search progress."""
+    return cache._k(f'{_CKPT_KEY_PREFIX}{query_id}')
+
+
 def _ckpt_load(cache, query_id) -> set[str]:
     """Read the set of already-completed sub_queries for one top-level query."""
-    raw = cache._r.get(f'{_CKPT_KEY_PREFIX}{query_id}')
+    raw = cache._r.get(_ckpt_key(cache, query_id))
     if not raw:
         return set()
     try:
@@ -215,7 +229,7 @@ def _ckpt_load(cache, query_id) -> set[str]:
 
 def _ckpt_save(cache, query_id, completed: set[str]) -> None:
     cache._r.set(
-        f'{_CKPT_KEY_PREFIX}{query_id}',
+        _ckpt_key(cache, query_id),
         json.dumps(sorted(completed), separators=(',', ':')),
     )
 
